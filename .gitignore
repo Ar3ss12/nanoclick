@@ -1,3 +1,22 @@
+# ── Build artifacts ─────────────────────────────
 target/
+
+# ── Node (не використовується, але на всяк випадок) ──
 node_modules/
+
+# ── Logs ────────────────────────────────────────
 *.log
+
+# ── Documentation (не публікуємо) ───────────────
+docs/
+*.md
+!README.md
+!NEXT_STEPS_ROADMAP.md
+
+# ── Misc assets ─────────────────────────────────
+/1.png
+
+# ── Secrets / keys (ніколи не комітити!) ────────
+*.key
+*.key.pub
+.env
