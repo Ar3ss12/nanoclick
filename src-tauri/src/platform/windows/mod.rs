@@ -1,0 +1,1015 @@
+//! Windows platform — keyboard, mouse, hooks, cursor polling.
+
+pub mod keyboard;
+pub mod windows_hooks;
+
+pub use keyboard::{mouse_click, mouse_down, mouse_up, scroll_wheel, send_key, set_cursor_pos};
+pub use windows_hooks::{spawn_recorder_hooks, stop_recorder_hooks};
+
+use crate::core::action::MouseButton;
+use crate::scheduler::ClickScheduler;
+use rand::Rng;
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant};
+use tauri::{AppHandle, Emitter};
+use windows::Win32::Foundation::{LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+use windows::Win32::UI::WindowsAndMessaging::{
+    CallNextHookEx, GetCursorPos, SetCursorPos, SetWindowsHookExW, UnhookWindowsHookEx,
+    KBDLLHOOKSTRUCT, WH_KEYBOARD_LL,
+};
+
+/// Get current OS cursor position.
+pub fn get_cursor_pos() -> (i32, i32) {
+    unsafe {
+        let mut p = POINT { x: 0, y: 0 };
+        let _ = GetCursorPos(&mut p);
+        (p.x, p.y)
+    }
+}
+
+/// Native event handle — Rust-level atomic bool, cross-version compatible.
+pub type NativeEventHandle = Arc<AtomicBool>;
+
+/// Create a stop event.
+pub fn create_stop_event() -> Option<NativeEventHandle> {
+    Some(Arc::new(AtomicBool::new(false)))
+}
+
+/// Signal a stop event.
+pub fn signal_stop_event(handle: Option<NativeEventHandle>) {
+    if let Some(h) = handle {
+        h.store(true, Ordering::Release);
+    }
+}
+
+/// High-resolution interruptible timer — uses thread::sleep with poll for cancellation.
+pub struct PlatformTimer;
+
+impl PlatformTimer {
+    pub fn new() -> Self {
+        PlatformTimer
+    }
+
+    /// Wait until `target` or until `stop_handle` is signaled.
+    pub fn wait_until(&self, target: Instant, stop_handle: NativeEventHandle) -> bool {
+        loop {
+            let now = Instant::now();
+            if now >= target {
+                return true;
+            }
+            if stop_handle.load(Ordering::Acquire) {
+                return false;
+            }
+            let remaining = target.duration_since(now);
+            let chunk = remaining.min(Duration::from_millis(10));
+            thread::sleep(chunk);
+        }
+    }
+}
+
+impl Default for PlatformTimer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Extended click with full options.
+pub fn click_mouse_ext(
+    button: &str,
+    _click_type: &str,
+    position_mode: &str,
+    fixed_x: i32,
+    fixed_y: i32,
+    jitter_radius: u32,
+) -> bool {
+    let (mut target_x, mut target_y) = if position_mode == "fixed" {
+        (fixed_x, fixed_y)
+    } else {
+        get_cursor_pos()
+    };
+
+    if jitter_radius > 0 {
+        let radius = jitter_radius as i32;
+        let mut rng = rand::thread_rng();
+        let dx = rng.gen_range(-radius..=radius);
+        let dy = rng.gen_range(-radius..=radius);
+        target_x += dx;
+        target_y += dy;
+        unsafe {
+            let _ = SetCursorPos(target_x, target_y);
+        }
+    }
+
+    let mb = match button {
+        "right" => MouseButton::Right,
+        "middle" => MouseButton::Middle,
+        "x1" => MouseButton::X1,
+        "x2" => MouseButton::X2,
+        _ => MouseButton::Left,
+    };
+    mouse_click(mb);
+    true
+}
+
+/// Release any currently-held mouse button.
+pub fn release_mouse_hold(button: &str) {
+    let mb = match button {
+        "right" => MouseButton::Right,
+        "middle" => MouseButton::Middle,
+        "x1" => MouseButton::X1,
+        "x2" => MouseButton::X2,
+        _ => MouseButton::Left,
+    };
+    mouse_up(mb);
+}
+
+/// Spawn the global hotkey listener thread.
+pub fn spawn_global_hotkey_listener(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
+    if GLOBAL_HOTKEY_RUNNING.swap(true, Ordering::AcqRel) {
+        crate::debug_log_internal("warn", "[Hotkeys] listener already running");
+        return;
+    }
+    GLOBAL_HOTKEY_STOP.store(false, Ordering::Release);
+    thread::spawn(move || {
+        run_keyboard_hook(scheduler, app_handle);
+        GLOBAL_HOTKEY_RUNNING.store(false, Ordering::Release);
+    });
+}
+
+/// Stop the global hook and release its channel. Safe to call repeatedly.
+pub fn shutdown_global_hotkey_listener() {
+    GLOBAL_HOTKEY_STOP.store(true, Ordering::Release);
+    if let Some(channel) = GLOBAL_HOTKEY_TX.get() {
+        *channel.lock().unwrap() = None;
+    }
+}
+
+fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
+    crate::debug_log_internal("stage-ok", "[Hotkeys] starting global listener");
+
+    let (event_tx, event_rx) = mpsc::channel::<GlobalKeyEvent>();
+    let channel = GLOBAL_HOTKEY_TX.get_or_init(|| StdMutex::new(None));
+    *channel.lock().unwrap() = Some(event_tx);
+
+    unsafe extern "system" fn keyboard_proc(
+        n_code: i32,
+        w_param: WPARAM,
+        l_param: LPARAM,
+    ) -> LRESULT {
+        if n_code == 0 {
+            let kb = *(l_param.0 as *const KBDLLHOOKSTRUCT);
+            let message = w_param.0;
+            let is_down = message == 0x0100 || message == 0x0104;
+            let is_up = message == 0x0101 || message == 0x0105;
+            if (is_down || is_up) && kb.vkCode != 0 {
+                if let Some(lock) = GLOBAL_HOTKEY_TX.get() {
+                    if let Ok(sender) = lock.lock() {
+                        if let Some(sender) = sender.as_ref() {
+                            let _ = sender.send(GlobalKeyEvent {
+                                vk: kb.vkCode as u16,
+                                is_down,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        CallNextHookEx(None, n_code, w_param, l_param)
+    }
+
+    let hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), None, 0) };
+    let _hook = match hook {
+        Ok(hh) => {
+            crate::debug_log_internal("stage-ok", "[Hotkeys] WH_KEYBOARD_LL installed");
+            hh
+        }
+        Err(e) => {
+            *channel.lock().unwrap() = None;
+            crate::debug_log_internal(
+                "error",
+                &format!("[Hotkeys] WH_KEYBOARD_LL install failed: {:?}", e),
+            );
+            return;
+        }
+    };
+
+    crate::debug_log_internal("stage-ok", "[Hotkeys] entering event-driven loop");
+
+    let mut snapshot = HotkeySnapshot::from_scheduler(&scheduler);
+    let mut bindings = HotkeyBindings::from_snapshot(&snapshot);
+    log_bindings(&bindings);
+    let mut held = HashSet::<u16>::new();
+    let mut poll_iter = 0u64;
+
+    while !GLOBAL_HOTKEY_STOP.load(Ordering::Acquire) {
+        poll_iter += 1;
+        let received = event_rx.recv_timeout(Duration::from_millis(100));
+        let next_snapshot = HotkeySnapshot::from_scheduler(&scheduler);
+        if next_snapshot != snapshot {
+            snapshot = next_snapshot;
+            bindings = HotkeyBindings::from_snapshot(&snapshot);
+            log_bindings(&bindings);
+        }
+        let fallback_events = if received.is_err() {
+            held.retain(|&key| key_down(key));
+            bindings
+                .all_groups()
+                .iter()
+                .flat_map(|group| group.iter())
+                .filter(|combo| {
+                    key_down(combo.trigger) && combo.required.iter().all(|key| key_down(*key))
+                })
+                .map(|combo| GlobalKeyEvent {
+                    vk: combo.trigger,
+                    is_down: true,
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let events = received.into_iter().chain(fallback_events.into_iter());
+        for event in events {
+            let was_held = held.iter().any(|&key| key_code_matches(event.vk, key));
+            crate::debug_log_internal(
+                "info",
+                &format!(
+                    "[Hotkeys][diag] last_event vk=0x{:02X} down={} held_before={:?}",
+                    event.vk, event.is_down, held
+                ),
+            );
+            if matches!(event.vk, 0x23 | 0x31 | 0x38 | 0x61 | 0x6A) {
+                crate::debug_log_internal(
+                    "info",
+                    &format!(
+                        "[Hotkeys] numpad diagnostic: vk=0x{:02X} down={} was_held={} held={:?}",
+                        event.vk, event.is_down, was_held, held
+                    ),
+                );
+            }
+            if event.is_down {
+                held.insert(event.vk);
+                if !was_held {
+                    fire_hotkey_group(&bindings.toggle, event.vk, &held, || {
+                        crate::debug_log_internal(
+                            "stage-ok",
+                            "[Hotkeys][diag] fired_action=toggle",
+                        );
+                        let prev = scheduler.is_active();
+                        let mode = scheduler.hotkey_toggle(Some(&app_handle));
+                        crate::debug_log_internal(
+                            "stage-ok",
+                            &format!("[Hotkeys] toggle fired: was_active={} mode={}", prev, mode),
+                        );
+                    });
+                    fire_hotkey_group(&bindings.mode_switch, event.vk, &held, || {
+                        crate::debug_log_internal(
+                            "stage-ok",
+                            "[Hotkeys][diag] fired_action=mode_switch",
+                        );
+                        scheduler.toggle_mode(Some(&app_handle));
+                    });
+                    fire_hotkey_group(&bindings.emergency_stop, event.vk, &held, || {
+                        crate::debug_log_internal(
+                            "stage-ok",
+                            "[Hotkeys][diag] fired_action=emergency_stop",
+                        );
+                        scheduler.set_active(false, Some(&app_handle));
+                        if let Some(exec) = crate::core::global() {
+                            exec.stop();
+                        }
+                    });
+                    fire_hotkey_group(&bindings.speed_up, event.vk, &held, || {
+                        crate::debug_log_internal(
+                            "stage-ok",
+                            "[Hotkeys][diag] fired_action=speed_up",
+                        );
+                        scheduler.adjust_cps(1.0, Some(&app_handle));
+                    });
+                    fire_hotkey_group(&bindings.slow_down, event.vk, &held, || {
+                        crate::debug_log_internal(
+                            "stage-ok",
+                            "[Hotkeys][diag] fired_action=slow_down",
+                        );
+                        scheduler.adjust_cps(-1.0, Some(&app_handle));
+                    });
+                    fire_hotkey_group(&bindings.capture_pos, event.vk, &held, || {
+                        crate::debug_log_internal(
+                            "stage-ok",
+                            "[Hotkeys][diag] fired_action=capture_pos",
+                        );
+                        let pos = get_cursor_pos();
+                        let _ = app_handle.emit("global-capture-pos", pos);
+                    });
+                    fire_hotkey_group(&bindings.record_toggle, event.vk, &held, || {
+                        crate::debug_log_internal(
+                            "stage-ok",
+                            "[Hotkeys][diag] fired_action=record_toggle",
+                        );
+                        let _ = app_handle.emit("global-record-toggle", ());
+                    });
+                }
+            } else {
+                held.retain(|&key| !key_code_matches(event.vk, key));
+            }
+        }
+        if poll_iter % 100 == 0 {
+            crate::debug_log_internal("info", "[Hotkeys] event-driven heartbeat");
+        }
+    }
+
+    unsafe {
+        let _ = UnhookWindowsHookEx(_hook);
+    }
+    crate::debug_log_internal("stage-ok", "[Hotkeys] listener stopped and hook released");
+}
+
+#[derive(Clone, Copy)]
+struct GlobalKeyEvent {
+    vk: u16,
+    is_down: bool,
+}
+
+static GLOBAL_HOTKEY_TX: OnceLock<StdMutex<Option<Sender<GlobalKeyEvent>>>> = OnceLock::new();
+static GLOBAL_HOTKEY_STOP: AtomicBool = AtomicBool::new(false);
+static GLOBAL_HOTKEY_RUNNING: AtomicBool = AtomicBool::new(false);
+
+fn fire_hotkey_group<F: FnOnce()>(group: &[HotkeyCombo], vk: u16, held: &HashSet<u16>, fire: F) {
+    if group
+        .iter()
+        .any(|combo| combo_matches(combo, vk, held, key_down))
+    {
+        fire();
+    } else if group.iter().any(|combo| combo.trigger_matches(vk)) {
+        crate::debug_log_internal(
+            "warn",
+            &format!(
+                "[Hotkeys][diag] reject_reason=required_key_not_held trigger=0x{:02X} held={:?}",
+                vk, held
+            ),
+        );
+    }
+}
+
+fn combo_matches<F: Fn(u16) -> bool>(
+    combo: &HotkeyCombo,
+    vk: u16,
+    held: &HashSet<u16>,
+    physical_key_down: F,
+) -> bool {
+    combo.trigger_matches(vk)
+        && combo.required.iter().all(|key| {
+            held.iter().any(|actual| key_code_matches(*key, *actual))
+                // Low-level hooks can miss an intermediate key-down while
+                // another application owns the foreground input.
+                || physical_key_down(*key)
+        })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HotkeySnapshot {
+    toggle: String,
+    mode_switch: String,
+    emergency_stop: String,
+    speed_up: String,
+    slow_down: String,
+    capture_pos: String,
+    record_toggle: bool,
+    record_hotkey: String,
+}
+
+impl HotkeySnapshot {
+    fn from_scheduler(scheduler: &ClickScheduler) -> Self {
+        let cfg = scheduler.get_config();
+        HotkeySnapshot {
+            toggle: cfg.hotkey_toggle,
+            mode_switch: cfg.hotkey_mode_switch,
+            emergency_stop: cfg.hotkey_emergency_stop,
+            speed_up: cfg.hotkey_speed_up,
+            slow_down: cfg.hotkey_slow_down,
+            capture_pos: cfg.hotkey_capture_pos,
+            record_toggle: cfg.hotkey_record_toggle,
+            record_hotkey: cfg.hotkey_record,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct HotkeyCombo {
+    required: Vec<u16>,
+    trigger: u16,
+}
+
+impl HotkeyCombo {
+    fn trigger_matches(&self, actual: u16) -> bool {
+        key_code_matches(self.trigger, actual)
+    }
+}
+
+struct HotkeyBindings {
+    toggle: Vec<HotkeyCombo>,
+    mode_switch: Vec<HotkeyCombo>,
+    emergency_stop: Vec<HotkeyCombo>,
+    speed_up: Vec<HotkeyCombo>,
+    slow_down: Vec<HotkeyCombo>,
+    capture_pos: Vec<HotkeyCombo>,
+    record_toggle: Vec<HotkeyCombo>,
+    invalid_bindings: usize,
+}
+
+impl HotkeyBindings {
+    fn all_groups(&self) -> [&[HotkeyCombo]; 7] {
+        [
+            &self.toggle,
+            &self.mode_switch,
+            &self.emergency_stop,
+            &self.speed_up,
+            &self.slow_down,
+            &self.capture_pos,
+            &self.record_toggle,
+        ]
+    }
+}
+
+impl HotkeyBindings {
+    fn from_snapshot(snapshot: &HotkeySnapshot) -> Self {
+        let (toggle, mut invalid_bindings) = combos_from_label(&snapshot.toggle);
+        let (mode_switch, invalid) = combos_from_label(&snapshot.mode_switch);
+        invalid_bindings += invalid;
+        let (emergency_stop, invalid) = combos_from_label(&snapshot.emergency_stop);
+        invalid_bindings += invalid;
+        let (speed_up, invalid) = combos_from_label(&snapshot.speed_up);
+        invalid_bindings += invalid;
+        let (slow_down, invalid) = combos_from_label(&snapshot.slow_down);
+        invalid_bindings += invalid;
+        let (capture_pos, invalid) = combos_from_label(&snapshot.capture_pos);
+        invalid_bindings += invalid;
+        let (record_toggle, invalid) = if snapshot.record_toggle {
+            combos_from_label(&snapshot.record_hotkey)
+        } else {
+            (Vec::new(), 0)
+        };
+        invalid_bindings += invalid;
+        HotkeyBindings {
+            toggle,
+            mode_switch,
+            emergency_stop,
+            speed_up,
+            slow_down,
+            capture_pos,
+            record_toggle,
+            invalid_bindings,
+        }
+    }
+}
+
+fn combos_from_label(label: &str) -> (Vec<HotkeyCombo>, usize) {
+    let groups: Vec<&str> = label
+        .split(|c: char| c == '/' || c == '|')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    let mut invalid = 0;
+    let combos = groups
+        .into_iter()
+        .filter_map(|group| match parse_hotkey_combo(group) {
+            Some(combo) => Some(combo),
+            None => {
+                invalid += 1;
+                crate::debug_log_internal(
+                    "warn",
+                    &format!("[Hotkeys][diag] reject_reason=invalid_binding value={group:?}"),
+                );
+                None
+            }
+        })
+        .collect();
+    (combos, invalid)
+}
+
+fn log_bindings(bindings: &HotkeyBindings) {
+    crate::debug_log_internal(
+        "stage-ok",
+        &format!(
+            "[Hotkeys] resolved: toggle={} mode={} emergency={} speed_up={} slow_down={} capture={} record={}",
+            bindings.toggle.len(),
+            bindings.mode_switch.len(),
+            bindings.emergency_stop.len(),
+            bindings.speed_up.len(),
+            bindings.slow_down.len(),
+            bindings.capture_pos.len(),
+            bindings.record_toggle.len(),
+        ),
+    );
+    crate::debug_log_internal(
+        "stage-ok",
+        &format!(
+            "[Hotkeys][diag] binding_parsed total={}",
+            bindings
+                .all_groups()
+                .iter()
+                .map(|group| group.len())
+                .sum::<usize>()
+        ),
+    );
+    if bindings.invalid_bindings > 0 {
+        crate::debug_log_internal(
+            "warn",
+            &format!(
+                "[Hotkeys][diag] invalid_binding_count={}",
+                bindings.invalid_bindings
+            ),
+        );
+    }
+}
+
+/// Parse a single key label (the part after the last `+` in a combo).
+/// Returns the virtual-key code (VK_*) for the named key, or `None` if we
+/// don't recognize it.
+///
+/// Supported forms (case-insensitive):
+///   - Single ASCII letter: `R`, `K`, `a`, `z`
+///   - Single ASCII digit:  `0`–`9`
+///   - Function keys:        `F1`–`F24`
+///   - Specials:             `Escape`/`Esc`, `Tab`, `Space`, `Enter`/`Return`,
+///                           `Backspace`/`Bs`, `Delete`/`Del`, `Insert`/`Ins`,
+///                           `Home`, `End`, `PageUp`/`PgUp`, `PageDown`/`PgDn`,
+///                           `Up`, `Down`, `Left`, `Right`,
+///                           `Caps`/`CapsLock`, `Shift`, `Ctrl`, `Alt`, `Win`/`Meta`
+///   - Numpad digits:        `Num0`–`Num9`
+fn vk_from_label(label: &str) -> Option<u16> {
+    let l = label.trim();
+    if l.is_empty() {
+        return None;
+    }
+
+    // Single character — letter or digit.
+    if l.len() == 1 {
+        let c = l.chars().next().unwrap();
+        if c.is_ascii_alphabetic() {
+            return Some(0x41 + (c.to_ascii_uppercase() as u16 - b'A' as u16));
+        }
+        if c.is_ascii_digit() {
+            return Some(0x30 + c.to_digit(10).unwrap() as u16);
+        }
+    }
+
+    // Function keys F1..F24.
+    if let Some(rest) = l.strip_prefix(['f', 'F']) {
+        if let Ok(n) = rest.parse::<u32>() {
+            if (1..=24).contains(&n) {
+                return Some(0x70 + (n - 1) as u16); // VK_F1 = 0x70
+            }
+        }
+    }
+
+    // Numpad digits.
+    if let Some(rest) = l.strip_prefix("Num") {
+        if let Ok(n) = rest.parse::<u32>() {
+            if (0..=9).contains(&n) {
+                return Some(0x60 + n as u16); // VK_NUMPAD0 = 0x60
+            }
+        }
+    }
+
+    // Named special keys (case-insensitive).
+    let lower = l.to_ascii_lowercase();
+    let vk = match lower.as_str() {
+        "=" | "+" | "plus" => 0xBB,       // VK_OEM_PLUS
+        "*" | "asterisk" => 0x6A,         // VK_MULTIPLY / numpad *
+        "-" | "minus" => 0xBD,            // VK_OEM_MINUS
+        "," => 0xBC,                      // VK_OEM_COMMA
+        "." => 0xBE,                      // VK_OEM_PERIOD
+        "/" => 0xBF,                      // VK_OEM_2
+        "\\" => 0xDC,                     // VK_OEM_5
+        "escape" | "esc" => 0x1B,         // VK_ESCAPE
+        "tab" => 0x09,                    // VK_TAB
+        "space" | "spacebar" => 0x20,     // VK_SPACE
+        "enter" | "return" => 0x0D,       // VK_RETURN
+        "backspace" | "bs" => 0x08,       // VK_BACK
+        "delete" | "del" => 0x2E,         // VK_DELETE
+        "insert" | "ins" => 0x2D,         // VK_INSERT
+        "home" => 0x24,                   // VK_HOME
+        "end" => 0x23,                    // VK_END
+        "pageup" | "pgup" => 0x21,        // VK_PRIOR
+        "pagedown" | "pgdn" => 0x22,      // VK_NEXT
+        "up" => 0x26,                     // VK_UP
+        "down" => 0x28,                   // VK_DOWN
+        "left" => 0x25,                   // VK_LEFT
+        "right" => 0x27,                  // VK_RIGHT
+        "caps" | "capslock" => 0x14,      // VK_CAPITAL
+        "shift" => 0x10,                  // VK_SHIFT
+        "ctrl" | "control" => 0x11,       // VK_CONTROL
+        "alt" | "menu" => 0x12,           // VK_MENU
+        "win" | "meta" | "super" => 0x5B, // VK_LWIN
+        "apps" | "menu2" => 0x5D,         // VK_APPS
+        _ => return None,
+    };
+    Some(vk)
+}
+
+/// Parse a complete hotkey combo like `Ctrl+Alt+M` or `*+1`.
+/// Every token before the last one must be held while the final token is
+/// pressed. This supports both named modifiers and arbitrary key chords.
+fn parse_hotkey_combo(label: &str) -> Option<HotkeyCombo> {
+    let parts: Vec<&str> = label.split('+').map(|s| s.trim()).collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let key_part = parts[parts.len() - 1];
+    let required = parts[..parts.len() - 1]
+        .iter()
+        .map(|part| vk_from_label(part))
+        .collect::<Option<Vec<_>>>()?;
+    let vk = vk_from_label(key_part)?;
+    Some(HotkeyCombo {
+        required,
+        trigger: vk,
+    })
+}
+
+fn key_code_matches(expected: u16, actual: u16) -> bool {
+    match expected {
+        0x10 => matches!(actual, 0x10 | 0xA0 | 0xA1),
+        0x11 => matches!(actual, 0x11 | 0xA2 | 0xA3),
+        0x12 => matches!(actual, 0x12 | 0xA4 | 0xA5),
+        0x5B => matches!(actual, 0x5B | 0x5C),
+        // `*` may arrive as Numpad Multiply (0x6A) or as Shift+8 (0x38).
+        0x6A => matches!(actual, 0x6A | 0x38),
+        // A saved digit can originate from the top row, NumLock-on numpad,
+        // or the navigation key emitted by that numpad key with NumLock off.
+        0x30..=0x39 => {
+            actual == expected
+                || actual == 0x60 + (expected - 0x30)
+                || numpad_navigation_vk(expected - 0x30) == Some(actual)
+        }
+        _ => expected == actual,
+    }
+}
+
+fn numpad_navigation_vk(digit: u16) -> Option<u16> {
+    // VK values produced by the numeric keypad when NumLock is off.
+    match digit {
+        0 => Some(0x2D), // Insert
+        1 => Some(0x23), // End
+        2 => Some(0x28), // Down
+        3 => Some(0x22), // PageDown
+        4 => Some(0x25), // Left
+        5 => Some(0x0C), // Clear
+        6 => Some(0x27), // Right
+        7 => Some(0x24), // Home
+        8 => Some(0x26), // Up
+        9 => Some(0x21), // PageUp
+        _ => None,
+    }
+}
+
+fn key_down(vk: u16) -> bool {
+    if vk == 0x6A {
+        return unsafe {
+            (GetAsyncKeyState(0x6A) as i32 & 0x8000) != 0
+                || (GetAsyncKeyState(0x38) as i32 & 0x8000) != 0
+        };
+    }
+    if (0x30..=0x39).contains(&vk) {
+        let numpad_vk = 0x60 + (vk - 0x30);
+        let navigation_vk = numpad_navigation_vk(vk - 0x30);
+        return unsafe {
+            (GetAsyncKeyState(vk as i32) as i32 & 0x8000) != 0
+                || (GetAsyncKeyState(numpad_vk as i32) as i32 & 0x8000) != 0
+                || navigation_vk
+                    .is_some_and(|nav| (GetAsyncKeyState(nav as i32) as i32 & 0x8000) != 0)
+        };
+    }
+    unsafe { (GetAsyncKeyState(vk as i32) as i32 & 0x8000) != 0 }
+}
+
+#[cfg(test)]
+mod hotkey_tests {
+    use super::*;
+
+    #[test]
+    fn star_plus_one_is_parsed_as_a_two_key_combo() {
+        let combo = parse_hotkey_combo("*+1").expect("*+1 should parse");
+        assert_eq!(combo.required, vec![0x6A]);
+        assert_eq!(combo.trigger, 0x31);
+        assert!(key_code_matches(0x6A, 0x6A));
+        assert!(key_code_matches(0x6A, 0x38));
+        assert!(key_code_matches(0x31, 0x61));
+        assert!(key_code_matches(0x31, 0x23));
+    }
+
+    #[test]
+    fn modifier_combo_requires_all_keys_and_matches_trigger() {
+        let combo = parse_hotkey_combo("Ctrl+Alt+M").expect("combo should parse");
+        let held = HashSet::from([0x11, 0x12]);
+        assert!(combo_matches(&combo, 0x4D, &held, |_| false));
+        assert!(!combo_matches(&combo, 0x4D, &HashSet::from([0x11]), |_| {
+            false
+        }));
+        assert!(!combo_matches(&combo, 0x4E, &held, |_| false));
+    }
+
+    #[test]
+    fn physical_state_fallback_completes_missing_required_key_event() {
+        let combo = parse_hotkey_combo("Ctrl+P").expect("combo should parse");
+        assert!(combo_matches(&combo, 0x50, &HashSet::new(), |key| key == 0x11));
+    }
+
+    #[test]
+    fn alternate_hotkey_groups_parse_independently() {
+        let (combos, invalid) = combos_from_label("R / K | F6");
+        assert_eq!(combos.len(), 3);
+        assert_eq!(invalid, 0);
+        assert!(combos.iter().all(|combo| combo.required.is_empty()));
+    }
+
+    #[test]
+    fn invalid_binding_is_reported_without_disabling_valid_alternatives() {
+        let (combos, invalid) = combos_from_label("R / NotARealKey / K");
+        assert_eq!(combos.len(), 2);
+        assert_eq!(invalid, 1);
+    }
+}
+
+/// ── v4.1 physical integration tests ─────────────────────────────────
+/// Inject real keyboard events via `SendInput` and verify that a
+/// `WH_KEYBOARD_LL` hook receives them with correct VK codes and down/up
+/// ordering, and that the production matcher fires on the captured stream.
+#[cfg(test)]
+mod physical_integration_tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::sync::Once;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        KEYBDINPUT, KEYEVENTF_KEYUP, INPUT, INPUT_0, INPUT_KEYBOARD, SendInput, VIRTUAL_KEY,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, GetMessageW, MSG, TranslateMessage,
+    };
+
+    static CAPTURE_TX: OnceLock<StdMutex<Option<mpsc::Sender<(u16, bool)>>>> = OnceLock::new();
+    static HOOK_SETUP: Once = Once::new();
+    /// Serializes physical tests: the hook is process-global.
+    static TEST_LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+
+    fn push_event(vk: u16, is_down: bool) {
+        if let Some(tx) = CAPTURE_TX
+            .get()
+            .and_then(|l| l.lock().ok())
+            .and_then(|g| g.clone())
+        {
+            let _ = tx.send((vk, is_down));
+        }
+    }
+
+    /// Install ONE capture hook for the whole test binary (idempotent).
+    fn ensure_hook() {
+        HOOK_SETUP.call_once(|| {
+            let (tx, rx) = mpsc::channel();
+            *CAPTURE_TX.get_or_init(|| StdMutex::new(None)).lock().unwrap() = Some(tx);
+            // Keep the receiver alive forever.
+            std::mem::forget(rx);
+
+            unsafe extern "system" fn capture_proc(
+                n_code: i32,
+                w_param: WPARAM,
+                l_param: LPARAM,
+            ) -> LRESULT {
+                if n_code == 0 {
+                    let kb = *(l_param.0 as *const KBDLLHOOKSTRUCT);
+                    let msg = w_param.0;
+                    let is_down = msg == 0x0100 || msg == 0x0104;
+                    let is_up = msg == 0x0101 || msg == 0x0105;
+                    if (is_down || is_up) && kb.vkCode != 0 {
+                        push_event(kb.vkCode as u16, is_down);
+                    }
+                }
+                CallNextHookEx(None, n_code, w_param, l_param)
+            }
+
+            let res = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(capture_proc), None, 0) };
+            crate::debug_log_internal(
+                "info",
+                &format!("[tests] capture hook install: {}", res.is_ok()),
+            );
+            // Dedicated pumping thread — must never exit while tests run.
+            thread::spawn(move || {
+                let mut msg = MSG::default();
+                unsafe {
+                    while GetMessageW(&mut msg, None, 0, 0).into() {
+                        let _ = TranslateMessage(&msg);
+                        DispatchMessageW(&msg);
+                    }
+                }
+            });
+        });
+        // Let the pump spin up on first use.
+        thread::sleep(Duration::from_millis(400));
+    }
+
+    fn inject_key(vk: u16, up: bool) {
+        let input = INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(vk),
+                    wScan: 0,
+                    dwFlags: if up { KEYEVENTF_KEYUP } else { Default::default() },
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        unsafe {
+            SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
+        }
+    }
+
+    /// Collect events for our VKs until each has been seen `per_vk` times.
+    fn drain_filtered(
+        rx: &mpsc::Receiver<(u16, bool)>,
+        vks: &[u16],
+        per_vk: usize,
+    ) -> Vec<(u16, bool)> {
+        let mut out = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while out.len() < vks.len() * per_vk && Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(300)) {
+                Ok((vk, down)) => {
+                    crate::debug_log_internal(
+                        "info",
+                        &format!("[tests] captured vk={:#04x} down={}", vk, down),
+                    );
+                    if vks.contains(&vk) {
+                        out.push((vk, down));
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        out
+    }
+
+    /// Swap in a fresh channel and return its receiver. Any events sent to
+    /// the previous sender are lost - acceptable because tests serialize on
+    /// TEST_LOCK and drain everything they inject.
+    fn swap_channel() -> mpsc::Receiver<(u16, bool)> {
+        let (tx, rx) = mpsc::channel();
+        *CAPTURE_TX.get_or_init(|| StdMutex::new(None)).lock().unwrap() = Some(tx);
+        rx
+    }
+
+
+    /// Inject a key sequence and drain; if the hook was still warming up and
+    /// nothing arrived, retry once after a longer settle.
+    fn inject_and_drain(
+        rx: &mpsc::Receiver<(u16, bool)>,
+        vks: &[u16],
+        per_vk: usize,
+        inject: &dyn Fn(),
+    ) -> Vec<(u16, bool)> {
+        inject();
+        let events = drain_filtered(rx, vks, per_vk);
+        if events.is_empty() {
+            // Hook warm-up race: retry with a fresh channel.
+            let rx2 = swap_channel();
+            thread::sleep(Duration::from_millis(250));
+            inject();
+            drain_filtered(&rx2, vks, per_vk)
+        } else {
+            events
+        }
+    }
+
+    #[test]
+    fn physical_sendinput_events_reach_hook_and_drive_matcher() {
+        let _serial = TEST_LOCK
+            .get_or_init(|| StdMutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        ensure_hook();
+        let rx = swap_channel();
+        thread::sleep(Duration::from_millis(200)); // settle before injecting
+
+        // ── Part 1: single key down/up ordering ──────────────────────
+        inject_key(0x52, false); // R down
+        thread::sleep(Duration::from_millis(40));
+        inject_key(0x52, true); // R up
+        let single = drain_filtered(&rx, &[0x52], 2);
+        assert!(
+            single.contains(&(0x52, true)) && single.contains(&(0x52, false)),
+            "single key: expected R down+up, got {single:?}"
+        );
+        let d = single.iter().position(|e| *e == (0x52, true)).unwrap();
+        let u = single.iter().position(|e| *e == (0x52, false)).unwrap();
+        assert!(d < u, "single key: down before up, got {single:?}");
+
+        // ── Part 2: modifier combo press order + matcher fires once ──
+        inject_key(0x11, false); // Ctrl down
+        thread::sleep(Duration::from_millis(40));
+        inject_key(0x4D, false); // M down
+        thread::sleep(Duration::from_millis(40));
+        inject_key(0x4D, true); // M up
+        thread::sleep(Duration::from_millis(40));
+        inject_key(0x11, true); // Ctrl up
+        let combo_events = drain_filtered(&rx, &[0x11, 0xA2, 0xA3, 0x4D], 2);
+        let ctrl_variants = [0x11_u16, 0xA2, 0xA3];
+        assert!(
+            combo_events
+                .iter()
+                .any(|(vk, down)| ctrl_variants.contains(vk) && *down),
+            "combo: missing Ctrl down, got {combo_events:?}"
+        );
+        assert!(
+            combo_events.contains(&(0x4D, true)) && combo_events.contains(&(0x4D, false)),
+            "combo: missing M down/up, got {combo_events:?}"
+        );
+        let combo = parse_hotkey_combo("Ctrl+M").expect("combo parses");
+        let mut held = HashSet::new();
+        let mut fired = 0;
+        for (vk, is_down) in &combo_events {
+            if *is_down {
+                held.insert(*vk);
+                if combo_matches(&combo, *vk, &held, |k| key_down(k)) {
+                    fired += 1;
+                }
+            } else {
+                held.retain(|&key| !key_code_matches(*vk, key));
+            }
+        }
+        assert_eq!(fired, 1, "combo: Ctrl+M must fire exactly once over {combo_events:?}");
+
+        // ── Part 3: numpad key arrives with expected VK ──────────────
+        inject_key(0x61, false); // NUMPAD1 down
+        thread::sleep(Duration::from_millis(40));
+        inject_key(0x61, true); // NUMPAD1 up
+        let numpad = drain_filtered(&rx, &[0x61], 2);
+        assert!(
+            numpad.contains(&(0x61, true)),
+            "numpad: expected NUMPAD1 down, got {numpad:?}"
+        );
+        let num_combo = parse_hotkey_combo("Num1").expect("Num1 parses");
+        assert_eq!(num_combo.trigger, 0x61);
+        assert!(combo_matches(&num_combo, 0x61, &HashSet::new(), |_| false));
+    }
+
+    #[test]
+    fn shutdown_flag_is_idempotent_and_resets_channel() {
+        // shutdown_global_hotkey_listener must be safe to call repeatedly
+        // and must clear the capture channel so a stale sender can't fire
+        // actions after shutdown.
+        shutdown_global_hotkey_listener();
+        shutdown_global_hotkey_listener();
+        assert!(GLOBAL_HOTKEY_STOP.load(Ordering::Acquire));
+        let channel_empty = GLOBAL_HOTKEY_TX
+            .get()
+            .and_then(|l| l.lock().ok())
+            .map(|g| g.is_none())
+            .unwrap_or(true);
+        assert!(channel_empty, "channel must be cleared after shutdown");
+        // Reset so other tests / the app can start a fresh listener.
+        GLOBAL_HOTKEY_STOP.store(false, Ordering::Release);
+    }
+
+    #[test]
+    fn key_up_removes_trigger_so_rising_edge_wont_refire_while_held() {
+        let combo = parse_hotkey_combo("Ctrl+P").expect("parses");
+
+        let mut held = HashSet::from([0x11_u16]);
+        held.insert(0x50);
+        assert!(combo_matches(&combo, 0x50, &held, |k| k == 0x11));
+
+        held.remove(&0x50);
+
+        held.clear();
+        assert!(!combo_matches(&combo, 0x50, &held, |_| false));
+    }
+
+    #[test]
+    fn binding_change_is_picked_up_without_listener_restart() {
+        let before = HotkeySnapshot {
+            toggle: "R".into(),
+            mode_switch: "Ctrl+Alt+M".into(),
+            emergency_stop: "Escape".into(),
+            speed_up: "Ctrl+=".into(),
+            slow_down: "Ctrl+-".into(),
+            capture_pos: "Ctrl+P".into(),
+            record_toggle: true,
+            record_hotkey: "F9".into(),
+        };
+        let bindings_before = HotkeyBindings::from_snapshot(&before);
+        assert!(bindings_before.toggle.iter().any(|c| c.trigger == 0x52));
+
+        let mut after = before.clone();
+        after.toggle = "T".into();
+        let bindings_after = HotkeyBindings::from_snapshot(&after);
+        assert_ne!(before, after, "snapshot diff must be detected");
+        assert!(bindings_after.toggle.iter().any(|c| c.trigger == 0x54));
+        assert!(!bindings_after.toggle.iter().any(|c| c.trigger == 0x52));
+    }
+}

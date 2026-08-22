@@ -1,0 +1,733 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NanoClick v3.0</title>
+  <link rel="stylesheet" href="style.css">
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;600&family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="app-shell">
+
+    <!-- SIDEBAR NAV -->
+    <aside class="sidebar">
+      <div class="sidebar-logo">
+        <img src="NanoClick.png" alt="NanoClick" class="sidebar-icon">
+      </div>
+      <nav class="sidebar-nav">
+        <button id="navDashboard" class="nav-item active" data-view="viewDashboard">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+          <span>Dashboard</span>
+        </button>
+        <button id="navPresets" class="nav-item" data-view="viewPresets">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg>
+          <span>Presets</span>
+        </button>
+        <button id="navAutomation" class="nav-item" data-view="viewAutomation">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+          <span>Automation</span>
+        </button>
+        <button id="navSettings" class="nav-item" data-view="viewSettings">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/></svg>
+          <span>Settings</span>
+        </button>
+        <button id="navHotkeys" class="nav-item" data-view="viewHotkeys">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M6 12h.01M10 12h.01M14 12h.01M18 12h.01M6 16h12"/></svg>
+          <span>Hotkeys</span>
+        </button>
+        <button id="navStats" class="nav-item" data-view="viewStats">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+          <span>Statistics</span>
+        </button>
+        <button id="navAbout" class="nav-item" data-view="viewAbout">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          <span>About</span>
+        </button>
+      </nav>
+    </aside>
+
+    <!-- MAIN CONTENT -->
+    <div class="main-content">
+
+      <!-- HEADER -->
+      <header class="app-header">
+        <div class="header-brand">
+          <img src="NanoClick.png" alt="NanoClick" class="header-icon">
+          <div class="header-titles">
+            <div class="header-name">NANOCLICK <span class="ver">v3.0</span> <span class="badge-pro">PRO</span></div>
+          </div>
+        </div>
+        <div class="header-status">
+          <button id="modeToggleBtn" class="mode-badge autoclicker prominent-mode-btn" title="Click or press shortcut to switch mode">
+            <span class="mode-icon">⚡</span>
+            <span class="mode-text">AUTOCLICKER MODE</span>
+            <span class="mode-shortcut-hint">[ Ctrl + Alt + M ]</span>
+          </button>
+        </div>
+      </header>
+
+      <!-- VIEWS -->
+      <div class="views-container">
+
+        <!-- DASHBOARD -->
+        <div id="viewDashboard" class="view active">
+          <!-- Metrics Row -->
+          <div class="metrics-row">
+            <div class="metric-card">
+              <div class="metric-top">
+                <svg class="metric-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                <span class="metric-label">TOTAL CLICKS</span>
+                <button class="metric-action">✕</button>
+              </div>
+              <div id="clickCounter" class="metric-value font-mono">000,000,000</div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-top">
+                <svg class="metric-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                <span class="metric-label">SPEED (CPS)</span>
+              </div>
+              <div id="displayCps" class="metric-value font-mono">29.0</div>
+            </div>
+          </div>
+
+          <!-- Start Button -->
+          <button id="toggleBtn" class="start-btn">
+            <span class="start-btn-icon">▶</span>
+            <div class="start-btn-text">
+              <span id="toggleBtnText">START AUTOMATION</span>
+              <span class="start-btn-hint">Ctrl + Alt + M</span>
+            </div>
+          </button>
+
+          <!-- Core Configuration -->
+          <div class="config-card">
+            <div class="config-card-header">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/></svg>
+              CORE CONFIGURATION
+            </div>
+            <div class="config-rows">
+              <div class="config-row">
+                <span class="config-label">Click Rate (CPS)</span>
+                <input type="range" id="cpsRange" class="slider" min="0.1" max="100" step="0.5" value="29">
+                <input type="number" id="cpsInput" class="num-input" min="0.1" max="100" step="0.5" value="29">
+              </div>
+              <div class="config-row">
+                <span class="config-label">Human Jitter (±%)</span>
+                <input type="range" id="randomRange" class="slider" min="0" max="30" step="0.5" value="7.5">
+                <input type="number" id="randomInput" class="num-input" min="0" max="30" step="0.5" value="7.5">
+              </div>
+              <div class="config-row">
+                <span class="config-label">Click Limit</span>
+                <input type="range" id="limitRange" class="slider" min="0" max="10000" step="1" value="0">
+                <input type="number" id="limitInput" class="num-input" min="0" max="1000000" step="100" value="0">
+                <span id="limitBadge" class="config-suffix limit-badge-infinity" title="0 = Unlimited">∞</span>
+              </div>
+              <div class="config-row">
+                <span class="config-label">Start Delay (sec)</span>
+                <input type="number" id="startDelayInput" class="num-input" min="0" max="300" step="1" value="0" placeholder="0 = Immediate">
+                <span class="config-suffix">sec</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Bottom Three Cards -->
+          <div class="bottom-cards">
+            <!-- Click Type -->
+            <div class="config-card small-card">
+              <div class="config-card-header">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 11V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v0"/><path d="M14 10V4a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v2"/><path d="M10 10.5V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2a8 8 0 0 1-7.4-4.95L2.4 13C2 12.1 2.4 11 3.3 10.6l.3-.1a2 2 0 0 1 2.3.8L7 13"/></svg>
+                CLICK TYPE
+              </div>
+              <select class="dropdown" id="clickTypeSelect">
+                <option value="left">Left Click</option>
+                <option value="right">Right Click</option>
+                <option value="middle">Middle Click</option>
+                <option value="x1">Side Button 1 (X1)</option>
+                <option value="x2">Side Button 2 (X2)</option>
+              </select>
+              <div class="radio-group">
+                <label class="radio-item selected"><input type="radio" name="clickMode" value="single" checked> Single Click</label>
+                <label class="radio-item"><input type="radio" name="clickMode" value="double"> Double Click</label>
+                <label class="radio-item"><input type="radio" name="clickMode" value="hold"> Hold Click</label>
+              </div>
+              <div id="holdSubSettings" class="sub-setting-box hidden">
+                <div class="sub-setting-row">
+                  <span class="sub-label">Hold Dur (ms)</span>
+                  <input type="number" id="holdDurationInput" class="num-input-sm" value="500" min="10" step="50">
+                </div>
+                <div class="sub-setting-row">
+                  <span class="sub-label">Hold Pause (ms)</span>
+                  <input type="number" id="holdIntervalInput" class="num-input-sm" value="1000" min="10" step="50">
+                </div>
+              </div>
+            </div>
+
+            <!-- Position -->
+            <div class="config-card small-card">
+              <div class="config-card-header">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg>
+                POSITION
+              </div>
+              <div class="radio-group">
+                <label class="radio-item selected"><input type="radio" name="posMode" value="cursor" checked> Current Cursor Position</label>
+                <label class="radio-item"><input type="radio" name="posMode" value="fixed"> Fixed Position</label>
+              </div>
+              <div class="xy-row">
+                <span>X</span><input type="number" id="posXInput" class="num-input-sm" value="100">
+                <span>·</span>
+                <span>Y</span><input type="number" id="posYInput" class="num-input-sm" value="100">
+                <button id="pickPosBtn" class="pick-pos-btn" title="Hover anywhere and press ENTER to capture position">🔍</button>
+              </div>
+              <div id="pickPosStatus" class="pick-pos-status hidden">PRESS ENTER TO CAPTURE</div>
+            </div>
+
+            <!-- Repeat -->
+            <div class="config-card small-card">
+              <div class="config-card-header">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+                REPEAT
+              </div>
+              <div class="radio-group">
+                <label class="radio-item selected"><input type="radio" name="repeatMode" value="unlimited" checked> Unlimited</label>
+                <label class="radio-item"><input type="radio" name="repeatMode" value="repeat"> Repeat</label>
+              </div>
+              <input type="number" id="repeatCountInput" class="num-input" value="0" min="0" style="margin-top:6px;" placeholder="Click count">
+              <div id="repeatSubSettings" class="sub-setting-box hidden" style="margin-top:6px;">
+                <div class="sub-setting-row">
+                  <span class="sub-label">Repeat Delay (ms)</span>
+                  <input type="number" id="repeatIntervalInput" class="num-input-sm" value="1000" min="0" step="100">
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- AUTO-STOP TIMERS CARD -->
+          <div class="config-card timer-card">
+            <div class="config-card-header">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/><line x1="4.93" y1="4.93" x2="7.76" y2="7.76"/><line x1="19.07" y1="4.93" x2="16.24" y2="7.76"/></svg>
+              AUTO-STOP TIMERS
+              <span id="timerActiveBadge" class="timer-active-badge hidden">ACTIVE</span>
+            </div>
+            <div class="timer-card-body">
+              <div class="timer-option">
+                <div class="timer-option-left">
+                  <div class="timer-option-icon">⏱️</div>
+                  <div class="timer-option-info">
+                    <div class="timer-option-title">Зупинити через</div>
+                    <div class="timer-option-desc">Автостоп після N хвилин роботи</div>
+                  </div>
+                </div>
+                <div class="timer-option-control">
+                  <input type="number" id="stopDurationInput" class="timer-input" min="0" max="1440" step="1" value="0" placeholder="0">
+                  <span class="timer-unit">хв</span>
+                </div>
+              </div>
+              <div class="timer-divider"></div>
+              <div class="timer-option">
+                <div class="timer-option-left">
+                  <div class="timer-option-icon">🕐</div>
+                  <div class="timer-option-info">
+                    <div class="timer-option-title">Зупинити о</div>
+                    <div class="timer-option-desc">Автостоп при настанні часу</div>
+                  </div>
+                </div>
+                <div class="timer-option-control">
+                  <input type="time" id="stopTimeInput" class="timer-input">
+                </div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- PRESETS -->
+        <div id="viewPresets" class="view">
+          <!-- Presets Header -->
+          <div class="presets-page-header">
+            <div class="presets-page-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+              <div>
+                <h2>Пресети</h2>
+                <p>Збережені конфігурації автоклікера</p>
+              </div>
+            </div>
+            <div class="presets-page-actions">
+              <button id="exportPresetsBtn" class="presets-tool-btn" title="Експортувати пресети у JSON файл">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Експорт
+              </button>
+              <button id="importPresetsBtn" class="presets-tool-btn" title="Імпортувати пресети з JSON файлу">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                Імпорт
+              </button>
+              <button id="saveCurrentAsPresetBtn" class="presets-tool-btn" title="Зберегти поточні налаштування як новий пресет">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+                Зберегти конфіг
+              </button>
+              <button id="createNewPresetBtn" class="presets-create-btn" title="Створити новий пресет з нуля">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                Новий пресет
+              </button>
+            </div>
+          </div>
+
+          <!-- Presets Grid -->
+          <div id="presetGridContainer" class="presets-grid-new">
+            <!-- Dynamically populated by JS -->
+          </div>
+
+          <!-- Empty State -->
+          <div id="presetsEmptyState" class="presets-empty hidden">
+            <div class="presets-empty-icon">🎯</div>
+            <div class="presets-empty-title">Пресетів ще немає</div>
+            <div class="presets-empty-desc">Натисніть «Новий пресет» щоб створити перший конфіг</div>
+          </div>
+        </div>
+
+        <!-- TRANSLUCENT RECORDING OVERLAY -->
+<div id="recordingOverlay" style="display:none;position:fixed;top:18px;left:50%;transform:translateX(-50%);z-index:10000;background:rgba(220,38,38,0.95);color:white;padding:10px 22px;border-radius:999px;font-weight:600;font-size:13px;box-shadow:0 4px 24px rgba(0,0,0,0.4);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,0.2);">
+  <span style="display:inline-block;width:10px;height:10px;background:white;border-radius:50%;margin-right:8px;animation:pulse 1.2s ease-in-out infinite;"></span>
+  <span id="recordingOverlayLabel">Recording…</span>
+  <span id="recordingOverlayCount" style="opacity:0.85;margin-left:10px;font-weight:400;">0 actions</span>
+</div>
+<style>
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.7); }
+}
+</style>
+
+<!-- AUTOMATION -->
+        <div id="viewAutomation" class="view">
+          <div class="config-card" style="margin-top:16px;">
+            <div class="config-card-header">🤖 AUTOMATION</div>
+            <p style="color:var(--text-dim);margin:6px 0 14px;">Record or build macros to automate multi-step sequences.</p>
+
+            <!-- Two paths: Record vs Build -->
+            <div style="display:flex;gap:10px;margin-bottom:10px;">
+              <button id="automationRecordBtn" class="btn-primary" style="flex:1;">
+                🔴 Record
+              </button>
+              <button id="automationBuildBtn" class="btn-secondary" style="flex:1;">
+                ＋ Build
+              </button>
+            </div>
+            <!-- ⚡ Optimize level toggle -->
+            <div style="display:flex;gap:10px;margin-bottom:14px;">
+              <button id="automationOptimizeBtn" class="btn-mini" style="flex:1;font-size:12px;">
+                ⚡ Balanced
+              </button>
+            </div>
+
+            <!-- Recording status (hidden by default) -->
+            <div id="automationRecordingStatus" style="display:none;background:rgba(239,68,68,0.15);border:1px solid #ef4444;border-radius:6px;padding:10px;margin-bottom:12px;">
+              <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#ef4444;animation:pulse 1s infinite;margin-right:8px;"></span>
+              <strong>Recording…</strong> click and type freely. Press <kbd style="background:#1a1d29;padding:2px 6px;border-radius:3px;">Esc</kbd> to stop.
+              <button id="automationStopRecordBtn" class="btn-danger" style="float:right;">⏹ Stop</button>
+            </div>
+
+            <!-- My Macros list -->
+            <div style="margin-top:18px;">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+                <h3 style="margin:0;font-size:14px;color:var(--text-bright);">📚 My Macros</h3>
+                <span id="automationMacroCount" style="color:var(--text-dim);font-size:12px;">0 macros</span>
+              </div>
+              <div id="automationMacroList" style="display:flex;flex-direction:column;gap:8px;">
+                <!-- Filled by renderMacroList() in main.js -->
+                <div class="empty-state" style="color:var(--text-dim);padding:20px;text-align:center;border:1px dashed var(--border);border-radius:6px;">
+                  No macros yet. Hit 🔴 Record or + Build to create your first one.
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- SETTINGS -->
+        <div id="viewSettings" class="view">
+          <!-- System & Storage -->
+          <div class="config-card">
+            <div class="config-card-header">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/></svg>
+              SYSTEM &amp; STORAGE
+            </div>
+            <div class="settings-path-row">
+              <div class="path-label">OS Config Path:</div>
+              <div class="path-box">
+                <code id="configPathDisplay" class="font-mono path-text">Loading...</code>
+                <button id="openConfigFolderBtn" class="path-btn" title="Open Config Folder in Explorer">📁</button>
+              </div>
+            </div>
+            <div class="settings-rows">
+              <div class="settings-row">
+                <span class="settings-label">GUI Lock Duration (ms)</span>
+                <input type="number" id="guiLockDelayInput" class="num-input-right" min="500" max="5000" step="100" value="1500">
+              </div>
+              <div class="settings-row">
+                <span class="settings-label">Jitter Radius (px)</span>
+                <input type="number" id="jitterRadiusInput" class="num-input-right" min="0" max="20" value="3">
+              </div>
+              <div class="settings-row">
+                <label class="checkbox-row">
+                  <input type="checkbox" id="rippleCheckbox" checked class="custom-checkbox">
+                  <span class="checkbox-box"></span>
+                  <span class="settings-label">Visual Click Ripple Effect</span>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <!-- Appearance + Behavior row -->
+          <div class="two-col-cards">
+            <div class="config-card">
+              <div class="config-card-header">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="13.5" cy="6.5" r="2.5"/><circle cx="19" cy="14" r="2.5"/><circle cx="6" cy="14" r="2.5"/></svg>
+                APPEARANCE
+              </div>
+              <div class="settings-row">
+                <span class="settings-label">Theme</span>
+                <select id="themeSelect" class="dropdown-right">
+                  <option value="cyberpunk">Dark Cyberpunk</option>
+                  <option value="emerald">Neon Grass</option>
+                  <option value="slate">Dark Slate</option>
+                  <option value="midnight">Midnight Blue</option>
+                  <option value="dracula">Dracula Crimson</option>
+                  <option value="amethyst">Amethyst Purple</option>
+                </select>
+              </div>
+              <div class="settings-label" style="margin-top:12px;margin-bottom:8px;">Accent Color</div>
+              <div class="color-swatches" id="accentSwatches">
+                <button class="swatch" data-accent="#10b981" style="background:#10b981;"></button>
+                <button class="swatch active" data-accent="#06b6d4" style="background:#06b6d4;"></button>
+                <button class="swatch" data-accent="#8b5cf6" style="background:#8b5cf6;"></button>
+                <button class="swatch" data-accent="#ec4899" style="background:#ec4899;"></button>
+                <button class="swatch" data-accent="#f97316" style="background:#f97316;"></button>
+                <button class="swatch" data-accent="#eab308" style="background:#eab308;"></button>
+              </div>
+            </div>
+
+            <div class="config-card">
+              <div class="config-card-header">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+                BEHAVIOR
+              </div>
+              <div class="checkbox-list">
+                <label class="checkbox-row">
+                  <input type="checkbox" id="startMinimizedCheckbox" class="custom-checkbox">
+                  <span class="checkbox-box"></span>
+                  <span>Start Minimized to Tray</span>
+                </label>
+                <label class="checkbox-row">
+                  <input type="checkbox" id="autostartCheckbox" class="custom-checkbox">
+                  <span class="checkbox-box"></span>
+                  <span>Run on Windows Startup</span>
+                </label>
+                <label class="checkbox-row">
+                  <input type="checkbox" id="minimizeToTrayCheckbox" checked class="custom-checkbox">
+                  <span class="checkbox-box"></span>
+                  <span>Minimize to Tray on Close</span>
+                </label>
+                <label class="checkbox-row">
+                  <input type="checkbox" id="notificationsCheckbox" checked class="custom-checkbox">
+                  <span class="checkbox-box"></span>
+                  <span>Show Notifications</span>
+                </label>
+                <label class="checkbox-row">
+                  <input type="checkbox" id="pauseFocusLossCheckbox" class="custom-checkbox">
+                  <span class="checkbox-box"></span>
+                  <span>Auto-Pause on Focus Loss</span>
+                </label>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- HOTKEYS -->
+        <div id="viewHotkeys" class="view">
+          <div class="config-card">
+            <div class="config-card-header">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M6 12h.01M10 12h.01M14 12h.01M18 12h.01M6 16h12"/></svg>
+              HOTKEYS &amp; SHORTCUTS
+            </div>
+            <div class="settings-rows">
+              <div class="settings-row">
+                <span class="settings-label">Toggle Autoclicker (Start/Stop)</span>
+                <button id="hotkeyRecordBtn" class="hotkey-recorder-btn" data-target="toggle" title="Click to record new shortcut">
+                  <span class="key-icon">⌨️</span>
+                  <span id="hotkeyRecordLabel" class="font-mono">R / K</span>
+                </button>
+              </div>
+              <div class="settings-row">
+                <span class="settings-label">Work / Autoclicker Mode Switch</span>
+                <button id="modeSwitchRecordBtn" class="hotkey-recorder-btn" data-target="mode_switch" title="Click to record new shortcut">
+                  <span class="key-icon">⚡</span>
+                  <span id="modeSwitchRecordLabel" class="font-mono">Ctrl+Alt+M</span>
+                </button>
+              </div>
+              <div class="settings-row">
+                <span class="settings-label">Emergency Instant Kill</span>
+                <button id="emergencyRecordBtn" class="hotkey-recorder-btn" data-target="emergency_stop" title="Click to record new shortcut">
+                  <span class="key-icon">🛑</span>
+                  <span id="emergencyRecordLabel" class="font-mono">Escape</span>
+                </button>
+              </div>
+              <div class="settings-row">
+                <span class="settings-label">Speed Up (+1 CPS)</span>
+                <button id="speedUpRecordBtn" class="hotkey-recorder-btn" data-target="speed_up" title="Click to record new shortcut">
+                  <span class="key-icon">➕</span>
+                  <span id="speedUpRecordLabel" class="font-mono">Ctrl+=</span>
+                </button>
+              </div>
+              <div class="settings-row">
+                <span class="settings-label">Slow Down (-1 CPS)</span>
+                <button id="slowDownRecordBtn" class="hotkey-recorder-btn" data-target="slow_down" title="Click to record new shortcut">
+                  <span class="key-icon">➖</span>
+                  <span id="slowDownRecordLabel" class="font-mono">Ctrl+-</span>
+                </button>
+              </div>
+              <div class="settings-row">
+                <span class="settings-label">Capture Cursor Position</span>
+                <button id="pickPosRecordBtn" class="hotkey-recorder-btn" data-target="capture_pos" title="Click to record new shortcut">
+                  <span class="key-icon">🎯</span>
+                  <span id="pickPosRecordLabel" class="font-mono">Ctrl+P</span>
+                </button>
+              </div>
+              <div class="settings-row">
+                <span class="settings-label">Record Macro (Start / Finish)</span>
+                <button id="recordMacroHotkeyBtn" class="hotkey-recorder-btn" data-target="record_hotkey" title="Click to record new shortcut">
+                  <span class="key-icon">⏺</span>
+                  <span id="recordMacroHotkeyLabel" class="font-mono">Ctrl+Shift+R</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- STATS -->
+        <div id="viewStats" class="view">
+          <div class="config-card" style="margin-top:16px;">
+            <div class="config-card-header">📊 STATISTICS</div>
+            <p style="color:var(--text-dim);padding:16px 0;">Session statistics coming soon.</p>
+          </div>
+        </div>
+
+        <!-- ABOUT -->
+        <div id="viewAbout" class="view">
+          <div class="config-card">
+            <div class="config-card-header">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+              ПРО NANOCLICK
+            </div>
+            <div class="about-hero">
+              <img src="NanoClick.png" alt="NanoClick Logo" class="about-logo">
+              <div class="about-title">NanoClick <span class="ver">v3.0 PRO</span></div>
+              <p class="about-tagline">Розумна автоматизація для вашого комфорту та щоденної продуктивності</p>
+            </div>
+            <div class="about-grid">
+              <div class="about-feature-card">
+                <div class="feature-icon">⚡</div>
+                <div class="feature-title">Блискавична швидкість</div>
+                <div class="feature-desc">Автоматизуйте будь-які рутинні кліки з максимальною точністю та миттєвим відгуком.</div>
+              </div>
+              <div class="about-feature-card">
+                <div class="feature-icon">🛡️</div>
+                <div class="feature-title">Захист від випадкових дій</div>
+                <div class="feature-desc">Перемикайтеся у «Робочий режим» під час набору тексту, щоб жодна клавіша не заважала.</div>
+              </div>
+              <div class="about-feature-card">
+                <div class="feature-icon">🎨</div>
+                <div class="feature-title">Ваш власний стиль</div>
+                <div class="feature-desc">Обирайте серед різноманітних тем та палітр кольорів, створюючи ідеальний робочий простір.</div>
+              </div>
+              <div class="about-feature-card">
+                <div class="feature-icon">⌨️</div>
+                <div class="feature-title">Повний контроль гарячих клавіш</div>
+                <div class="feature-desc">Налаштовуйте зручні комбінації для швидкого виклику, зміни швидкості та вибору точок на екрані.</div>
+              </div>
+            </div>
+            <div class="about-footer-text">
+              © 2026 NanoClick. Створено з турботою про вашу продуктивність.
+            </div>
+          </div>
+        </div>
+
+      </div><!-- /views-container -->
+    </div><!-- /main-content -->
+  </div><!-- /app-shell -->
+
+  <!-- Onboarding Modal -->
+  <div id="onboardingModal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <img src="NanoClick.png" alt="NanoClick Logo" class="modal-logo">
+        <h2>Ласкаво просимо в NanoClick v3.0! ⚡</h2>
+      </div>
+      <div class="modal-body">
+        <p>Дякуємо за вибір <strong>NanoClick</strong>.</p>
+        <ul>
+          <li><strong>AUTOCLICKER MODE:</strong> Гарячі клавіші <code>R / K</code> або <code>F6</code> активні.</li>
+          <li><strong>WORK MODE:</strong> Гарячі клавіші вимкнені — безпечний набір тексту.</li>
+          <li>Зміна режимів: <code>Ctrl + Alt + M</code></li>
+        </ul>
+      </div>
+      <div class="modal-footer">
+        <button id="onboardingBtn" class="start-btn" style="width:100%;">
+          <span class="start-btn-icon">🚀</span>
+          <div class="start-btn-text"><span>Розпочати роботу</span></div>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Preset Edit Modal -->
+  <div id="presetEditModal" class="modal-overlay hidden">
+    <div class="modal-card preset-modal-card">
+      <div class="modal-header">
+        <h3 id="presetModalTitle">✨ Налаштування Пресету</h3>
+      </div>
+      <div class="modal-body preset-modal-body">
+        <input type="hidden" id="presetEditId">
+        
+        <div class="preset-form-grid">
+          <div class="preset-form-group">
+            <label>Назва пресету</label>
+            <input type="text" id="presetNameInput" class="text-input" placeholder="e.g. Minecraft PVP / Auto-Loot">
+          </div>
+          <div class="preset-form-group">
+            <label>Іконка</label>
+            <select id="presetIconSelect" class="select-input">
+              <option value="⚡">⚡ Блискавка (Fast)</option>
+              <option value="🎮">🎮 Геймінг (Gaming)</option>
+              <option value="👤">👤 Людина (Human)</option>
+              <option value="🌾">🌾 Ферма (AFK Farm)</option>
+              <option value="🎯">🎯 Приціл (Target)</option>
+              <option value="⚔️">⚔️ Бій (Combat)</option>
+              <option value="🛡️">🛡️ Захист (Hold)</option>
+              <option value="🍪">🍪 Клікер (Cookie)</option>
+              <option value="🚀">🚀 Турбо (Turbo)</option>
+            </select>
+          </div>
+          
+          <div class="preset-form-group">
+            <label>Швидкість (CPS: <span id="presetCpsVal">29.0</span>)</label>
+            <input type="range" id="presetCpsRange" min="1" max="100" step="0.5" value="29.0" class="slider">
+          </div>
+          <div class="preset-form-group">
+            <label>Рандомізація (Jitter: <span id="presetJitterVal">7.5</span>%)</label>
+            <input type="range" id="presetJitterRange" min="0" max="30" step="0.5" value="7.5" class="slider">
+          </div>
+
+          <div class="preset-form-group">
+            <label>Затримка старту (сек)</label>
+            <input type="number" id="presetStartDelaySec" class="num-input" min="0" max="300" step="1" value="0">
+          </div>
+
+          <div class="preset-form-group">
+            <label>Ліміт часу (хв)</label>
+            <input type="number" id="presetStopDurationMin" class="num-input" min="0" max="1440" step="1" value="0">
+          </div>
+
+          <div class="preset-form-group">
+            <label>Зупинити о</label>
+            <input type="time" id="presetStopTime" class="num-input">
+          </div>
+
+          <div class="preset-form-group">
+            <label>Тип Кліка</label>
+            <select id="presetClickTypeSelect" class="select-input">
+              <option value="single">Single (Поодинокий)</option>
+              <option value="double">Double (Подвійний)</option>
+              <option value="hold">Hold (Утримання)</option>
+            </select>
+          </div>
+
+          <div class="preset-form-group">
+            <label>Тривалість утримання (мс)</label>
+            <input type="number" id="presetHoldDuration" class="num-input" min="10" step="50" value="500">
+          </div>
+
+          <div class="preset-form-group">
+            <label>Пауза утримання (мс)</label>
+            <input type="number" id="presetHoldInterval" class="num-input" min="0" step="50" value="1000">
+          </div>
+
+          <div class="preset-form-group">
+            <label>Кнопка Миші</label>
+            <select id="presetButtonSelect" class="select-input">
+              <option value="left">Ліва (Left)</option>
+              <option value="right">Права (Right)</option>
+              <option value="middle">Середня (Middle)</option>
+              <option value="x1">Бокова 1 (X1)</option>
+              <option value="x2">Бокова 2 (X2)</option>
+            </select>
+          </div>
+
+          <div class="preset-form-group">
+            <label>Режим Позиції</label>
+            <select id="presetPositionSelect" class="select-input">
+              <option value="cursor">За курсором миші</option>
+              <option value="fixed">Фіксовані координати (X, Y)</option>
+            </select>
+          </div>
+
+          <div id="presetFixedCoordRow" class="preset-form-group coord-group hidden">
+            <label>Координати X / Y</label>
+            <div style="display:flex; gap:6px;">
+              <input type="number" id="presetFixedX" class="num-input" placeholder="X" value="100">
+              <input type="number" id="presetFixedY" class="num-input" placeholder="Y" value="100">
+            </div>
+          </div>
+
+          <div class="preset-form-group">
+            <label>Ліміт кліків (0 = безлімітно)</label>
+            <input type="number" id="presetClickLimit" class="num-input" min="0" value="0">
+          </div>
+
+          <div class="preset-form-group">
+            <label>Режим повторення</label>
+            <select id="presetRepeatModeSelect" class="select-input">
+              <option value="unlimited">Безлімітно</option>
+              <option value="repeat">Фіксована кількість</option>
+            </select>
+          </div>
+
+          <div class="preset-form-group">
+            <label>Кількість повторів</label>
+            <input type="number" id="presetRepeatCount" class="num-input" min="0" step="1" value="0">
+          </div>
+
+          <div class="preset-form-group">
+            <label>Пауза між повторами (мс)</label>
+            <input type="number" id="presetRepeatInterval" class="num-input" min="0" step="100" value="1000">
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="presetCancelBtn" class="preset-modal-btn cancel">Скасувати</button>
+        <button id="presetSaveBtn" class="preset-modal-btn save">💾 Зберегти пресет</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Preset Inspect Modal -->
+  <div id="presetInspectModal" class="modal-overlay hidden">
+    <div class="modal-card preset-modal-card">
+      <div class="modal-header">
+        <h3 id="inspectTitle">🔍 Деталі Пресету</h3>
+      </div>
+      <div class="modal-body">
+        <div id="inspectBodyContent" class="inspect-details-box">
+          <!-- Populated by JS -->
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="inspectCloseBtn" class="preset-modal-btn cancel">Закрити</button>
+        <button id="inspectApplyBtn" class="preset-modal-btn save">⚡ Застосувати зараз</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="rippleContainer" class="ripple-container"></div>
+  <script type="module" src="main.js"></script>
+</body>
+</html>
