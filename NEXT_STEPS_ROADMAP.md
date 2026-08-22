@@ -404,17 +404,23 @@ Wayland повинен мати capability-aware тести, які переві
 - початкові `InputBackend`, `HotkeyBackend`, `RecorderBackend` traits;
 - updater plugin/config skeleton і Windows signing script.
 
-Стан installer/update pipeline (перевірено 2026-08-22):
+Стан installer/update pipeline (2026-08-22 — ПЕРШИЙ РЕЛІЗ-АРТЕФАКТ ЗБІРАЄТЬСЯ):
 
-- `tauri-plugin-updater` підключений, команда `check_for_updates` написана;
-- `plugins.updater.pubkey` та `endpoints` у tauri.conf.json порожні — updater
-  безпечний, але неактивний;
-- `bundle.targets = "all"` — треба звузити до `["nsis"]`;
-- `createUpdaterArtifacts` не заданий — `.sig` файли не генеруються;
-- `scripts/sign-windows.ps1` готовий, чекає certificate thumbprint;
-- tauri-cli 1.6.6 у середовищі — для bundle-збори потрібен CLI 2.x
-  (`cargo install tauri-cli --version "^2"`), інакше `tauri build` не збере
-  v2-проєкт.
+- tauri-cli оновлено до **2.11.4** (був 1.6.6);
+- `bundle.targets = ["nsis"]`, `createUpdaterArtifacts = true` — застосовано;
+- updater keypair згенеровано: private → `~/.tauri/nanoclick.key`
+  (НИКОЛИ не комітити і не втрачати), public → вбудований у tauri.conf.json;
+- перший installer успішно зібраний і підписаний:
+  `target/release/bundle/nsis/NanoClick_3.0.0_x64-setup.exe` (~3.4 MB)
+  + `NanoClick_3.0.0_x64-setup.exe.sig`;
+- команда збірки з підписом:
+  `TAURI_SIGNING_PRIVATE_KEY=<path> cargo tauri build --bundles nsis`
+  (змінна TAURI_SIGNING_PRIVATE_KEY_PATH у CLI 2.11.4 ігнорується при
+  bundle-signing — використовувати саме TAURI_SIGNING_PRIVATE_KEY);
+- NSIS 3.11 та nsis_tauri_utils завантажуються Tauri автоматично при
+  першій bundle-зборі — вручну ставити нічого не треба;
+- залишилось: GitHub Releases endpoint + latest.json (updater стане активним),
+  Windows code signing (чекає certificate, sign-windows.ps1 готовий).
 
 Ще не можна вважати завершеним:
 

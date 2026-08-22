@@ -195,20 +195,23 @@ cargo tauri build
 | **Tauri updater signing** (minisign keypair) | підтверджує, що update-артефакт наш; безкоштовно | plugin підключений, `check_for_updates` готова, чекає pubkey + endpoint |
 | **Windows code signing** (signtool + certificate) | прибирає SmartScreen-попередження; платно | `scripts/sign-windows.ps1` готовий, чекає certificate |
 
-Updater infrastructure можна готувати вже зараз — вона НЕ залежить від
-платного сертифіката:
+Updater infrastructure — ГОТОВО (2026-08-22):
+
+- keypair згенеровано: private `~/.tauri/nanoclick.key` (тримати в секреті!),
+  public вбудований у `tauri.conf.json → plugins.updater.pubkey`;
+- `createUpdaterArtifacts: true` — кожен bundle-build генерує `.sig`.
+
+Збірка installer з updater-підписом:
 
 ```bash
-# 1. згенерувати keypair (ОДИН РАЗ; private key ніколи не комітити і
-#    не втрачати — інакше старі інсталяції не довіряють новим оновленням)
-cargo tauri signer generate -w ~/.tauri/nanoclick.key
-
-# 2. public key → tauri.conf.json → plugins.updater.pubkey
-# 3. tauri.conf.json → bundle.createUpdaterArtifacts: true
-#    → build генерує *-setup.exe.sig поруч з installer
-# 4. GitHub Releases: installer + .sig + latest.json
-#    → plugins.updater.endpoints
+TAURI_SIGNING_PRIVATE_KEY="C:/Users/Svitlana/.tauri/nanoclick.key" \
+cargo tauri build --bundles nsis
+# → target/release/bundle/nsis/NanoClick_*-setup.exe + .sig
 ```
+
+Щоб updater став активним, лишилось:
+1. Викласти на GitHub Releases: `-setup.exe`, `-setup.exe.sig`, `latest.json`;
+2. Додати URL на `latest.json` у `plugins.updater.endpoints`.
 
 Детальний план — у [`NEXT_STEPS_ROADMAP.md`](./NEXT_STEPS_ROADMAP.md),
 розділ "Installer & update pipeline".
