@@ -58,7 +58,9 @@
   "plugins": {
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEIzMDdGNkE1NzlFRkQ5RUUKUldUdTJlOTVwZllIczZrZFpINFlSdXhRMkNUd2YzWGtTNTZJczBYWXFNSzRqOW16SlIzdytCS2sK",
-      "endpoints": []
+      "endpoints": [
+        "https://github.com/Ar3ss12/nanoclick/releases/latest/download/latest.json"
+      ]
     }
   }
 }
