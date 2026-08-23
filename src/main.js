@@ -1114,15 +1114,15 @@ function renderPresetsGrid() {
           </div>
         </div>
         <div class="preset-card-footer">
-          <button type="button" class="preset-run-btn" data-action="run" data-id="${escapeHtml(p.id)}" title="Застосувати і запустити зараз">
-              ▶ Запустити
+          <button type="button" class="preset-run-btn" data-action="run" data-id="${escapeHtml(p.id)}" title="Apply and run now">
+              ▶ Run
           </button>
-          <button type="button" class="preset-apply-btn" data-action="apply" data-id="${escapeHtml(p.id)}" title="Застосувати пресет">
-              ⚡ Застосувати
+          <button type="button" class="preset-apply-btn" data-action="apply" data-id="${escapeHtml(p.id)}" title="Apply preset">
+              ⚡ Apply
           </button>
-          <button type="button" class="preset-icon-btn" data-action="inspect" data-id="${escapeHtml(p.id)}" title="Переглянути деталі">👁️</button>
-          <button type="button" class="preset-icon-btn edit" data-action="edit" data-id="${escapeHtml(p.id)}" title="Редагувати">✏️</button>
-          <button type="button" class="preset-icon-btn danger" data-action="delete" data-id="${escapeHtml(p.id)}" title="Видалити">🗑️</button>
+          <button type="button" class="preset-icon-btn" data-action="inspect" data-id="${escapeHtml(p.id)}" title="View details">👁️</button>
+          <button type="button" class="preset-icon-btn edit" data-action="edit" data-id="${escapeHtml(p.id)}" title="Edit">✏️</button>
+          <button type="button" class="preset-icon-btn danger" data-action="delete" data-id="${escapeHtml(p.id)}" title="Delete">🗑️</button>
         </div>
       </div>`;
   }).join("");
@@ -1313,7 +1313,7 @@ async function runPreset(presetId) {
   const p = currentConfig.presets.find(x => x.id === presetId);
   if (!p) return;
 
-  // 1) apply preset values into currentConfig (same path as the ⚡ Застосувати button)
+  // 1) apply preset values into currentConfig (same path as the ⚡ Apply button)
   const applied = await applyPreset(presetId);
   if (!applied) return;
 
@@ -1321,7 +1321,7 @@ async function runPreset(presetId) {
   if (currentConfig.active_mode === "work") {
     console.warn("[runPreset] blocked by work-mode — switch to Autoclicker first");
     if (typeof showToast === "function") {
-      showToast("⚠️ Переключіться на режим Autoclicker для старту", "warn");
+      showToast("⚠️ Switch to Autoclicker mode to start", "warn");
     }
     return;
   }
@@ -1332,14 +1332,14 @@ async function runPreset(presetId) {
 
   if (startDelayMs > 0) {
     if (typeof showToast === "function") {
-      showToast(`▶ Запускаю "${p.name}" через ${startDelaySec}s...`, "info");
+      showToast(`▶ Running "${p.name}" in ${startDelaySec}s...`, "info");
     }
     setTimeout(async () => {
       await executeStartAutomation();
     }, startDelayMs);
   } else {
     if (typeof showToast === "function") {
-      showToast(`▶ "${p.name}" запущено`, "success");
+      showToast(`▶ "${p.name}" started`, "success");
     }
     await executeStartAutomation();
   }
@@ -1355,39 +1355,39 @@ function inspectPreset(presetId) {
   const body = document.getElementById("inspectBodyContent");
   const applyBtn = document.getElementById("inspectApplyBtn");
 
-  if (title) title.textContent = `🔍 Деталі Пресету: ${p.icon || ''} ${p.name}`;
+  if (title) title.textContent = `🔍 Preset details: ${p.icon || ''} ${p.name}`;
 
   const intervalMs = (1000 / p.target_cps).toFixed(2);
 
   if (body) {
     body.innerHTML = `
       <div class="inspect-row">
-        <span class="inspect-label">Назва:</span>
+        <span class="inspect-label">Name:</span>
         <span class="inspect-value">${p.name}</span>
       </div>
       <div class="inspect-row">
-        <span class="inspect-label">Швидкість Kліків (CPS):</span>
+        <span class="inspect-label">Click speed (CPS):</span>
         <span class="inspect-value">${p.target_cps} CPS (${intervalMs} ms)</span>
       </div>
       <div class="inspect-row">
-        <span class="inspect-label">Рандомізація (Jitter):</span>
+        <span class="inspect-label">Randomization (Jitter):</span>
         <span class="inspect-value">±${p.jitter_percent}%</span>
       </div>
       <div class="inspect-row">
-        <span class="inspect-label">Тип Кліка:</span>
+        <span class="inspect-label">Click type:</span>
         <span class="inspect-value">${p.click_type || 'single'}</span>
       </div>
       <div class="inspect-row">
-        <span class="inspect-label">Кнопка Миші:</span>
+        <span class="inspect-label">Mouse button:</span>
         <span class="inspect-value">${p.button || 'left'}</span>
       </div>
       <div class="inspect-row">
-        <span class="inspect-label">Режим Позиціонування:</span>
-        <span class="inspect-value">${p.position_mode === 'fixed' ? `Фіксований (X: ${p.fixed_x}, Y: ${p.fixed_y})` : 'За курсором'}</span>
+        <span class="inspect-label">Position mode:</span>
+        <span class="inspect-value">${p.position_mode === 'fixed' ? `Fixed (X: ${p.fixed_x}, Y: ${p.fixed_y})` : 'Follow cursor'}</span>
       </div>
       <div class="inspect-row">
-        <span class="inspect-label">Ліміт Кліків:</span>
-        <span class="inspect-value">${p.click_limit > 0 ? `${p.click_limit} кліків` : 'Безлімітно'}</span>
+        <span class="inspect-label">Click limit:</span>
+        <span class="inspect-value">${p.click_limit > 0 ? `${p.click_limit} clicks` : 'Unlimited'}</span>
       </div>
     `;
   }
@@ -1429,7 +1429,7 @@ function openPresetEditModal(p = null) {
   const modalTitle = document.getElementById("presetModalTitle");
 
   if (p) {
-    if (modalTitle) modalTitle.textContent = "✏️ Редагування Пресету";
+    if (modalTitle) modalTitle.textContent = "✏️ Edit Preset";
     if (editIdInput) editIdInput.value = p.id;
     if (nameInput) nameInput.value = p.name || "";
     if (iconSelect) iconSelect.value = p.icon || "⚡";
@@ -1456,9 +1456,9 @@ function openPresetEditModal(p = null) {
     if (repeatCountInput) repeatCountInput.value = p.repeat_count || 0;
     if (repeatIntervalInput) repeatIntervalInput.value = p.repeat_interval_ms ?? 1000;
   } else {
-    if (modalTitle) modalTitle.textContent = "✨ Створення Нового Пресету";
+    if (modalTitle) modalTitle.textContent = "✨ New Preset";
     if (editIdInput) editIdInput.value = "";
-    if (nameInput) nameInput.value = "Новий Пресет";
+    if (nameInput) nameInput.value = "New Preset";
     if (iconSelect) iconSelect.value = "⚡";
     if (cpsRange) {
       cpsRange.value = currentConfig.engine.target_cps || 29;
@@ -1493,7 +1493,7 @@ function openPresetEditModal(p = null) {
 
 function savePresetFromModal() {
   const editId = document.getElementById("presetEditId")?.value;
-  const name = document.getElementById("presetNameInput")?.value?.trim() || "Пресет";
+  const name = document.getElementById("presetNameInput")?.value?.trim() || "Preset";
   const icon = document.getElementById("presetIconSelect")?.value || "⚡";
   const cps = parseFloat(document.getElementById("presetCpsRange")?.value) || 29;
   const jitter = parseFloat(document.getElementById("presetJitterRange")?.value) || 0;
@@ -1593,7 +1593,7 @@ function setupPresetListeners() {
   on("saveCurrentAsPresetBtn", "click", () => {
     openPresetEditModal({
       id: "",
-      name: "Мій Конфіг",
+      name: "My Config",
       icon: "🎯",
       target_cps: currentConfig.engine.target_cps,
       jitter_percent: currentConfig.engine.jitter_percent,
@@ -1638,7 +1638,7 @@ function setupPresetListeners() {
       console.log(`[Presets] exported ${currentConfig.presets.length} preset(s)`);
     } catch (err) {
       console.error("[Presets] export failed:", err);
-      alert("Не вдалося експортувати пресети.");
+      alert("Failed to export presets.");
     }
   });
 
@@ -1685,10 +1685,10 @@ function setupPresetListeners() {
         currentConfig.presets.push(...imported);
         renderPresetsGrid();
         await saveConfig();
-        alert(`Успішно імпортовано пресетів: ${imported.length}`);
+        alert(`Successfully imported ${imported.length} presets`);
       } catch (err) {
         console.error("[Presets] import failed:", err);
-        alert("Некоректний формат або порожній файл пресетів.");
+        alert("Invalid format or empty presets file.");
       }
     });
     fileInput.click();
@@ -2301,7 +2301,7 @@ async function renderMacroList() {
           await renderMacroList();
         } catch (err) {
           console.error("[MacroRename] save failed:", err);
-          alert("Не вдалося перейменувати макрос.");
+          alert("Failed to rename macro.");
           await renderMacroList();
         }
       };
@@ -2333,7 +2333,7 @@ async function renderMacroList() {
         await renderMacroList();
       } catch (err) {
         console.error("[MacroOptimize] save failed:", err);
-        alert("Не вдалося зберегти оптимізований макрос.");
+        alert("Failed to save optimized macro.");
       }
     });
   });

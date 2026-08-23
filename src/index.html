@@ -214,13 +214,13 @@
                 <div class="timer-option-left">
                   <div class="timer-option-icon">⏱️</div>
                   <div class="timer-option-info">
-                    <div class="timer-option-title">Зупинити через</div>
-                    <div class="timer-option-desc">Автостоп після N хвилин роботи</div>
+                    <div class="timer-option-title">Stop after</div>
+                    <div class="timer-option-desc">Auto-stop after N minutes of running</div>
                   </div>
                 </div>
                 <div class="timer-option-control">
                   <input type="number" id="stopDurationInput" class="timer-input" min="0" max="1440" step="1" value="0" placeholder="0">
-                  <span class="timer-unit">хв</span>
+                  <span class="timer-unit">min</span>
                 </div>
               </div>
               <div class="timer-divider"></div>
@@ -228,8 +228,8 @@
                 <div class="timer-option-left">
                   <div class="timer-option-icon">🕐</div>
                   <div class="timer-option-info">
-                    <div class="timer-option-title">Зупинити о</div>
-                    <div class="timer-option-desc">Автостоп при настанні часу</div>
+                    <div class="timer-option-title">Stop at</div>
+                    <div class="timer-option-desc">Auto-stop when time is reached</div>
                   </div>
                 </div>
                 <div class="timer-option-control">
@@ -248,26 +248,26 @@
             <div class="presets-page-title">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
               <div>
-                <h2>Пресети</h2>
-                <p>Збережені конфігурації автоклікера</p>
+                <h2>Presets</h2>
+                <p>Saved autoclicker configurations</p>
               </div>
             </div>
             <div class="presets-page-actions">
-              <button id="exportPresetsBtn" class="presets-tool-btn" title="Експортувати пресети у JSON файл">
+              <button id="exportPresetsBtn" class="presets-tool-btn" title="Export presets to a JSON file">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                Експорт
+                Export
               </button>
-              <button id="importPresetsBtn" class="presets-tool-btn" title="Імпортувати пресети з JSON файлу">
+              <button id="importPresetsBtn" class="presets-tool-btn" title="Import presets from a JSON file">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-                Імпорт
+                Import
               </button>
-              <button id="saveCurrentAsPresetBtn" class="presets-tool-btn" title="Зберегти поточні налаштування як новий пресет">
+              <button id="saveCurrentAsPresetBtn" class="presets-tool-btn" title="Save current settings as a new preset">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
-                Зберегти конфіг
+                Save config
               </button>
-              <button id="createNewPresetBtn" class="presets-create-btn" title="Створити новий пресет з нуля">
+              <button id="createNewPresetBtn" class="presets-create-btn" title="Create a new preset from scratch">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-                Новий пресет
+                New preset
               </button>
             </div>
           </div>
@@ -280,8 +280,8 @@
           <!-- Empty State -->
           <div id="presetsEmptyState" class="presets-empty hidden">
             <div class="presets-empty-icon">🎯</div>
-            <div class="presets-empty-title">Пресетів ще немає</div>
-            <div class="presets-empty-desc">Натисніть «Новий пресет» щоб створити перший конфіг</div>
+            <div class="presets-empty-title">No presets yet</div>
+            <div class="presets-empty-desc">Click "New preset" to create your first config</div>
           </div>
         </div>
 
@@ -516,37 +516,37 @@
           <div class="config-card">
             <div class="config-card-header">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-              ПРО NANOCLICK
+              ABOUT NANOCLICK
             </div>
             <div class="about-hero">
               <img src="NanoClick.png" alt="NanoClick Logo" class="about-logo">
               <div class="about-title">NanoClick <span class="ver">v3.0 PRO</span></div>
-              <p class="about-tagline">Розумна автоматизація для вашого комфорту та щоденної продуктивності</p>
+              <p class="about-tagline">Smart automation for your comfort and daily productivity</p>
             </div>
             <div class="about-grid">
               <div class="about-feature-card">
                 <div class="feature-icon">⚡</div>
-                <div class="feature-title">Блискавична швидкість</div>
-                <div class="feature-desc">Автоматизуйте будь-які рутинні кліки з максимальною точністю та миттєвим відгуком.</div>
+                <div class="feature-title">Blazing speed</div>
+                <div class="feature-desc">Automate any routine clicks with maximum precision and instant response.</div>
               </div>
               <div class="about-feature-card">
                 <div class="feature-icon">🛡️</div>
-                <div class="feature-title">Захист від випадкових дій</div>
-                <div class="feature-desc">Перемикайтеся у «Робочий режим» під час набору тексту, щоб жодна клавіша не заважала.</div>
+                <div class="feature-title">Protection from accidental actions</div>
+                <div class="feature-desc">Switch to "Work Mode" while typing so no hotkey gets in your way.</div>
               </div>
               <div class="about-feature-card">
                 <div class="feature-icon">🎨</div>
-                <div class="feature-title">Ваш власний стиль</div>
-                <div class="feature-desc">Обирайте серед різноманітних тем та палітр кольорів, створюючи ідеальний робочий простір.</div>
+                <div class="feature-title">Your own style</div>
+                <div class="feature-desc">Choose from a variety of themes and color palettes to build your ideal workspace.</div>
               </div>
               <div class="about-feature-card">
                 <div class="feature-icon">⌨️</div>
-                <div class="feature-title">Повний контроль гарячих клавіш</div>
-                <div class="feature-desc">Налаштовуйте зручні комбінації для швидкого виклику, зміни швидкості та вибору точок на екрані.</div>
+                <div class="feature-title">Full hotkey control</div>
+                <div class="feature-desc">Configure convenient combos for quick toggling, speed changes and picking screen points.</div>
               </div>
             </div>
             <div class="about-footer-text">
-              © 2026 NanoClick. Створено з турботою про вашу продуктивність.
+              © 2026 NanoClick. Crafted with care for your productivity.
             </div>
           </div>
         </div>
@@ -560,20 +560,20 @@
     <div class="modal-card">
       <div class="modal-header">
         <img src="NanoClick.png" alt="NanoClick Logo" class="modal-logo">
-        <h2>Ласкаво просимо в NanoClick v3.0! ⚡</h2>
+        <h2>Welcome to NanoClick v3.0! ⚡</h2>
       </div>
       <div class="modal-body">
-        <p>Дякуємо за вибір <strong>NanoClick</strong>.</p>
+        <p>Thanks for choosing <strong>NanoClick</strong>.</p>
         <ul>
-          <li><strong>AUTOCLICKER MODE:</strong> Гарячі клавіші <code>R / K</code> або <code>F6</code> активні.</li>
-          <li><strong>WORK MODE:</strong> Гарячі клавіші вимкнені — безпечний набір тексту.</li>
-          <li>Зміна режимів: <code>Ctrl + Alt + M</code></li>
+          <li><strong>AUTOCLICKER MODE:</strong> Hotkeys <code>R / K</code> or <code>F6</code> are active.</li>
+          <li><strong>WORK MODE:</strong> Hotkeys disabled — safe typing.</li>
+          <li>Switch modes: <code>Ctrl + Alt + M</code></li>
         </ul>
       </div>
       <div class="modal-footer">
         <button id="onboardingBtn" class="start-btn" style="width:100%;">
           <span class="start-btn-icon">🚀</span>
-          <div class="start-btn-text"><span>Розпочати роботу</span></div>
+          <div class="start-btn-text"><span>Get started</span></div>
         </button>
       </div>
     </div>
@@ -583,95 +583,95 @@
   <div id="presetEditModal" class="modal-overlay hidden">
     <div class="modal-card preset-modal-card">
       <div class="modal-header">
-        <h3 id="presetModalTitle">✨ Налаштування Пресету</h3>
+        <h3 id="presetModalTitle">✨ Preset Settings</h3>
       </div>
       <div class="modal-body preset-modal-body">
         <input type="hidden" id="presetEditId">
         
         <div class="preset-form-grid">
           <div class="preset-form-group">
-            <label>Назва пресету</label>
+            <label>Preset name</label>
             <input type="text" id="presetNameInput" class="text-input" placeholder="e.g. Minecraft PVP / Auto-Loot">
           </div>
           <div class="preset-form-group">
-            <label>Іконка</label>
+            <label>Icon</label>
             <select id="presetIconSelect" class="select-input">
-              <option value="⚡">⚡ Блискавка (Fast)</option>
-              <option value="🎮">🎮 Геймінг (Gaming)</option>
-              <option value="👤">👤 Людина (Human)</option>
-              <option value="🌾">🌾 Ферма (AFK Farm)</option>
-              <option value="🎯">🎯 Приціл (Target)</option>
-              <option value="⚔️">⚔️ Бій (Combat)</option>
-              <option value="🛡️">🛡️ Захист (Hold)</option>
-              <option value="🍪">🍪 Клікер (Cookie)</option>
-              <option value="🚀">🚀 Турбо (Turbo)</option>
+              <option value="⚡">⚡ Lightning (Fast)</option>
+              <option value="🎮">🎮 Gaming</option>
+              <option value="👤">👤 Human</option>
+              <option value="🌾">🌾 AFK Farming</option>
+              <option value="🎯">🎯 Target</option>
+              <option value="⚔️">⚔️ Combat</option>
+              <option value="🛡️">🛡️ Hold Defense</option>
+              <option value="🍪">🍪 Cookie Clicker</option>
+              <option value="🚀">🚀 Turbo</option>
             </select>
           </div>
           
           <div class="preset-form-group">
-            <label>Швидкість (CPS: <span id="presetCpsVal">29.0</span>)</label>
+            <label>Speed (CPS: <span id="presetCpsVal">29.0</span>)</label>
             <input type="range" id="presetCpsRange" min="1" max="100" step="0.5" value="29.0" class="slider">
           </div>
           <div class="preset-form-group">
-            <label>Рандомізація (Jitter: <span id="presetJitterVal">7.5</span>%)</label>
+            <label>Randomization (Jitter: <span id="presetJitterVal">7.5</span>%)</label>
             <input type="range" id="presetJitterRange" min="0" max="30" step="0.5" value="7.5" class="slider">
           </div>
 
           <div class="preset-form-group">
-            <label>Затримка старту (сек)</label>
+            <label>Start delay (sec)</label>
             <input type="number" id="presetStartDelaySec" class="num-input" min="0" max="300" step="1" value="0">
           </div>
 
           <div class="preset-form-group">
-            <label>Ліміт часу (хв)</label>
+            <label>Time limit (min)</label>
             <input type="number" id="presetStopDurationMin" class="num-input" min="0" max="1440" step="1" value="0">
           </div>
 
           <div class="preset-form-group">
-            <label>Зупинити о</label>
+            <label>Stop at</label>
             <input type="time" id="presetStopTime" class="num-input">
           </div>
 
           <div class="preset-form-group">
-            <label>Тип Кліка</label>
+            <label>Click type</label>
             <select id="presetClickTypeSelect" class="select-input">
-              <option value="single">Single (Поодинокий)</option>
-              <option value="double">Double (Подвійний)</option>
-              <option value="hold">Hold (Утримання)</option>
+              <option value="single">Single</option>
+              <option value="double">Double</option>
+              <option value="hold">Hold</option>
             </select>
           </div>
 
           <div class="preset-form-group">
-            <label>Тривалість утримання (мс)</label>
+            <label>Hold duration (ms)</label>
             <input type="number" id="presetHoldDuration" class="num-input" min="10" step="50" value="500">
           </div>
 
           <div class="preset-form-group">
-            <label>Пауза утримання (мс)</label>
+            <label>Hold pause (ms)</label>
             <input type="number" id="presetHoldInterval" class="num-input" min="0" step="50" value="1000">
           </div>
 
           <div class="preset-form-group">
-            <label>Кнопка Миші</label>
+            <label>Mouse button</label>
             <select id="presetButtonSelect" class="select-input">
-              <option value="left">Ліва (Left)</option>
-              <option value="right">Права (Right)</option>
-              <option value="middle">Середня (Middle)</option>
-              <option value="x1">Бокова 1 (X1)</option>
-              <option value="x2">Бокова 2 (X2)</option>
+              <option value="left">Left</option>
+              <option value="right">Right</option>
+              <option value="middle">Middle</option>
+              <option value="x1">Side 1 (X1)</option>
+              <option value="x2">Side 2 (X2)</option>
             </select>
           </div>
 
           <div class="preset-form-group">
-            <label>Режим Позиції</label>
+            <label>Position mode</label>
             <select id="presetPositionSelect" class="select-input">
-              <option value="cursor">За курсором миші</option>
-              <option value="fixed">Фіксовані координати (X, Y)</option>
+              <option value="cursor">Follow cursor</option>
+              <option value="fixed">Fixed coordinates (X, Y)</option>
             </select>
           </div>
 
           <div id="presetFixedCoordRow" class="preset-form-group coord-group hidden">
-            <label>Координати X / Y</label>
+            <label>X / Y coordinates</label>
             <div style="display:flex; gap:6px;">
               <input type="number" id="presetFixedX" class="num-input" placeholder="X" value="100">
               <input type="number" id="presetFixedY" class="num-input" placeholder="Y" value="100">
@@ -679,32 +679,32 @@
           </div>
 
           <div class="preset-form-group">
-            <label>Ліміт кліків (0 = безлімітно)</label>
+            <label>Click limit (0 = unlimited)</label>
             <input type="number" id="presetClickLimit" class="num-input" min="0" value="0">
           </div>
 
           <div class="preset-form-group">
-            <label>Режим повторення</label>
+            <label>Repeat mode</label>
             <select id="presetRepeatModeSelect" class="select-input">
-              <option value="unlimited">Безлімітно</option>
-              <option value="repeat">Фіксована кількість</option>
+              <option value="unlimited">Unlimited</option>
+              <option value="repeat">Fixed count</option>
             </select>
           </div>
 
           <div class="preset-form-group">
-            <label>Кількість повторів</label>
+            <label>Repeat count</label>
             <input type="number" id="presetRepeatCount" class="num-input" min="0" step="1" value="0">
           </div>
 
           <div class="preset-form-group">
-            <label>Пауза між повторами (мс)</label>
+            <label>Pause between repeats (ms)</label>
             <input type="number" id="presetRepeatInterval" class="num-input" min="0" step="100" value="1000">
           </div>
         </div>
       </div>
       <div class="modal-footer">
-        <button id="presetCancelBtn" class="preset-modal-btn cancel">Скасувати</button>
-        <button id="presetSaveBtn" class="preset-modal-btn save">💾 Зберегти пресет</button>
+        <button id="presetCancelBtn" class="preset-modal-btn cancel">Cancel</button>
+        <button id="presetSaveBtn" class="preset-modal-btn save">💾 Save preset</button>
       </div>
     </div>
   </div>
@@ -713,7 +713,7 @@
   <div id="presetInspectModal" class="modal-overlay hidden">
     <div class="modal-card preset-modal-card">
       <div class="modal-header">
-        <h3 id="inspectTitle">🔍 Деталі Пресету</h3>
+        <h3 id="inspectTitle">🔍 Preset Details</h3>
       </div>
       <div class="modal-body">
         <div id="inspectBodyContent" class="inspect-details-box">
@@ -721,8 +721,8 @@
         </div>
       </div>
       <div class="modal-footer">
-        <button id="inspectCloseBtn" class="preset-modal-btn cancel">Закрити</button>
-        <button id="inspectApplyBtn" class="preset-modal-btn save">⚡ Застосувати зараз</button>
+        <button id="inspectCloseBtn" class="preset-modal-btn cancel">Close</button>
+        <button id="inspectApplyBtn" class="preset-modal-btn save">⚡ Apply now</button>
       </div>
     </div>
   </div>
