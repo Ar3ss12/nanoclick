@@ -10,7 +10,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "NanoClick v3.0",
+        "title": "NanoClick",
         "width": 900,
         "height": 590,
         "minWidth": 860,
