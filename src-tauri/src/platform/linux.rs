@@ -1,11 +1,9 @@
 //! Linux platform — keyboard, mouse, hooks, cursor polling (stub).
 
-use crate::scheduler::ClickScheduler;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
-use tauri::AppHandle;
 
 /// Linux stub — wait via thread::sleep (no atomic stop check).
 pub struct PlatformTimer;
@@ -49,34 +47,12 @@ pub fn signal_stop_event(handle: Option<NativeEventHandle>) {
     }
 }
 
-pub fn get_cursor_pos() -> (i32, i32) {
-    (0, 0)
-}
-
-pub fn click_mouse() -> bool {
-    false
-}
-
-pub fn click_mouse_ext(
-    _button: &str,
-    _click_type: &str,
-    _position_mode: &str,
-    _fixed_x: i32,
-    _fixed_y: i32,
-    _jitter_radius: u32,
-) -> bool {
-    false
-}
-
-pub fn release_mouse_hold(_button: &str) {}
-
-pub fn spawn_global_hotkey_listener(_scheduler: Arc<ClickScheduler>, _app_handle: AppHandle) {
-    // No-op on Linux.
-}
-
-pub fn shutdown_global_hotkey_listener() {}
-
-pub fn stop_recorder_hooks() {}
+/// v4.2 — all input/hotkey/recorder functionality lives behind the
+/// shared contracts (`backend::{InputBackend, HotkeyBackend,
+/// RecorderBackend}`); the no-op implementations are `NoopInputBackend`,
+/// `NoopHotkeyBackend` and `NoopRecorderBackend` in `platform/mod.rs`.
+/// This stub module keeps only the timer + stop-event plumbing that the
+/// scheduler uses on every platform.
 
 /// Parse a config button label (stub platform).
 pub fn parse_button_label(_label: &str) -> crate::core::action::MouseButton {

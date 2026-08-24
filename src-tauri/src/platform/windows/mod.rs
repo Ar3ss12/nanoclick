@@ -942,7 +942,7 @@ mod physical_integration_tests {
             if let Ok(mut guard) = TEST_HOOK.try_lock() {
                 if let Some(h) = guard.take() {
                     unsafe {
-                        UnhookWindowsHookEx(h);
+                        let _ = UnhookWindowsHookEx(h);
                     }
                 }
             }
@@ -1004,26 +1004,6 @@ mod physical_integration_tests {
     }
 
 
-    /// Inject a key sequence and drain; if the hook was still warming up and
-    /// nothing arrived, retry once after a longer settle.
-    fn inject_and_drain(
-        rx: &mpsc::Receiver<(u16, bool)>,
-        vks: &[u16],
-        per_vk: usize,
-        inject: &dyn Fn(),
-    ) -> Vec<(u16, bool)> {
-        inject();
-        let events = drain_filtered(rx, vks, per_vk);
-        if events.is_empty() {
-            // Hook warm-up race: retry with a fresh channel.
-            let rx2 = swap_channel();
-            thread::sleep(Duration::from_millis(250));
-            inject();
-            drain_filtered(&rx2, vks, per_vk)
-        } else {
-            events
-        }
-    }
 
     #[test]
     fn physical_sendinput_events_reach_hook_and_drive_matcher() {
