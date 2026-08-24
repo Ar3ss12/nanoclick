@@ -195,17 +195,29 @@ function showUpdateBar(version, notes) {
   btn.textContent = "Download & install";
   btn.onclick = async () => {
     btn.disabled = true;
-    btn.textContent = "Downloading…";
     try {
-      await window.__TAURI__.updater.update(); // verify + download + install
+      const update = await window.__TAURI__.updater.check();
+      if (!update) { btn.textContent = "No update"; return; }
+      // Signature is verified by the plugin before install completes.
+      let total = 0, received = 0;
+      await update.downloadAndInstall((event) => {
+        if (event.event === "Started") {
+          total = event.data.contentLength || 0;
+          btn.textContent = "Downloading… 0%";
+        } else if (event.event === "Progress") {
+          received += event.data.chunkLength;
+          if (total > 0) btn.textContent = `Downloading… ${Math.min(99, Math.round(received / total * 100))}%`;
+        } else if (event.event === "Finished") {
+          btn.textContent = "Installing…";
+        }
+      });
+      // Only reached on success; restart into the new version.
+      await invoke("relaunch_app");
     } catch (e) {
       console.error("[updater] install failed:", e);
       btn.textContent = "Failed — retry";
       btn.disabled = false;
-      return;
     }
-    // Only reached on success; restart into the new version.
-    await invoke("relaunch_app");
   };
   document.getElementById("updateDismissBtn").onclick = () => {
     bar.classList.add("hidden");
@@ -222,14 +234,14 @@ async function checkForAppUpdates(manual = false) {
       try { dismissed = localStorage.getItem(UPDATE_DISMISS_KEY); } catch {}
       if (manual || dismissed !== info.version) {
         showUpdateBar(info.version, info.body);
-        if (manual) showToast?.(`Update ${info.version} available`, "info");
+        if (manual) console.log("[updater] update", info.version, "available");
       }
     } else if (manual) {
-      showToast?.("You are on the latest version ✓", "success");
+      console.log("[updater] up to date");
     }
   } catch (e) {
     console.error("[updater] check failed:", e);
-    if (manual) showToast?.(`Update check failed: ${e}`, "warn");
+    if (manual) console.warn("[updater] check failed:", e);
   }
 }
 

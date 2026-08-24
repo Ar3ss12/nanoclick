@@ -143,7 +143,6 @@ fn debug_log(level: String, message: String) {
 
 #[tauri::command]
 fn relaunch_app(app: AppHandle) {
-    use tauri::Manager;
     app.restart();
 }
 
