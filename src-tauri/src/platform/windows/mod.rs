@@ -200,8 +200,14 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
 
     crate::debug_log_internal("stage-ok", "[Hotkeys] entering event-driven loop");
 
-    let mut snapshot = HotkeySnapshot::from_scheduler(&scheduler);
-    let mut bindings = HotkeyBindings::from_snapshot(&snapshot);
+    // Parse-once contract: bindings are parsed from scheduler strings only at
+    // startup and after the scheduler bumps its hotkeys_version (a save).
+    // No per-poll string cloning or re-parsing.
+    let mut seen_version = scheduler.hotkeys_version();
+    let mut bindings = {
+        let snapshot = HotkeySnapshot::from_scheduler(&scheduler);
+        HotkeyBindings::from_snapshot(&snapshot)
+    };
     log_bindings(&bindings);
     let mut held = HashSet::<u16>::new();
     let mut poll_iter = 0u64;
@@ -209,11 +215,16 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
     while !GLOBAL_HOTKEY_STOP.load(Ordering::Acquire) {
         poll_iter += 1;
         let received = event_rx.recv_timeout(Duration::from_millis(100));
-        let next_snapshot = HotkeySnapshot::from_scheduler(&scheduler);
-        if next_snapshot != snapshot {
-            snapshot = next_snapshot;
+        let current_version = scheduler.hotkeys_version();
+        if current_version != seen_version {
+            seen_version = current_version;
+            let snapshot = HotkeySnapshot::from_scheduler(&scheduler);
             bindings = HotkeyBindings::from_snapshot(&snapshot);
             log_bindings(&bindings);
+            crate::debug_log_internal(
+                "stage-ok",
+                &format!("[Hotkeys] bindings re-parsed on version {current_version}"),
+            );
         }
         let fallback_events = if received.is_err() {
             held.retain(|&key| key_down(key));
@@ -744,16 +755,22 @@ mod hotkey_tests {
 mod physical_integration_tests {
     use super::*;
     use std::sync::mpsc;
-    use std::sync::Once;
+    use std::sync::atomic::AtomicBool;
+    use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         KEYBDINPUT, KEYEVENTF_KEYUP, INPUT, INPUT_0, INPUT_KEYBOARD, SendInput, VIRTUAL_KEY,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        DispatchMessageW, GetMessageW, MSG, TranslateMessage,
+        CallNextHookEx, DispatchMessageW, GetMessageW, MSG, SetWindowsHookExW,
+        TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, WH_KEYBOARD_LL,
     };
 
     static CAPTURE_TX: OnceLock<StdMutex<Option<mpsc::Sender<(u16, bool)>>>> = OnceLock::new();
-    static HOOK_SETUP: Once = Once::new();
+    /// Live test capture-hook handle. Windows may silently remove a low-level
+    /// hook after heavy SendInput activity, so tests must be able to reinstall
+    /// it instead of relying on a one-shot initializer.
+    static TEST_HOOK: StdMutex<Option<HHOOK>> = StdMutex::new(None);
+    static PUMP_STARTED: AtomicBool = AtomicBool::new(false);
     /// Serializes physical tests: the hook is process-global.
     static TEST_LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
 
@@ -769,47 +786,83 @@ mod physical_integration_tests {
 
     /// Install ONE capture hook for the whole test binary (idempotent).
     fn ensure_hook() {
-        HOOK_SETUP.call_once(|| {
-            let (tx, rx) = mpsc::channel();
-            *CAPTURE_TX.get_or_init(|| StdMutex::new(None)).lock().unwrap() = Some(tx);
-            // Keep the receiver alive forever.
-            std::mem::forget(rx);
-
-            unsafe extern "system" fn capture_proc(
-                n_code: i32,
-                w_param: WPARAM,
-                l_param: LPARAM,
-            ) -> LRESULT {
-                if n_code == 0 {
-                    let kb = *(l_param.0 as *const KBDLLHOOKSTRUCT);
-                    let msg = w_param.0;
-                    let is_down = msg == 0x0100 || msg == 0x0104;
-                    let is_up = msg == 0x0101 || msg == 0x0105;
-                    if (is_down || is_up) && kb.vkCode != 0 {
-                        push_event(kb.vkCode as u16, is_down);
-                    }
-                }
-                CallNextHookEx(None, n_code, w_param, l_param)
-            }
-
-            let res = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(capture_proc), None, 0) };
-            crate::debug_log_internal(
-                "info",
-                &format!("[tests] capture hook install: {}", res.is_ok()),
-            );
-            // Dedicated pumping thread — must never exit while tests run.
-            thread::spawn(move || {
+        // Start the message pump once; it must never exit while tests run.
+        if !PUMP_STARTED.swap(true, Ordering::SeqCst) {
+            thread::spawn(|| {
                 let mut msg = MSG::default();
                 unsafe {
-                    while GetMessageW(&mut msg, None, 0, 0).into() {
+                    loop {
+                        let ret = GetMessageW(&mut msg, None, 0, 0);
+                        if ret.0 <= 0 {
+                            // Error or WM_QUIT: keep pumping instead of dying,
+                            // otherwise the capture hook stops delivering.
+                            continue;
+                        }
                         let _ = TranslateMessage(&msg);
                         DispatchMessageW(&msg);
                     }
                 }
             });
-        });
-        // Let the pump spin up on first use.
-        thread::sleep(Duration::from_millis(400));
+            // Let the pump spin up on first use.
+            thread::sleep(Duration::from_millis(400));
+        }
+
+        let mut guard = TEST_HOOK.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_some() {
+            return; // already installed
+        }
+        unsafe extern "system" fn capture_proc(
+            n_code: i32,
+            w_param: WPARAM,
+            l_param: LPARAM,
+        ) -> LRESULT {
+            if n_code == 0 {
+                let kb = *(l_param.0 as *const KBDLLHOOKSTRUCT);
+                let msg = w_param.0;
+                let is_down = msg == 0x0100 || msg == 0x0104;
+                let is_up = msg == 0x0101 || msg == 0x0105;
+                if (is_down || is_up) && kb.vkCode != 0 {
+                    push_event(kb.vkCode as u16, is_down);
+                }
+            }
+            CallNextHookEx(None, n_code, w_param, l_param)
+        }
+        let res = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(capture_proc), None, 0) };
+        crate::debug_log_internal(
+            "info",
+            &format!("[tests] capture hook install: {}", res.is_ok()),
+        );
+        *guard = res.ok();
+    }
+
+    /// Windows can silently remove a low-level hook after heavy activity.
+    /// Verify the capture hook actually delivers events with a canary key;
+    /// if it's dead, drop the stale handle and reinstall a fresh hook.
+    fn ensure_hook_alive() {
+        ensure_hook();
+        for attempt in 0..3 {
+            let rx = swap_channel();
+            thread::sleep(Duration::from_millis(120));
+            inject_key(0x5B, false); // LWin down as canary (harmless modifier tap)
+            thread::sleep(Duration::from_millis(40));
+            inject_key(0x5B, true);
+            let events = drain_filtered(&rx, &[0x5B], 1);
+            if events.len() >= 1 {
+                // Hook alive. Leave this fresh channel in place; caller will
+                // swap its own channel anyway.
+                return;
+            }
+            // Dead or warming up: force reinstall and retry.
+            if let Ok(mut guard) = TEST_HOOK.try_lock() {
+                if let Some(h) = guard.take() {
+                    unsafe {
+                        UnhookWindowsHookEx(h);
+                    }
+                }
+            }
+            crate::debug_log_internal("info", &format!("[tests] capture hook dead, reinstall #{attempt}"));
+            ensure_hook();
+        }
     }
 
     fn inject_key(vk: u16, up: bool) {
@@ -892,7 +945,7 @@ mod physical_integration_tests {
             .get_or_init(|| StdMutex::new(()))
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        ensure_hook();
+        ensure_hook_alive();
         let rx = swap_channel();
         thread::sleep(Duration::from_millis(200)); // settle before injecting
 
@@ -956,6 +1009,91 @@ mod physical_integration_tests {
         let num_combo = parse_hotkey_combo("Num1").expect("Num1 parses");
         assert_eq!(num_combo.trigger, 0x61);
         assert!(combo_matches(&num_combo, 0x61, &HashSet::new(), |_| false));
+    }
+
+    #[test]
+    fn physical_numpad_keys_reach_hook_and_match_numpad_bindings() {
+        let _serial = TEST_LOCK
+            .get_or_init(|| StdMutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        ensure_hook_alive();
+        let rx = swap_channel();
+        thread::sleep(Duration::from_millis(200)); // settle before injecting
+
+        // ── Part 1: all keypad digit VKs physically arrive ────────────
+        // VK 0x60..=0x69 = NUMPAD0..NUMPAD9 (NumLock on).
+        const KEYPAD: [u16; 10] = [0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69];
+        for vk in KEYPAD {
+            inject_key(vk, false); // down
+            thread::sleep(Duration::from_millis(25));
+            inject_key(vk, true); // up
+            thread::sleep(Duration::from_millis(25));
+        }
+        let events = drain_filtered(&rx, &KEYPAD, 2);
+        for vk in KEYPAD {
+            assert!(
+                events.contains(&(vk, true)) && events.contains(&(vk, false)),
+                "keypad: missing down/up for vk=0x{vk:02X}, got {events:?}"
+            );
+        }
+
+        // ── Part 2: matcher fires exactly once per press for Num bindings ─
+        for vk in KEYPAD {
+            let label = format!("Num{}", vk - 0x60);
+            let combo = parse_hotkey_combo(&label)
+                .unwrap_or_else(|| panic!("{label} must parse"));
+            assert_eq!(combo.trigger, vk, "{label} trigger mismatch");
+            let mut held = HashSet::new();
+            held.insert(vk);
+            assert!(
+                combo_matches(&combo, vk, &held, |k| key_down(k)),
+                "{label} combo must match its own trigger"
+            );
+        }
+        // A Num binding must NOT fire for a different keypad key.
+        let num1 = parse_hotkey_combo("Num1").expect("Num1 parses");
+        held_none_check(&num1, 0x62);
+
+        // ── Part 3: NumLock-off navigation aliases map correctly ──────
+        assert_eq!(numpad_navigation_vk(1), Some(0x23)); // End
+        assert_eq!(numpad_navigation_vk(8), Some(0x26)); // Up
+        assert_eq!(numpad_navigation_vk(0), Some(0x2D)); // Insert
+        assert_eq!(numpad_navigation_vk(11), None);
+
+        // Let the LL hook pump fully settle before the next physical test:
+        // back-to-back SendInput floods can starve the message loop and make
+        // the following test observe a temporarily unresponsive hook.
+        thread::sleep(Duration::from_millis(300));
+        let _ = drain_filtered(&rx, &[], 0); // flush any stragglers
+    }
+
+    fn held_none_check(combo: &HotkeyCombo, wrong_trigger: u16) {
+        let mut held = HashSet::new();
+        held.insert(wrong_trigger);
+        assert!(
+            !combo_matches(combo, wrong_trigger, &held, |k| key_down(k)),
+            "combo {:?} must not fire for unrelated trigger 0x{wrong_trigger:02X}",
+            combo.trigger
+        );
+    }
+
+    #[test]
+    fn listener_double_start_guard_uses_atomic_swap() {
+        // Contract behind spawn_global_hotkey_listener: a second start must be
+        // rejected while the first is running, and the flag must be releasable
+        // on shutdown. We exercise the same GLOBAL_HOTKEY_RUNNING atomic the
+        // spawner uses (an AppHandle cannot be built in unit tests).
+        let was_running = GLOBAL_HOTKEY_RUNNING.swap(true, Ordering::AcqRel);
+        assert!(!was_running, "no other test may hold the running flag");
+        // Simulate the second spawn seeing the flag set:
+        let second_attempt = GLOBAL_HOTKEY_RUNNING.swap(true, Ordering::AcqRel);
+        assert!(second_attempt, "second spawn must observe running=true");
+        // Shutdown path releases the flag exactly like the listener thread does:
+        GLOBAL_HOTKEY_RUNNING.store(false, Ordering::Release);
+        let third_attempt = GLOBAL_HOTKEY_RUNNING.swap(true, Ordering::AcqRel);
+        assert!(!third_attempt, "after release a new spawn must win");
+        GLOBAL_HOTKEY_RUNNING.store(false, Ordering::Release);
     }
 
     #[test]

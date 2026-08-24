@@ -45,6 +45,7 @@ pub struct ClickScheduler {
     hotkey_slow_down: Arc<Mutex<String>>,
     hotkey_capture_pos: Arc<Mutex<String>>,
     hotkey_record_toggle: Arc<AtomicBool>,
+    hotkeys_version: Arc<AtomicU64>,
     hotkey_record: Arc<Mutex<String>>,
 }
 
@@ -81,6 +82,7 @@ impl ClickScheduler {
             hotkey_capture_pos: Arc::new(Mutex::new(initial_cfg.hotkey_capture_pos)),
             hotkey_record_toggle: Arc::new(AtomicBool::new(initial_cfg.hotkey_record_toggle)),
             hotkey_record: Arc::new(Mutex::new(initial_cfg.hotkey_record)),
+            hotkeys_version: Arc::new(AtomicU64::new(1)),
         }
     }
 
@@ -158,6 +160,16 @@ impl ClickScheduler {
         self.hotkey_record_toggle
             .store(cfg.hotkey_record_toggle, Ordering::Relaxed);
         *self.hotkey_record.lock().unwrap() = cfg.hotkey_record;
+        // Signal the hotkey listener that bindings changed so it re-parses
+        // them once instead of diffing string snapshots on every poll.
+        self.hotkeys_version.fetch_add(1, Ordering::Release);
+    }
+
+    /// Monotonic counter bumped every time hotkey bindings are updated.
+    /// The listener compares this against its cached version to decide
+    /// whether re-parsing is needed (parse-once-per-change contract).
+    pub fn hotkeys_version(&self) -> u64 {
+        self.hotkeys_version.load(Ordering::Acquire)
     }
 
     pub fn is_active(&self) -> bool {
