@@ -5,6 +5,13 @@
 //!
 //! Reference: `docs/MACRO_ARCHITECTURE.md` §9.
 
+/// Report the running app version (single source of truth:
+/// `Cargo.toml` / `tauri.conf.json`, synced by release process).
+#[tauri::command]
+pub fn get_app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
 /// Report what the current platform can actually do (v4.2).
 #[tauri::command]
 pub fn get_platform_capabilities() -> serde_json::Value {

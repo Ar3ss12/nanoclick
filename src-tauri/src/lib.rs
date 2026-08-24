@@ -281,6 +281,7 @@ pub fn run() {
             get_config_path,
             get_current_mouse_pos,
             commands::get_platform_capabilities,
+            commands::get_app_version,
             toggle_autoclicker,
             get_status,
             open_config_folder,

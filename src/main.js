@@ -247,7 +247,7 @@ async function checkForAppUpdates(manual = false) {
 
 function startUpdateChecker() {
   if (!TAURI) return;
-  setTimeout(() => checkForAppUpdates(false), 15_000); // first check shortly after launch
+  setTimeout(() => checkForAppUpdates(false), 3_000); // first check shortly after launch
   setInterval(() => checkForAppUpdates(false), UPDATE_CHECK_INTERVAL_MS);
 }
 
@@ -592,6 +592,23 @@ function showCapabilityBar(message) {
     document.body.appendChild(bar);
   }
   document.getElementById("capabilityBarText").textContent = message;
+}
+
+// ===== Version display sync (v1.1+) =====
+// The header/about version labels always mirror the real backend version
+// (Cargo.toml / tauri.conf.json). No more hardcoded "vX.Y" in the HTML.
+async function syncVersionDisplay() {
+  try {
+    const v = await invoke("get_app_version");
+    const short = "v" + v.split(".").slice(0, 2).join(".");
+    document.querySelectorAll(".ver").forEach((el) => {
+      el.textContent = el.id === "aboutVersion" ? short + " PRO" : short;
+    });
+    document.title = "NanoClick v" + short.slice(1);
+    console.log("[NanoClick] UI version synced to", v);
+  } catch (err) {
+    console.warn("[NanoClick] version sync failed:", err);
+  }
 }
 
 async function checkPlatformCapabilities() {
@@ -2968,6 +2985,7 @@ window.addEventListener("DOMContentLoaded", () => {
   });
 
   loadConfig();
+  syncVersionDisplay();
   checkPlatformCapabilities();
   initAutomationTab();
   startUpdateChecker();
