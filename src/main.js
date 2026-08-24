@@ -566,6 +566,65 @@ function getRadioChecked(name, defaultVal) {
   return checked ? checked.value : defaultVal;
 }
 
+// ===== Platform capabilities (v4.2) =====
+// The backend reports what the current OS actually supports. On stub
+// platforms (Linux/macOS builds) input features are unavailable — we show
+// a persistent warning bar instead of letting clicks silently do nothing.
+function showCapabilityBar(message) {
+  let bar = document.getElementById("capabilityBar");
+  if (!bar) {
+    bar = document.createElement("div");
+    bar.id = "capabilityBar";
+    bar.style.cssText =
+      "position:fixed;bottom:56px;left:0;right:0;z-index:9999;" +
+      "padding:10px 16px;background:#7f1d1d;color:#fff;" +
+      "font:13px system-ui,sans-serif;display:flex;align-items:center;" +
+      "justify-content:center;gap:12px";
+    const text = document.createElement("span");
+    text.id = "capabilityBarText";
+    const close = document.createElement("button");
+    close.textContent = "\u2715";
+    close.style.cssText =
+      "background:none;border:none;color:#fff;font-size:14px;cursor:pointer;padding:2px 6px";
+    close.addEventListener("click", () => bar.remove());
+    bar.appendChild(text);
+    bar.appendChild(close);
+    document.body.appendChild(bar);
+  }
+  document.getElementById("capabilityBarText").textContent = message;
+}
+
+async function checkPlatformCapabilities() {
+  try {
+    const caps = await invoke("get_platform_capabilities");
+    console.log("[NanoClick] platform capabilities:", caps);
+    window.__nanoclickCaps = caps;
+    if (!caps.can_play_macros) {
+      showCapabilityBar(
+        "Macro playback is unavailable on this platform (no mouse/keyboard injection)."
+      );
+      const btn = document.getElementById("toggleBtn");
+      if (btn) {
+        btn.disabled = true;
+        btn.title = "Input injection unavailable on this platform";
+      }
+    } else {
+      if (!caps.global_hotkeys) {
+        showCapabilityBar(
+          "Global hotkeys are unavailable on this platform. Use the in-app buttons instead."
+        );
+      } else if (!caps.global_input_recording) {
+        showCapabilityBar(
+          "Macro recording is unavailable on this platform."
+        );
+      }
+    }
+  } catch (err) {
+    // Older backends may not expose the command — non-fatal.
+    console.warn("[NanoClick] capabilities check failed:", err);
+  }
+}
+
 async function loadConfig() {
   try {
     const config = await invoke("get_app_config");
@@ -2909,6 +2968,7 @@ window.addEventListener("DOMContentLoaded", () => {
   });
 
   loadConfig();
+  checkPlatformCapabilities();
   initAutomationTab();
   startUpdateChecker();
 

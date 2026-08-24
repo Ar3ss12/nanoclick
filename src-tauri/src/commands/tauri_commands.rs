@@ -7,8 +7,15 @@
 
 /// Report what the current platform can actually do (v4.2).
 #[tauri::command]
-pub fn get_platform_capabilities() -> crate::platform::PlatformCapabilities {
-    crate::platform::PlatformCapabilities::detect()
+pub fn get_platform_capabilities() -> serde_json::Value {
+    let caps = crate::platform::PlatformCapabilities::detect();
+    serde_json::json!({
+        "global_hotkeys": caps.global_hotkeys,
+        "global_input_recording": caps.global_input_recording,
+        "mouse_injection": caps.mouse_injection,
+        "keyboard_injection": caps.keyboard_injection,
+        "can_play_macros": caps.can_play_macros(),
+    })
 }
 
 use crate::core::{ExecutorHandle, Macro, MacroLookup};
