@@ -1,6 +1,6 @@
 [package]
 name = "autoclicker_rust"
-version = "1.0.0"
+version = "1.1.0"
 description = "NanoClick - Fast Windows Desktop Automation"
 edition = "2021"
 

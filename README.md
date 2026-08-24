@@ -55,7 +55,7 @@ All hotkeys are handled by an event-driven `WH_KEYBOARD_LL` listener in Rust —
 Download the latest installer from [Releases](../../releases):
 
 ```
-NanoClick_1.0.0_x64-setup.exe   (~3.4 MB)
+NanoClick_1.1.0_x64-setup.exe   (~3.4 MB)
 ```
 
 - Installs per-user (no admin rights needed)
