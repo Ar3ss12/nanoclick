@@ -1,13 +1,14 @@
 //! # Executor — plays a `Macro` by running each `Action` sequentially.
 //!
-//! The Executor is the playback counterpart of the Recorder. It reuses
-//! the existing platform layer (`platform::windows::click_mouse_ext`,
-//! `scroll_wheel`, etc.) so behavior matches what the user recorded.
+//! The Executor is the playback counterpart of the Recorder. All input
+//! dispatch goes through the platform-agnostic `InputBackend` trait —
+//! core code contains zero `#[cfg(target_os)]` blocks (v4.2).
 //!
 //! Reference: `docs/MACRO_ARCHITECTURE.md` §4.
 
-use crate::core::action::{KeyCode, Modifiers, MouseButton};
+use crate::core::action::MouseButton;
 use crate::core::{Action, Macro, MacroLookup, RepeatMode};
+use crate::platform::backend::InputBackend;
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -18,6 +19,7 @@ use std::time::Duration;
 #[derive(Clone)]
 pub struct ExecutorHandle {
     shared: Arc<ExecutorShared>,
+    backend: Arc<dyn InputBackend>,
 }
 
 struct ExecutorShared {
@@ -31,14 +33,25 @@ struct ExecutorShared {
 }
 
 impl ExecutorHandle {
-    /// Create an empty (not-running) handle.
+    /// Create a handle bound to a specific input backend.
+    #[allow(dead_code)] // contract API — used by mock-backend contract tests
+    pub fn with_backend(backend: Arc<dyn InputBackend>) -> Self {
+        Self::build(backend)
+    }
+
+    /// Convenience constructor using the default platform backend.
     pub fn new() -> Self {
+        Self::build(crate::platform::default_input_backend())
+    }
+
+    fn build(backend: Arc<dyn InputBackend>) -> Self {
         ExecutorHandle {
             shared: Arc::new(ExecutorShared {
                 is_running: AtomicBool::new(false),
                 cancel: Arc::new(AtomicBool::new(false)),
                 next_step_idx: AtomicUsize::new(0),
             }),
+            backend,
         }
     }
 
@@ -66,7 +79,7 @@ impl ExecutorHandle {
     }
 
     /// Play a macro on the current thread. Each action is dispatched via
-    /// the platform layer (windows.rs on Windows).
+    /// the injected `InputBackend`.
     pub fn play(&self, m: &Macro) {
         self.play_with_lookup(m, Self::empty_lookup());
     }
@@ -105,8 +118,6 @@ impl ExecutorHandle {
                 if self.shared.cancel.load(Ordering::Relaxed) {
                     break;
                 }
-                // For infinite loop, ignore the user-set start (only first user
-                // action was honoring it).
                 self.run_from_to(m, 0, m.actions.len(), macro_lookup.clone());
             },
         }
@@ -122,7 +133,7 @@ impl ExecutorHandle {
             return false;
         }
         if m.is_enabled(idx) {
-            execute_action(&m.actions[idx], &self.shared.cancel);
+            self.execute_action(&m.actions[idx], &self.shared.cancel);
         }
         self.shared.next_step_idx.store(idx + 1, Ordering::Relaxed);
         true
@@ -148,8 +159,7 @@ impl ExecutorHandle {
     fn run_from_to(&self, m: &Macro, from: usize, to: usize, macro_lookup: MacroLookup) {
         // Slice the actions to [from..to) and run them through the v4.0
         // control-flow runner. The runner handles Repeat/If/Call/SetVar/GetVar
-        // and delegates primitive actions (`MouseMove`, `KeyPress`, etc.)
-        // back to `dispatch_primitive`.
+        // and delegates primitive actions back to `dispatch_primitive`.
         let end = to.min(m.actions.len());
         let from = from.min(end);
         let mut ctx = crate::core::ExecutionContext::new();
@@ -158,158 +168,89 @@ impl ExecutorHandle {
         let cancel = self.cancel_handle();
         crate::core::run_actions_in(&m.actions[from..end], &mut ctx, cancel, macro_lookup, 0);
     }
-}
 
-impl Default for ExecutorHandle {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Single-action dispatch. Uses platform layer where available; falls back
-/// to sleeping for `Wait`.
-fn execute_action(action: &Action, cancel: &AtomicBool) {
-    if cancel.load(Ordering::Relaxed) {
-        return;
-    }
-    match action {
-        Action::Wait { ms } => {
-            // Interruptible sleep.
-            let target_ms = *ms;
-            let chunk_ms = target_ms.min(50);
-            let mut slept = 0u64;
-            while slept < target_ms {
-                if cancel.load(Ordering::Relaxed) {
-                    return;
-                }
-                let chunk = (target_ms - slept).min(chunk_ms);
-                thread::sleep(Duration::from_millis(chunk));
-                slept += chunk;
-            }
-        }
-        Action::MouseMove { x, y } => {
-            // Reuse platform::set_cursor_pos.
-            #[cfg(target_os = "windows")]
-            {
-                use crate::platform;
-                platform::windows::set_cursor_pos(*x, *y);
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                let _ = (x, y);
-            }
-        }
-        Action::MouseClick { button, count } => {
-            click_button(*button, *count, cancel);
-        }
-        Action::MouseDown { button } => {
-            #[cfg(target_os = "windows")]
-            {
-                use crate::platform;
-                platform::windows::mouse_down(*button);
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                let _ = button;
-            }
-        }
-        Action::MouseUp { button } => {
-            #[cfg(target_os = "windows")]
-            {
-                use crate::platform;
-                platform::windows::mouse_up(*button);
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                let _ = button;
-            }
-        }
-        Action::KeyPress { key, mods } | Action::KeyDown { key, mods } => {
-            send_key(*key, *mods, false, cancel);
-        }
-        Action::KeyUp { key, mods } => {
-            send_key(*key, *mods, true, cancel);
-        }
-        Action::Scroll { delta_x, delta_y } => {
-            #[cfg(target_os = "windows")]
-            {
-                use crate::platform;
-                platform::windows::scroll_wheel(*delta_x, *delta_y);
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                let _ = (delta_x, delta_y);
-            }
-        }
-        Action::HoldStart => {
-            // Equivalent to MouseDown(Left).
-            #[cfg(target_os = "windows")]
-            {
-                use crate::platform;
-                platform::windows::mouse_down(MouseButton::Left);
-            }
-        }
-        // ── v4.0: control flow variants. They are handled at the *list*
-        // level (`run_repeat`, `run_if`, etc.) — here we just no-op if they
-        // somehow reach `execute_action` directly (e.g. via `step()` which
-        // expects a single primitive action).
-        Action::Repeat { .. }
-        | Action::If { .. }
-        | Action::Call { .. }
-        | Action::SetVar { .. }
-        | Action::GetVar { .. } => {
-            // See `ExecutionContext` for the full semantic implementation.
-            // When invoked as a single step (debug Step mode), control-flow
-            // actions are *atomic* ticks — we just record the intent and
-            // wait a tick so the user sees a UI response.
-            thread::sleep(Duration::from_millis(1));
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn click_button(button: MouseButton, count: u8, cancel: &AtomicBool) {
-    use crate::platform;
-    for _ in 0..count {
+    /// Single-action dispatch via the injected backend. No platform cfg.
+    fn execute_action(&self, action: &Action, cancel: &AtomicBool) {
         if cancel.load(Ordering::Relaxed) {
             return;
         }
-        platform::windows::mouse_click(button);
-        if count > 1 {
-            thread::sleep(Duration::from_millis(50));
+        match action {
+            Action::Wait { ms } => {
+                // Interruptible sleep.
+                let target_ms = *ms;
+                let chunk_ms = target_ms.min(50);
+                let mut slept = 0u64;
+                while slept < target_ms {
+                    if cancel.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let chunk = (target_ms - slept).min(chunk_ms);
+                    thread::sleep(Duration::from_millis(chunk));
+                    slept += chunk;
+                }
+            }
+            Action::MouseMove { x, y } => {
+                self.backend.set_cursor_pos(*x, *y);
+            }
+            Action::MouseClick { button, count } => {
+                for _ in 0..*count {
+                    if cancel.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    self.backend.mouse_click(*button);
+                    if *count > 1 {
+                        thread::sleep(Duration::from_millis(50));
+                    }
+                }
+            }
+            Action::MouseDown { button } => {
+                self.backend.mouse_down(*button);
+            }
+            Action::MouseUp { button } => {
+                self.backend.mouse_up(*button);
+            }
+            Action::KeyPress { key, mods } | Action::KeyDown { key, mods } => {
+                if !cancel.load(Ordering::Relaxed) {
+                    self.backend.send_key(*key, *mods, false);
+                }
+            }
+            Action::KeyUp { key, mods } => {
+                if !cancel.load(Ordering::Relaxed) {
+                    self.backend.send_key(*key, *mods, true);
+                }
+            }
+            Action::Scroll { delta_x, delta_y } => {
+                self.backend.scroll_wheel(*delta_x, *delta_y);
+            }
+            Action::HoldStart => {
+                // Equivalent to MouseDown(Left).
+                self.backend.mouse_down(MouseButton::Left);
+            }
+            // ── v4.0 control flow variants: handled at the *list* level.
+            // Here they are atomic ticks (debug Step mode UI response).
+            Action::Repeat { .. }
+            | Action::If { .. }
+            | Action::Call { .. }
+            | Action::SetVar { .. }
+            | Action::GetVar { .. } => {
+                thread::sleep(Duration::from_millis(1));
+            }
         }
     }
 }
 
-/// v4.0 — Cancel-aware dispatcher. Same as `dispatch_primitive` but checks
-/// `cancel` between every chunk of `Wait`. Used by the control-flow runner.
+/// v4.0 — Cancel-aware dispatcher for free functions that don't carry a
+/// handle. Uses the default platform backend. Used by the control-flow
+/// runner which receives `cancel` only.
 pub fn dispatch_primitive_with_cancel(action: &Action, cancel: &std::sync::atomic::AtomicBool) {
     if cancel.load(Ordering::Relaxed) {
         return;
     }
-    execute_action(action, cancel);
-}
-
-#[cfg(not(target_os = "windows"))]
-fn click_button(button: MouseButton, count: u8, cancel: &AtomicBool) {
-    let _ = button;
-    let _ = count;
-    let _ = cancel;
-}
-
-fn send_key(key: KeyCode, mods: Modifiers, is_up: bool, cancel: &AtomicBool) {
-    if cancel.load(Ordering::Relaxed) {
-        return;
-    }
-    #[cfg(target_os = "windows")]
-    {
-        use crate::platform;
-        platform::windows::send_key(key.0, mods.ctrl, mods.alt, mods.shift, mods.win, is_up);
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = (key, mods, is_up);
-    }
+    // Free-function entry point (control-flow runner has no handle):
+    // construct a throwaway handle on the default platform backend and
+    // reuse the same dispatch path as `step()`.
+    let h = ExecutorHandle::new();
+    h.execute_action(action, cancel);
 }
 
 /// Global singleton handle — set by Tauri `setup()`. Used by hotkey
@@ -331,13 +272,14 @@ pub fn global() -> Option<ExecutorHandle> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::RepeatMode;
+    use crate::core::action::{KeyCode, Modifiers};
 
     fn dummy_macro(actions: Vec<Action>) -> Macro {
-        use crate::core::RepeatMode;
         Macro {
             id: "t".into(),
             name: "t".into(),
-            icon: "🎬".into(),
+            icon: "\u{1f3ac}".into(),
             actions,
             repeat: RepeatMode::Once,
             enabled: None,
@@ -362,10 +304,8 @@ mod tests {
         let t = thread::spawn(move || {
             h2.play(&m_clone);
         });
-        // Wait briefly for the macro to start executing, then cancel.
         thread::sleep(Duration::from_millis(50));
         h.stop();
-        // Wait for thread to finish.
         let _ = t.join();
         let elapsed = start.elapsed();
         assert!(
@@ -383,13 +323,10 @@ mod tests {
             Action::Wait { ms: 5 },
             Action::Wait { ms: 5 },
         ]);
-        // Three steps should each return true.
         assert!(h.step(&m));
         assert!(h.step(&m));
         assert!(h.step(&m));
-        // Fourth returns false (out of bounds).
         assert!(!h.step(&m));
-        // rewind() puts cursor back at zero.
         h.rewind();
         assert!(h.step(&m));
     }
@@ -398,26 +335,21 @@ mod tests {
     fn run_from_here_offset() {
         let h = ExecutorHandle::new();
         let m = dummy_macro(vec![
-            Action::Wait { ms: 5000 }, // idx 0 — should be skipped
-            Action::Wait { ms: 5 },    // idx 1 — start
-            Action::Wait { ms: 5 },    // idx 2
+            Action::Wait { ms: 5000 },
+            Action::Wait { ms: 5 },
+            Action::Wait { ms: 5 },
         ]);
-        // Set start index to 1 → skips the long Wait.
         h.set_start_idx(1);
         let h2 = h.clone();
         let m2 = m.clone();
         let t = thread::spawn(move || h2.play(&m2));
-        // If we started from idx 0 it'd take >5s; from 1 it should finish fast.
         thread::sleep(Duration::from_millis(100));
         h.stop();
         let _ = t.join();
-        // Note: with cancel at 100ms we don't strictly test the speed, only
-        // that no crash occurred.
     }
 
     #[test]
     fn step_skips_disabled_actions() {
-        use crate::core::action::{KeyCode, Modifiers};
         let h = ExecutorHandle::new();
         let mut m = dummy_macro(vec![
             Action::Wait { ms: 5 },
@@ -431,8 +363,59 @@ mod tests {
                 },
             },
         ]);
-        // Disable idx 0 via macro.enabled; only KeyPress should run.
         m.enabled = Some(vec![false, true]);
         assert!(h.step(&m));
+    }
+
+    /// v4.2 contract test — the mock backend records every dispatch so we
+    /// can prove the executor routes ALL primitives through InputBackend.
+    struct MockBackend {
+        clicks: AtomicUsize,
+        keys: AtomicUsize,
+        moves: AtomicUsize,
+        scrolls: AtomicUsize,
+    }
+
+    impl MockBackend {
+        fn new_arc() -> Arc<Self> {
+            Arc::new(MockBackend {
+                clicks: AtomicUsize::new(0),
+                keys: AtomicUsize::new(0),
+                moves: AtomicUsize::new(0),
+                scrolls: AtomicUsize::new(0),
+            })
+        }
+    }
+
+    impl crate::platform::backend::InputBackend for MockBackend {
+        fn mouse_click(&self, _: MouseButton) { self.clicks.fetch_add(1, Ordering::Relaxed); }
+        fn mouse_down(&self, _: MouseButton) {}
+        fn mouse_up(&self, _: MouseButton) {}
+        fn scroll_wheel(&self, _: i32, _: i32) { self.scrolls.fetch_add(1, Ordering::Relaxed); }
+        fn set_cursor_pos(&self, _: i32, _: i32) { self.moves.fetch_add(1, Ordering::Relaxed); }
+        fn send_key(&self, _: KeyCode, _: Modifiers, _: bool) { self.keys.fetch_add(1, Ordering::Relaxed); }
+        fn cursor_position(&self) -> (i32, i32) { (0, 0) }
+        fn click_mouse(&self, _: &crate::platform::backend::ClickSpec) -> bool { true }
+        fn release_mouse_hold(&self, _: MouseButton) {}
+    }
+
+    #[test]
+    fn all_primitives_route_through_input_backend_contract() {
+        let backend = MockBackend::new_arc();
+        let h = ExecutorHandle::with_backend(Arc::clone(&backend) as Arc<dyn InputBackend>);
+        let m = dummy_macro(vec![
+            Action::MouseMove { x: 10, y: 20 },
+            Action::MouseClick { button: MouseButton::Left, count: 2 },
+            Action::KeyPress { key: KeyCode(0x41), mods: Modifiers::default() },
+            Action::Scroll { delta_x: 0, delta_y: -1 },
+        ]);
+        h.step(&m);
+        h.step(&m);
+        h.step(&m);
+        h.step(&m);
+        assert_eq!(backend.moves.load(Ordering::Relaxed), 1);
+        assert_eq!(backend.clicks.load(Ordering::Relaxed), 2); // count=2
+        assert_eq!(backend.keys.load(Ordering::Relaxed), 1);
+        assert_eq!(backend.scrolls.load(Ordering::Relaxed), 1);
     }
 }

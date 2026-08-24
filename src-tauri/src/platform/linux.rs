@@ -77,3 +77,14 @@ pub fn spawn_global_hotkey_listener(_scheduler: Arc<ClickScheduler>, _app_handle
 pub fn shutdown_global_hotkey_listener() {}
 
 pub fn stop_recorder_hooks() {}
+
+/// Parse a config button label (stub platform).
+pub fn parse_button_label(_label: &str) -> crate::core::action::MouseButton {
+    crate::core::action::MouseButton::Left
+}
+
+/// Default input backend — capability-honest no-op on this platform.
+pub fn default_input_backend()
+-> std::sync::Arc<dyn crate::platform::backend::InputBackend> {
+    std::sync::Arc::new(crate::platform::NoopInputBackend)
+}

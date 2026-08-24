@@ -6,7 +6,7 @@ pub mod windows_hooks;
 pub use keyboard::{mouse_click, mouse_down, mouse_up, scroll_wheel, send_key, set_cursor_pos};
 pub use windows_hooks::{spawn_recorder_hooks, stop_recorder_hooks};
 
-use crate::core::action::MouseButton;
+use crate::core::action::{KeyCode, Modifiers, MouseButton};
 use crate::scheduler::ClickScheduler;
 use rand::Rng;
 use std::collections::HashSet;
@@ -22,6 +22,19 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetCursorPos, SetCursorPos, SetWindowsHookExW, UnhookWindowsHookEx,
     KBDLLHOOKSTRUCT, WH_KEYBOARD_LL,
 };
+
+/// Parse a config button label into the neutral MouseButton type.
+/// Lives at the platform boundary; core/scheduler never see raw labels.
+pub fn parse_button_label(label: &str) -> MouseButton {
+    match label {
+        "right" => MouseButton::Right,
+        "middle" => MouseButton::Middle,
+        "x1" => MouseButton::X1,
+        "x2" => MouseButton::X2,
+        _ => MouseButton::Left,
+    }
+}
+
 
 /// Get current OS cursor position.
 pub fn get_cursor_pos() -> (i32, i32) {
@@ -78,54 +91,127 @@ impl Default for PlatformTimer {
     }
 }
 
-/// Extended click with full options.
-pub fn click_mouse_ext(
-    button: &str,
-    _click_type: &str,
-    position_mode: &str,
-    fixed_x: i32,
-    fixed_y: i32,
-    jitter_radius: u32,
-) -> bool {
-    let (mut target_x, mut target_y) = if position_mode == "fixed" {
-        (fixed_x, fixed_y)
-    } else {
-        get_cursor_pos()
-    };
+/// ── v4.2 Platform Abstraction ─────────────────────────────────────────
+/// Concrete Windows implementation of the shared platform contracts.
+/// Wraps the existing free functions; core code depends on the traits,
+/// never on this type or on Win32 handles.
+pub struct WindowsBackend;
 
-    if jitter_radius > 0 {
-        let radius = jitter_radius as i32;
-        let mut rng = rand::thread_rng();
-        let dx = rng.gen_range(-radius..=radius);
-        let dy = rng.gen_range(-radius..=radius);
-        target_x += dx;
-        target_y += dy;
-        unsafe {
-            let _ = SetCursorPos(target_x, target_y);
-        }
+impl Default for WindowsBackend {
+    fn default() -> Self {
+        WindowsBackend
     }
-
-    let mb = match button {
-        "right" => MouseButton::Right,
-        "middle" => MouseButton::Middle,
-        "x1" => MouseButton::X1,
-        "x2" => MouseButton::X2,
-        _ => MouseButton::Left,
-    };
-    mouse_click(mb);
-    true
 }
 
-/// Release any currently-held mouse button.
-pub fn release_mouse_hold(button: &str) {
-    let mb = match button {
-        "right" => MouseButton::Right,
-        "middle" => MouseButton::Middle,
-        "x1" => MouseButton::X1,
-        "x2" => MouseButton::X2,
-        _ => MouseButton::Left,
-    };
-    mouse_up(mb);
+impl crate::platform::backend::InputBackend for WindowsBackend {
+    fn mouse_click(&self, button: MouseButton) {
+        mouse_click(button);
+    }
+
+    fn mouse_down(&self, button: MouseButton) {
+        mouse_down(button);
+    }
+
+    fn mouse_up(&self, button: MouseButton) {
+        mouse_up(button);
+    }
+
+    fn scroll_wheel(&self, delta_x: i32, delta_y: i32) {
+        scroll_wheel(delta_x, delta_y);
+    }
+
+    fn set_cursor_pos(&self, x: i32, y: i32) {
+        set_cursor_pos(x, y);
+    }
+
+    fn send_key(&self, key: KeyCode, mods: Modifiers, is_up: bool) {
+        send_key(key.0, mods.ctrl, mods.alt, mods.shift, mods.win, is_up);
+    }
+
+    fn cursor_position(&self) -> (i32, i32) {
+        get_cursor_pos()
+    }
+
+    fn click_mouse(&self, spec: &crate::platform::backend::ClickSpec) -> bool {
+        let (mut target_x, mut target_y) = match spec.position_mode {
+            crate::platform::backend::PositionMode::Fixed => (spec.fixed_x, spec.fixed_y),
+            crate::platform::backend::PositionMode::Cursor => self.cursor_position(),
+        };
+
+        if spec.jitter_radius > 0 {
+            let radius = spec.jitter_radius as i32;
+            let mut rng = rand::thread_rng();
+            let dx = rng.gen_range(-radius..=radius);
+            let dy = rng.gen_range(-radius..=radius);
+            target_x += dx;
+            target_y += dy;
+            unsafe {
+                let _ = SetCursorPos(target_x, target_y);
+            }
+        }
+
+        match spec.click_type {
+            crate::platform::backend::ClickType::Double => {
+                mouse_click(spec.button);
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                mouse_click(spec.button);
+            }
+            _ => mouse_click(spec.button),
+        }
+        true
+    }
+
+    fn release_mouse_hold(&self, button: MouseButton) {
+        mouse_up(button);
+    }
+}
+
+impl crate::platform::backend::HotkeyBackend for WindowsBackend {
+    /// Stateless variant: the actual spawn needs scheduler+app wiring, so
+    /// use `WindowsHotkeyBackend` for start. `stop`/`is_running` are global.
+    fn start(&self) -> Result<(), String> {
+        Err("hotkey start requires scheduler+handle wiring - use WindowsHotkeyBackend".into())
+    }
+
+    fn stop(&self) {
+        shutdown_global_hotkey_listener();
+    }
+
+    fn is_running(&self) -> bool {
+        GLOBAL_HOTKEY_RUNNING.load(Ordering::Acquire)
+    }
+}
+
+/// Stateful hotkey backend holding the scheduler/app wiring captured at
+/// setup time, so callers can `start()`/`stop()` through the trait
+/// without knowing about the free functions.
+pub struct WindowsHotkeyBackend {
+    scheduler: Arc<ClickScheduler>,
+    app_handle: AppHandle,
+}
+
+impl WindowsHotkeyBackend {
+    pub fn new(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) -> Self {
+        WindowsHotkeyBackend {
+            scheduler,
+            app_handle,
+        }
+    }
+}
+
+impl crate::platform::backend::HotkeyBackend for WindowsHotkeyBackend {
+    fn start(&self) -> Result<(), String> {
+        spawn_global_hotkey_listener(Arc::clone(&self.scheduler), self.app_handle.clone());
+        Ok(())
+    }
+
+    fn stop(&self) {
+        shutdown_global_hotkey_listener();
+    }
+
+    fn is_running(&self) -> bool {
+        GLOBAL_HOTKEY_RUNNING.load(Ordering::Acquire)
+    }
 }
 
 /// Spawn the global hotkey listener thread.

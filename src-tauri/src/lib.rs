@@ -265,7 +265,12 @@ pub fn run() {
         .manage(macro_state)
         .setup(move |app| {
             let handle = app.handle().clone();
-            platform::spawn_global_hotkey_listener(scheduler_for_setup, handle);
+            // v4.2 — start hotkeys through the HotkeyBackend contract.
+            let hk =
+                platform::default_hotkey_backend(scheduler_for_setup, handle);
+            if let Err(e) = hk.start() {
+                crate::debug_log_internal("warn", &format!("[Hotkeys] backend start failed: {e}"));
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -303,7 +308,8 @@ pub fn run() {
         if matches!(event, RunEvent::Exit) {
             // Stop native hooks before the process exits so no callback can
             // outlive its channel or application state.
-            platform::shutdown_global_hotkey_listener();
+            // v4.2 — stop via the HotkeyBackend contract.
+            platform::default_input_backend_hotkey_stop();
             platform::stop_recorder_hooks();
             if let Some(exec) = crate::core::global() {
                 exec.stop();

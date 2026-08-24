@@ -1,5 +1,7 @@
 use crate::config::Config;
-use crate::platform::{self, NativeEventHandle, PlatformTimer};
+use crate::platform::{
+    self, backend::ClickSpec, NativeEventHandle, PlatformTimer,
+};
 use rand::Rng;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -355,19 +357,30 @@ impl ClickScheduler {
         thread::spawn(move || {
             let mut rng = rand::thread_rng();
             let timer = PlatformTimer::new();
+            let platform_backend = platform::default_input_backend();
             let mut next_click: Option<Instant> = None;
 
             let cur_button = button_arc.lock().unwrap().clone();
-            let cur_click_type = click_type_arc.lock().unwrap().clone();
-            let cur_pos_mode = position_mode_arc.lock().unwrap().clone();
-            let cur_x = fixed_x_arc.load(Ordering::Relaxed) as i32;
-            let cur_y = fixed_y_arc.load(Ordering::Relaxed) as i32;
+            // v4.2 — parse the config strings ONCE here at the boundary
+            // and carry a typed ClickSpec through the whole click loop.
+            // The platform layer no longer sees raw strings.
+            let cur_click_spec = ClickSpec {
+                button: platform::parse_button_label(&cur_button),
+                click_type: crate::platform::backend::ClickType::from_config_str(
+                    &click_type_arc.lock().unwrap().clone(),
+                ),
+                position_mode: crate::platform::backend::PositionMode::from_config_str(
+                    &position_mode_arc.lock().unwrap().clone(),
+                ),
+                fixed_x: fixed_x_arc.load(Ordering::Relaxed) as i32,
+                fixed_y: fixed_y_arc.load(Ordering::Relaxed) as i32,
+                jitter_radius: jitter_radius_arc.load(Ordering::Relaxed),
+            };
             let cur_repeat_mode = repeat_mode_arc.lock().unwrap().clone();
             let cur_repeat_count = repeat_count_arc.load(Ordering::Relaxed);
             let cur_hold_duration = hold_duration_arc.load(Ordering::Relaxed).max(10);
             let cur_hold_interval = hold_interval_arc.load(Ordering::Relaxed);
             let cur_repeat_interval = repeat_interval_arc.load(Ordering::Relaxed);
-            let cur_jitter_radius = jitter_radius_arc.load(Ordering::Relaxed);
 
             let mut batch_click_count: u32 = 0;
             let mut batches_done: u32 = 0;
@@ -462,16 +475,9 @@ impl ClickScheduler {
                 }
 
                 // ── HOLD CLICK LOGIC ─────────────────────────────────────
-                if cur_click_type == "hold" {
+                if cur_click_spec.click_type == crate::platform::backend::ClickType::Hold {
                     // Press Down
-                    if platform::click_mouse_ext(
-                        &cur_button,
-                        "hold",
-                        &cur_pos_mode,
-                        cur_x,
-                        cur_y,
-                        cur_jitter_radius,
-                    ) {
+                    if platform_backend.click_mouse(&cur_click_spec) {
                         let total = clicks_done.fetch_add(1, Ordering::Relaxed) + 1;
                         batch_click_count += 1;
                         if let Some(ref app) = app_handle {
@@ -498,12 +504,12 @@ impl ClickScheduler {
                     if !timer.wait_until(target_down, event_handle)
                         || !active.load(Ordering::Relaxed)
                     {
-                        platform::release_mouse_hold(&cur_button);
+                        platform_backend.release_mouse_hold(cur_click_spec.button);
                         break;
                     }
 
                     // Release Up
-                    platform::release_mouse_hold(&cur_button);
+                    platform_backend.release_mouse_hold(cur_click_spec.button);
 
                     // Pause for hold_interval_ms if > 0
                     if cur_hold_interval > 0 {
@@ -535,14 +541,7 @@ impl ClickScheduler {
                     }
                 }
 
-                if platform::click_mouse_ext(
-                    &cur_button,
-                    &cur_click_type,
-                    &cur_pos_mode,
-                    cur_x,
-                    cur_y,
-                    cur_jitter_radius,
-                ) {
+                if platform_backend.click_mouse(&cur_click_spec) {
                     let total = clicks_done.fetch_add(1, Ordering::Relaxed) + 1;
                     batch_click_count += 1;
                     if let Some(ref app) = app_handle {
@@ -583,8 +582,8 @@ impl ClickScheduler {
                 });
             }
 
-            if cur_click_type == "hold" {
-                platform::release_mouse_hold(&cur_button);
+            if cur_click_spec.click_type == crate::platform::backend::ClickType::Hold {
+                platform_backend.release_mouse_hold(cur_click_spec.button);
             }
 
             if let Some(ref app) = app_handle {

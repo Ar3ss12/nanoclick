@@ -4,7 +4,7 @@
 
 Built with **Tauri 2 + Rust + vanilla JS**. No Electron, no bundler, no bloat: the production installer is **~3.4 MB**.
 
-![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue) ![Tests](https://img.shields.io/badge/tests-59%2F59-brightgreen) ![Tauri](https://img.shields.io/badge/Tauri-2.x-FFC131) ![Rust](https://img.shields.io/badge/rust-stable--msvc-DEA584)
+![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue) ![Tests](https://img.shields.io/badge/tests-60%2F60-brightgreen) ![Tauri](https://img.shields.io/badge/Tauri-2.x-FFC131) ![Rust](https://img.shields.io/badge/rust-stable--msvc-DEA584)
 
 ---
 
@@ -84,7 +84,7 @@ cargo tauri build --bundles nsis
 ```bash
 cd src-tauri
 cargo test --release
-# → 59 passed; 0 failed
+# → 60 passed; 0 failed
 ```
 
 The suite includes physical integration tests that inject real keyboard events via `SendInput` and verify them against a low-level hook.
