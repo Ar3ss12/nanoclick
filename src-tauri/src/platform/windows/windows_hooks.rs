@@ -72,6 +72,47 @@ pub fn spawn_recorder_hooks(
     any_keep
 }
 
+/// ── v4.2 Platform Abstraction ─────────────────────────────────────────
+/// Concrete Windows recorder backend implementing the shared contract.
+/// The ignored-hotkey label stays a config-string concern: it is parsed
+/// here at the platform boundary, never inside core/commands.
+pub struct WindowsRecorderBackend {
+    /// Config label of the hotkey the recorder must not capture
+    /// (e.g. "Ctrl+Shift+R"). Parsed once via `IgnoredHotkey::parse`.
+    pub ignored_hotkey_label: std::sync::Mutex<String>,
+}
+
+impl Default for WindowsRecorderBackend {
+    fn default() -> Self {
+        WindowsRecorderBackend {
+            ignored_hotkey_label: std::sync::Mutex::new(String::new()),
+        }
+    }
+}
+
+impl WindowsRecorderBackend {
+    pub fn new(label: impl Into<String>) -> Self {
+        WindowsRecorderBackend {
+            ignored_hotkey_label: std::sync::Mutex::new(label.into()),
+        }
+    }
+}
+
+impl crate::platform::backend::RecorderBackend for WindowsRecorderBackend {
+    fn start(
+        &self,
+        sender: Sender<RawEvent>,
+    ) -> Result<(), String> {
+        let label = self.ignored_hotkey_label.lock().unwrap().clone();
+        spawn_recorder_hooks(sender, label);
+        Ok(())
+    }
+
+    fn stop(&self) {
+        stop_recorder_hooks();
+    }
+}
+
 /// Set the stop flag and post WM_QUIT to the recorder thread. After this
 /// the thread unhooks and exits. Safe to call multiple times.
 pub fn stop_recorder_hooks() {

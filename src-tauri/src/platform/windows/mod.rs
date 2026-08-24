@@ -4,7 +4,7 @@ pub mod keyboard;
 pub mod windows_hooks;
 
 pub use keyboard::{mouse_click, mouse_down, mouse_up, scroll_wheel, send_key, set_cursor_pos};
-pub use windows_hooks::{spawn_recorder_hooks, stop_recorder_hooks};
+pub use windows_hooks::{stop_recorder_hooks, WindowsRecorderBackend};
 
 use crate::core::action::{KeyCode, Modifiers, MouseButton};
 use crate::scheduler::ClickScheduler;

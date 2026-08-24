@@ -5,6 +5,8 @@
 
 pub mod backend;
 
+pub use backend::PlatformCapabilities;
+
 #[cfg(target_os = "windows")]
 pub mod windows;
 #[cfg(target_os = "windows")]
@@ -101,5 +103,42 @@ pub fn default_input_backend_hotkey_stop() {
     #[cfg(not(target_os = "windows"))]
     {
         // nothing to stop — no listener was started
+    }
+}
+
+/// Recorder backend factory — label is parsed at the platform boundary.
+#[cfg(target_os = "windows")]
+pub fn default_recorder_backend(ignored_hotkey_label: &str)
+-> std::sync::Arc<dyn backend::RecorderBackend> {
+    std::sync::Arc::new(windows::WindowsRecorderBackend::new(ignored_hotkey_label))
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn default_recorder_backend(_ignored_hotkey_label: &str)
+-> std::sync::Arc<dyn backend::RecorderBackend> {
+    std::sync::Arc::new(NoopRecorderBackend)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub struct NoopRecorderBackend;
+
+#[cfg(not(target_os = "windows"))]
+impl backend::RecorderBackend for NoopRecorderBackend {
+    fn start(&self, _sender: std::sync::mpsc::Sender<crate::recorder::raw_event::RawEvent>)
+    -> Result<(), String> {
+        Err("global input recording unavailable on this platform".into())
+    }
+    fn stop(&self) {}
+}
+
+/// Stop the recorder capture through the backend contract.
+pub fn recorder_backend_stop() {
+    #[cfg(target_os = "windows")]
+    {
+        windows::stop_recorder_hooks();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // nothing running
     }
 }

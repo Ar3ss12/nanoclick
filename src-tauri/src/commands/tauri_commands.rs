@@ -5,6 +5,12 @@
 //!
 //! Reference: `docs/MACRO_ARCHITECTURE.md` §9.
 
+/// Report what the current platform can actually do (v4.2).
+#[tauri::command]
+pub fn get_platform_capabilities() -> crate::platform::PlatformCapabilities {
+    crate::platform::PlatformCapabilities::detect()
+}
+
 use crate::core::{ExecutorHandle, Macro, MacroLookup};
 use crate::persistence;
 use crate::platform;
@@ -26,7 +32,7 @@ pub struct RecorderSession {
 
 impl Drop for RecorderSession {
     fn drop(&mut self) {
-        platform::stop_recorder_hooks();
+        platform::recorder_backend_stop();
         self.handle.cancel();
     }
 }
@@ -86,7 +92,11 @@ pub fn record_start(
         return Err("recorder already running".into());
     }
     let (handle, tx) = RecorderHandle::start_with_external_sender(rec_mode);
-    platform::spawn_recorder_hooks(tx, record_hotkey.unwrap_or_default());
+    // v4.2 — start capture through the RecorderBackend contract; the
+    // hotkey label is parsed inside the platform boundary.
+    let recorder_backend =
+        platform::default_recorder_backend(&record_hotkey.unwrap_or_default());
+    recorder_backend.start(tx)?;
     *slot = Some(RecorderSession { handle });
     Ok(())
 }
@@ -95,7 +105,9 @@ pub fn record_start(
 pub fn record_stop(state: State<'_, MacroState>) -> Result<Vec<Macro>, String> {
     let mut slot = state.recorder.lock().map_err(|e| e.to_string())?;
     let session = slot.take().ok_or("recorder was not running")?;
-    platform::stop_recorder_hooks();
+    // v4.2 — stop through the contract (stateless global stop).
+    platform::recorder_backend_stop();
+    session.handle.stop();
     let actions = session.handle.stop();
     let m = Macro {
         id: uuid_like_id(),
@@ -113,7 +125,7 @@ pub fn record_stop(state: State<'_, MacroState>) -> Result<Vec<Macro>, String> {
 #[tauri::command]
 pub fn record_cancel(state: State<'_, MacroState>) -> Result<(), String> {
     if let Some(session) = state.recorder.lock().map_err(|e| e.to_string())?.take() {
-        platform::stop_recorder_hooks();
+        platform::recorder_backend_stop();
         session.handle.cancel();
     }
     Ok(())

@@ -280,6 +280,7 @@ pub fn run() {
             complete_onboarding,
             get_config_path,
             get_current_mouse_pos,
+            commands::get_platform_capabilities,
             toggle_autoclicker,
             get_status,
             open_config_folder,
