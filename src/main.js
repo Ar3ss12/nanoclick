@@ -174,6 +174,71 @@ if (typeof window === "undefined" || !TAURI || !TAURI.core || typeof TAURI.core.
 
 // (invoke/listen wrappers are defined above with full logging)
 
+
+// ===== Update checker =====
+// Security: the Tauri updater plugin verifies the downloaded installer's
+// minisign signature against the public key embedded in tauri.conf.json
+// before installing. Downloads only happen from the configured endpoint
+// (GitHub Releases of this repository). Nothing is installed without a
+// valid signature.
+const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000; // every 6 hours
+const UPDATE_DISMISS_KEY = "nanoclick_update_dismissed_version";
+
+function showUpdateBar(version, notes) {
+  const bar = document.getElementById("updateBar");
+  if (!bar) return;
+  document.getElementById("updateBarText").textContent =
+    `NanoClick ${version} is available` + (notes ? ` — ${notes.slice(0, 80)}` : "");
+  bar.classList.remove("hidden");
+  const btn = document.getElementById("updateInstallBtn");
+  btn.disabled = false;
+  btn.textContent = "Download & install";
+  btn.onclick = async () => {
+    btn.disabled = true;
+    btn.textContent = "Downloading…";
+    try {
+      await window.__TAURI__.updater.update(); // verify + download + install
+    } catch (e) {
+      console.error("[updater] install failed:", e);
+      btn.textContent = "Failed — retry";
+      btn.disabled = false;
+      return;
+    }
+    // Only reached on success; restart into the new version.
+    await invoke("relaunch_app");
+  };
+  document.getElementById("updateDismissBtn").onclick = () => {
+    bar.classList.add("hidden");
+    try { localStorage.setItem(UPDATE_DISMISS_KEY, version); } catch {}
+  };
+}
+
+async function checkForAppUpdates(manual = false) {
+  if (!TAURI) return;
+  try {
+    const info = await invoke("check_for_updates");
+    if (info) {
+      let dismissed = null;
+      try { dismissed = localStorage.getItem(UPDATE_DISMISS_KEY); } catch {}
+      if (manual || dismissed !== info.version) {
+        showUpdateBar(info.version, info.body);
+        if (manual) showToast?.(`Update ${info.version} available`, "info");
+      }
+    } else if (manual) {
+      showToast?.("You are on the latest version ✓", "success");
+    }
+  } catch (e) {
+    console.error("[updater] check failed:", e);
+    if (manual) showToast?.(`Update check failed: ${e}`, "warn");
+  }
+}
+
+function startUpdateChecker() {
+  if (!TAURI) return;
+  setTimeout(() => checkForAppUpdates(false), 15_000); // first check shortly after launch
+  setInterval(() => checkForAppUpdates(false), UPDATE_CHECK_INTERVAL_MS);
+}
+
 let currentConfig = {
   first_run: true,
   active_mode: "autoclicker",
@@ -2833,6 +2898,7 @@ window.addEventListener("DOMContentLoaded", () => {
 
   loadConfig();
   initAutomationTab();
+  startUpdateChecker();
 
   console.log("[NanoClick] window.__TAURI__:", typeof window.__TAURI__, window.__TAURI__ ? Object.keys(window.__TAURI__) : "");
   console.log("[NanoClick] TAURI.core.invoke type:", typeof TAURI?.core?.invoke);

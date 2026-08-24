@@ -140,6 +140,13 @@ fn debug_log(level: String, message: String) {
     debug_log_internal(&level, &message);
 }
 
+
+#[tauri::command]
+fn relaunch_app(app: AppHandle) {
+    use tauri::Manager;
+    app.restart();
+}
+
 #[derive(serde::Serialize)]
 struct UpdateInfo {
     version: String,
@@ -288,6 +295,7 @@ pub fn run() {
             commands::is_macro_running,
             debug_log,
             check_for_updates,
+        relaunch_app,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
