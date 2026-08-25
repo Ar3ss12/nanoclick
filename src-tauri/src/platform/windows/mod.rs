@@ -9,7 +9,7 @@ pub use windows_hooks::{stop_recorder_hooks, WindowsRecorderBackend};
 use crate::core::action::{KeyCode, Modifiers, MouseButton};
 use crate::scheduler::ClickScheduler;
 use rand::Rng;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
@@ -254,8 +254,12 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
             let is_up = message == 0x0101 || message == 0x0105;
             if (is_down || is_up) && kb.vkCode != 0 {
                 if let Some(lock) = GLOBAL_HOTKEY_TX.get() {
-                    if let Ok(sender) = lock.lock() {
-                        if let Some(sender) = sender.as_ref() {
+                    // v4.2 hardening: try_lock fast path — this callback runs
+                    // synchronously for the WHOLE SYSTEM. If the channel mutex
+                    // is momentarily contended, skip: the listener's
+                    // GetAsyncKeyState fallback poll re-detects held combos.
+                    if let Ok(guard) = lock.try_lock() {
+                        if let Some(sender) = guard.as_ref() {
                             let _ = sender.send(GlobalKeyEvent {
                                 vk: kb.vkCode as u16,
                                 is_down,
@@ -307,10 +311,9 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
             let snapshot = HotkeySnapshot::from_scheduler(&scheduler);
             bindings = HotkeyBindings::from_snapshot(&snapshot);
             log_bindings(&bindings);
-            crate::debug_log_internal(
-                "stage-ok",
-                &format!("[Hotkeys] bindings re-parsed on version {current_version}"),
-            );
+            hotkey_diag_push(format!(
+                "bindings re-parsed on version {current_version}"
+            ));
         }
         let fallback_events = if received.is_err() {
             held.retain(|&key| key_down(key));
@@ -332,81 +335,48 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
         let events = received.into_iter().chain(fallback_events.into_iter());
         for event in events {
             let was_held = held.iter().any(|&key| key_code_matches(event.vk, key));
-            crate::debug_log_internal(
-                "info",
-                &format!(
-                    "[Hotkeys][diag] last_event vk=0x{:02X} down={} held_before={:?}",
-                    event.vk, event.is_down, held
-                ),
-            );
-            if matches!(event.vk, 0x23 | 0x31 | 0x38 | 0x61 | 0x6A) {
-                crate::debug_log_internal(
-                    "info",
-                    &format!(
-                        "[Hotkeys] numpad diagnostic: vk=0x{:02X} down={} was_held={} held={:?}",
-                        event.vk, event.is_down, was_held, held
-                    ),
-                );
+            // v4.2 hardening: NO file logging on this thread — WH_KEYBOARD_LL
+            // is synchronous system-wide; diagnostics go to the ring buffer.
+            if !was_held {
+                hotkey_diag_push(format!("vk=0x{:02X} down={}", event.vk, event.is_down));
             }
             if event.is_down {
                 held.insert(event.vk);
                 if !was_held {
                     fire_hotkey_group(&bindings.toggle, event.vk, &held, || {
-                        crate::debug_log_internal(
-                            "stage-ok",
-                            "[Hotkeys][diag] fired_action=toggle",
-                        );
+                        hotkey_diag_push("fired_action=toggle".into());
                         let prev = scheduler.is_active();
                         let mode = scheduler.hotkey_toggle(Some(&app_handle));
-                        crate::debug_log_internal(
-                            "stage-ok",
-                            &format!("[Hotkeys] toggle fired: was_active={} mode={}", prev, mode),
-                        );
+                        hotkey_diag_push(format!(
+                            "toggle done was_active={prev} mode={mode}"
+                        ));
                     });
                     fire_hotkey_group(&bindings.mode_switch, event.vk, &held, || {
-                        crate::debug_log_internal(
-                            "stage-ok",
-                            "[Hotkeys][diag] fired_action=mode_switch",
-                        );
+                        hotkey_diag_push("fired_action=mode_switch".into());
                         scheduler.toggle_mode(Some(&app_handle));
                     });
                     fire_hotkey_group(&bindings.emergency_stop, event.vk, &held, || {
-                        crate::debug_log_internal(
-                            "stage-ok",
-                            "[Hotkeys][diag] fired_action=emergency_stop",
-                        );
+                        hotkey_diag_push("fired_action=emergency_stop".into());
                         scheduler.set_active(false, Some(&app_handle));
                         if let Some(exec) = crate::core::global() {
                             exec.stop();
                         }
                     });
                     fire_hotkey_group(&bindings.speed_up, event.vk, &held, || {
-                        crate::debug_log_internal(
-                            "stage-ok",
-                            "[Hotkeys][diag] fired_action=speed_up",
-                        );
+                        hotkey_diag_push("fired_action=speed_up".into());
                         scheduler.adjust_cps(1.0, Some(&app_handle));
                     });
                     fire_hotkey_group(&bindings.slow_down, event.vk, &held, || {
-                        crate::debug_log_internal(
-                            "stage-ok",
-                            "[Hotkeys][diag] fired_action=slow_down",
-                        );
+                        hotkey_diag_push("fired_action=slow_down".into());
                         scheduler.adjust_cps(-1.0, Some(&app_handle));
                     });
                     fire_hotkey_group(&bindings.capture_pos, event.vk, &held, || {
-                        crate::debug_log_internal(
-                            "stage-ok",
-                            "[Hotkeys][diag] fired_action=capture_pos",
-                        );
+                        hotkey_diag_push("fired_action=capture_pos".into());
                         let pos = get_cursor_pos();
                         let _ = app_handle.emit("global-capture-pos", pos);
                     });
                     fire_hotkey_group(&bindings.record_toggle, event.vk, &held, || {
-                        crate::debug_log_internal(
-                            "stage-ok",
-                            "[Hotkeys][diag] fired_action=record_toggle",
-                        );
+                        hotkey_diag_push("fired_action=record_toggle".into());
                         let _ = app_handle.emit("global-record-toggle", ());
                     });
                 }
@@ -415,7 +385,7 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
             }
         }
         if poll_iter % 100 == 0 {
-            crate::debug_log_internal("info", "[Hotkeys] event-driven heartbeat");
+            hotkey_diag_push("heartbeat".into());
         }
     }
 
@@ -431,6 +401,31 @@ struct GlobalKeyEvent {
     is_down: bool,
 }
 
+/// In-memory diagnostic ring buffer for hotkey events (v4.2 hardening).
+/// Replaces per-event file logging on the LL-hook thread: WH_KEYBOARD_LL is
+/// synchronous system-wide, so ANY file I/O in its callback adds input
+/// latency for EVERY application. Diagnostics land here at zero syscall
+/// cost and are dumped only when explicitly requested.
+static HOTKEY_DIAG: StdMutex<VecDeque<String>> = StdMutex::new(VecDeque::new());
+
+fn hotkey_diag_push(line: String) {
+    if let Ok(mut q) = HOTKEY_DIAG.lock() {
+        if q.len() >= 128 {
+            q.pop_front();
+        }
+        q.push_back(line);
+    }
+}
+
+/// Dump and clear the diagnostic buffer (test hooks / debug command).
+#[allow(dead_code)]
+pub fn hotkey_diag_dump() -> Vec<String> {
+    HOTKEY_DIAG
+        .lock()
+        .map(|mut q| q.drain(..).collect())
+        .unwrap_or_default()
+}
+
 static GLOBAL_HOTKEY_TX: OnceLock<StdMutex<Option<Sender<GlobalKeyEvent>>>> = OnceLock::new();
 static GLOBAL_HOTKEY_STOP: AtomicBool = AtomicBool::new(false);
 static GLOBAL_HOTKEY_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -442,13 +437,9 @@ fn fire_hotkey_group<F: FnOnce()>(group: &[HotkeyCombo], vk: u16, held: &HashSet
     {
         fire();
     } else if group.iter().any(|combo| combo.trigger_matches(vk)) {
-        crate::debug_log_internal(
-            "warn",
-            &format!(
-                "[Hotkeys][diag] reject_reason=required_key_not_held trigger=0x{:02X} held={:?}",
-                vk, held
-            ),
-        );
+        hotkey_diag_push(format!(
+            "reject required_key_not_held trigger=0x{vk:02X}"
+        ));
     }
 }
 
@@ -1215,5 +1206,40 @@ mod physical_integration_tests {
         assert_ne!(before, after, "snapshot diff must be detected");
         assert!(bindings_after.toggle.iter().any(|c| c.trigger == 0x54));
         assert!(!bindings_after.toggle.iter().any(|c| c.trigger == 0x52));
+    }
+}
+
+
+#[cfg(test)]
+mod hotpath_silence_tests {
+    /// v4.2 hardening regression guard: the LL-hook listener loop must not
+    /// perform file logging — WH_KEYBOARD_LL is synchronous system-wide, so
+    /// any I/O in the callback path adds keyboard latency for every app.
+    /// This test scans the source of `run_keyboard_hook`'s while-loop and
+    /// fails if a `debug_log_internal` call appears inside it.
+    #[test]
+    fn hook_loop_contains_no_file_logging() {
+        let src = include_str!("mod.rs");
+        let start = src
+            .find("fn run_keyboard_hook")
+            .expect("run_keyboard_hook not found");
+        let loop_start = src[start..]
+            .find("while !GLOBAL_HOTKEY_STOP")
+            .expect("listener loop not found")
+            + start;
+        // Loop ends right before the hook teardown block.
+        let end = src[loop_start..]
+            .find("unsafe {")
+            .map(|i| i + loop_start)
+            .expect("end of listener loop not found");
+        let body = &src[loop_start..end];
+        let offenders: Vec<&str> = body
+            .lines()
+            .filter(|l| l.contains("debug_log_internal"))
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "file logging found on the LL-hook hot path: {offenders:?}"
+        );
     }
 }
