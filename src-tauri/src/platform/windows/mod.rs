@@ -304,7 +304,7 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
 
     while !GLOBAL_HOTKEY_STOP.load(Ordering::Acquire) {
         poll_iter += 1;
-        let received = event_rx.recv_timeout(Duration::from_millis(100));
+        let received = event_rx.recv_timeout(Duration::from_millis(20));
         let current_version = scheduler.hotkeys_version();
         if current_version != seen_version {
             seen_version = current_version;

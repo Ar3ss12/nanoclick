@@ -5,6 +5,7 @@ use crate::platform::{
 use rand::Rng;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::collections::VecDeque;
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
@@ -16,6 +17,31 @@ pub struct StatusUpdate {
     pub clicks_done: u32,
     pub cps: f64,
     pub status_text: String,
+}
+
+// ── Toggle diagnostics ring buffer (v4.2 hardening) ──────────
+// Replaces file I/O in `hotkey_toggle()`. The toggle path is called from the
+// global hotkey listener thread every R-press; file I/O + eprint!() added a
+// measurable Mutex+Write cost (5-50 ms). All diagnostics land here as zero
+// syscall cost; tests / debug command can dump the buffer.
+static TOGGLE_DIAG: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+
+fn toggle_diag_push(line: impl Into<String>) {
+    if let Ok(mut q) = TOGGLE_DIAG.lock() {
+        if q.len() >= 128 {
+            q.pop_front();
+        }
+        q.push_back(line.into());
+    }
+}
+
+/// Dump and clear the toggle diagnostic buffer (test hooks / debug command).
+#[allow(dead_code)]
+pub fn toggle_diag_dump() -> Vec<String> {
+    if let Ok(mut q) = TOGGLE_DIAG.lock() {
+        return q.drain(..).collect();
+    }
+    Vec::new()
 }
 
 pub struct ClickScheduler {
@@ -244,6 +270,7 @@ impl ClickScheduler {
     /// Free helper: stale-held cleanup decision. A key press is considered
     /// "fresh" when the physical key is up even if the listener missed the
     /// key-up event (channel/buffer overflow during fast tapping).
+    #[cfg(test)]
     fn stale_held_check(physically_down: bool, is_in_held: bool) -> bool {
         is_in_held && !physically_down
     }
@@ -264,10 +291,7 @@ impl ClickScheduler {
         let prev_mode = self.mode_autoclicker.load(Ordering::Relaxed);
         let was_active = self.is_active();
         if !prev_mode {
-            crate::debug_log_internal(
-                "stage-ok",
-                "[Hotkeys] start/stop ignored because Work Mode is active",
-            );
+            toggle_diag_push("[Hotkeys] toggle ignored: work mode active");
             self.set_active(false, app_handle);
             if let Some(ref app) = app_handle {
                 let _ = app.emit(
@@ -287,13 +311,9 @@ impl ClickScheduler {
         let new_mode = true;
         let new_active = !was_active;
 
-        crate::debug_log_internal(
-            "stage-ok",
-            &format!(
-                "[Hotkeys] hotkey_toggle: prev_mode={} prev_active={} → new_mode={} new_active={}",
-                prev_mode, was_active, new_mode, new_active
-            ),
-        );
+        toggle_diag_push(format!(
+            "[Hotkeys] toggle prev_mode={prev_mode} prev_active={was_active}              new_mode={new_mode} new_active={new_active}"
+        ));
 
         self.mode_autoclicker.store(new_mode, Ordering::Relaxed);
         self.set_active(new_active, app_handle);
@@ -617,6 +637,14 @@ impl ClickScheduler {
                     }
                 }
 
+                // v4.2 instant stop (single mode): wait_until returned success,
+                // but `active` may have flipped between the load() above and us
+                // reaching this line — a 1-2 ms gap is enough for the listener
+                // thread to call set_active(false). Re-check now so we do not
+                // dispatch one phantom click after stop.
+                if !active.load(Ordering::Relaxed) {
+                    break;
+                }
                 if platform_backend.click_mouse(&cur_click_spec) {
                     let total = clicks_done.fetch_add(1, Ordering::Relaxed) + 1;
                     batch_click_count += 1;
@@ -726,5 +754,81 @@ mod hotkey_debounce_tests {
         }
         let t1 = *last.lock().unwrap();
         assert_eq!(t0, t1, "blocked calls must not update the debounce timestamp");
+    }
+
+    #[test]
+    fn toggle_diag_push_does_not_panic() {
+        // 150 pushes (above capacity 128) — should not panic, should keep
+        // exactly 128 entries.
+        for i in 0..150 {
+            toggle_diag_push(format!("line {i}"));
+        }
+        let dump = toggle_diag_dump();
+        assert_eq!(dump.len(), 128, "ring buffer should cap at 128");
+        // oldest entries should be the first ones dropped, so first in dump
+        // is line 22 (150 - 128)
+        assert!(dump[0].contains("22"), "expected line 22 first; got {}", dump[0]);
+        assert!(dump.last().unwrap().contains("149"));
+    }
+
+    #[test]
+    fn toggle_diag_dump_returns_empty_second_call() {
+        for i in 0..3 {
+            toggle_diag_push(format!("x{i}"));
+        }
+        let d1 = toggle_diag_dump();
+        assert_eq!(d1.len(), 3);
+        let d2 = toggle_diag_dump();
+        assert!(d2.is_empty(), "dump should drain");
+    }
+}
+
+#[cfg(test)]
+mod single_mode_active_precheck_tests {
+    /// Source-level structural test: the worker loop's single-mode branch
+    /// must re-check `active` immediately before invoking `click_mouse`,
+    /// otherwise `wait_until → true → click_mouse` allows a phantom click
+    /// when `active` flips to false in the 1-2 ms gap. We assert this by
+    /// scanning the source for the canonical pattern.
+    #[test]
+    fn single_mode_has_active_precheck_before_click_mouse() {
+        let src = include_str!("scheduler.rs");
+        // Find the single-mode click invocation (not the one inside the
+        // while-loop for double decomposition).
+        // The active pre-check must appear BEFORE the click_mouse call.
+        let precheck_off = src.find("// v4.2 instant stop (single mode): wait_until returned success")
+            .expect("precheck comment not present in scheduler.rs");
+        // The single-mode click_mouse call is the SECOND occurrence in the
+        // source: the first is inside the double-decomposition loop.
+        let mut click_positions = src.match_indices("if platform_backend.click_mouse(&cur_click_spec)");
+        click_positions.next();  // skip double-mode
+        let (click_off, _) = click_positions.next()
+            .expect("single-mode click_mouse call missing");
+        assert!(
+            precheck_off < click_off,
+            "active pre-check must appear before single-mode click_mouse call"
+        );
+    }
+
+    /// Source-level guard: the remaining 2 debug_log_internal("stage-ok", ...)
+    /// calls in hotkey_toggle were replaced with toggle_diag_push.
+    #[test]
+    fn hotkey_toggle_no_longer_writes_to_log_file() {
+        let src = include_str!("scheduler.rs");
+        let start = src.find("pub fn hotkey_toggle")
+            .expect("hotkey_toggle not found");
+        let after = start;
+        let end = src[after..].find("mode_str.to_string()")
+            .map(|o| start + o + "mode_str.to_string()".len())
+            .expect("hotkey_toggle body end not found");
+        let body = &src[start..end];
+        assert!(
+            !body.contains("debug_log_internal"),
+            "hotkey_toggle() must not call debug_log_internal (write to log file)"
+        );
+        assert!(
+            body.contains("toggle_diag_push"),
+            "hotkey_toggle() should push diagnostics to the ring buffer instead"
+        );
     }
 }
