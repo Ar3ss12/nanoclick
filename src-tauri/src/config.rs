@@ -28,6 +28,7 @@ pub struct Config {
     pub stop_duration_ms: u64,
     pub stop_time_epoch_sec: i64,
     pub gui_lock_ms: u64,
+    pub hotkey_debounce_ms: u32,
     pub active_mode: String,
 }
 
@@ -60,6 +61,7 @@ impl Default for Config {
             stop_duration_ms: 0,
             stop_time_epoch_sec: 0,
             gui_lock_ms: 1500,
+            hotkey_debounce_ms: 80,
             active_mode: "autoclicker".into(),
         }
     }
@@ -94,6 +96,7 @@ impl From<AppConfig> for Config {
             stop_duration_ms: (app_cfg.engine.stop_duration_min as u64).saturating_mul(60_000),
             stop_time_epoch_sec: parse_stop_time_str(&app_cfg.engine.stop_time_str),
             gui_lock_ms: app_cfg.engine.gui_lock_ms,
+            hotkey_debounce_ms: app_cfg.engine.hotkey_debounce_ms,
             active_mode: app_cfg.active_mode,
         }
     }

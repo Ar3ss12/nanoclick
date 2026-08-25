@@ -37,6 +37,8 @@ pub struct EngineSettings {
     #[serde(default)]
     pub stop_time_str: String,
     pub gui_lock_ms: u64,
+    #[serde(default = "default_hotkey_debounce_ms")]
+    pub hotkey_debounce_ms: u32,
 }
 
 fn default_click_type() -> String {
@@ -79,6 +81,7 @@ impl Default for EngineSettings {
             stop_duration_min: 0,
             stop_time_str: String::new(),
             gui_lock_ms: 1500,
+            hotkey_debounce_ms: 80,
         }
     }
 }
@@ -509,4 +512,8 @@ mod tests {
         let (_, migrated) = migrate_config(value).expect("current config should parse");
         assert!(!migrated);
     }
+}
+
+fn default_hotkey_debounce_ms() -> u32 {
+    80
 }

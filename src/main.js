@@ -272,7 +272,8 @@ let currentConfig = {
     start_delay_ms: 0,
     stop_duration_min: 0,
     stop_time_str: "",
-    gui_lock_ms: 1500
+    gui_lock_ms: 1500,
+    hotkey_debounce_ms: 80
   },
   hotkeys: {
     toggle: "R / K",
@@ -514,6 +515,7 @@ function updateUiFromConfig(config) {
   updateSubSettingsVisibility();
 
   if (guiLockDelayInput) guiLockDelayInput.value = config.engine.gui_lock_ms || 1500;
+  applyDebounceFromConfig(config.engine.hotkey_debounce_ms || 80);
 
   if (config.hotkeys) {
     if (hotkeyRecordLabel) hotkeyRecordLabel.textContent = config.hotkeys.toggle || "R / K";
@@ -667,6 +669,7 @@ async function saveConfig() {
       currentConfig.engine.jitter_percent = parseFloat(randomInput?.value) || 0.0;
       currentConfig.engine.click_limit = safeInt(limitInput?.value, 0);
       currentConfig.engine.gui_lock_ms = safeInt(guiLockDelayInput?.value, 1500) || 1500;
+      currentConfig.engine.hotkey_debounce_ms = safeInt(debounceSlider?.value, 80);
       currentConfig.engine.jitter_radius_px = safeInt(jitterRadiusInput?.value, 3) || 3;
 
       const startDelayInput = document.getElementById("startDelayInput");
@@ -2992,4 +2995,33 @@ window.addEventListener("DOMContentLoaded", () => {
 
   console.log("[NanoClick] window.__TAURI__:", typeof window.__TAURI__, window.__TAURI__ ? Object.keys(window.__TAURI__) : "");
   console.log("[NanoClick] TAURI.core.invoke type:", typeof TAURI?.core?.invoke);
+});
+
+// ── Toggle Response Time (debounce) ──────────────────────────
+function debounceZoneLabel(ms) {
+  if (ms <= 35) return "Instant";
+  if (ms <= 75) return "Fast";
+  return "Relaxed";
+}
+function applyDebounceFromConfig(ms) {
+  const slider = document.getElementById("debounceSlider");
+  const label = document.getElementById("debounceLabel");
+  if (!slider || !label) return;
+  const clamped = Math.max(5, Math.min(250, parseInt(ms) || 80));
+  slider.value = clamped;
+  label.textContent = `${clamped} ms · ${debounceZoneLabel(clamped)}`;
+  document.querySelectorAll(".debounce-zone").forEach(z => {
+    const zm = parseInt(z.dataset.ms);
+    z.classList.toggle("zone-active",
+      (zm === 5 && clamped <= 35) ||
+      (zm === 60 && clamped > 35 && clamped <= 75) ||
+      (zm === 150 && clamped > 75));
+  });
+}
+document.addEventListener("DOMContentLoaded", () => {
+  const slider = document.getElementById("debounceSlider");
+  if (slider) slider.addEventListener("input", () => applyDebounceFromConfig(slider.value));
+  document.querySelectorAll(".debounce-zone").forEach(z => {
+    z.addEventListener("click", () => applyDebounceFromConfig(parseInt(z.dataset.ms)));
+  });
 });

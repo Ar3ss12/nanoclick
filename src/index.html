@@ -499,6 +499,34 @@
                   <span id="recordMacroHotkeyLabel" class="font-mono">Ctrl+Shift+R</span>
                 </button>
               </div>
+
+              <div class="settings-row settings-row-stack">
+                <div class="settings-row-top">
+                  <span class="settings-label">
+                    Toggle Response Time
+                    <span class="info-tip" title="Maximum delay between a keypress and the autoclicker stopping. Instant ~5 ms is the fastest, Relaxed ~200 ms is for slow taps.">ⓘ</span>
+                  </span>
+                  <span id="debounceLabel" class="settings-value">80 ms · Fast</span>
+                </div>
+                <div class="debounce-zones">
+                  <button class="debounce-zone zone-instant" data-ms="5" type="button">
+                    <span class="zone-label">Instant</span>
+                    <span class="zone-ms">5–35 ms</span>
+                  </button>
+                  <button class="debounce-zone zone-fast" data-ms="60" type="button">
+                    <span class="zone-label">Fast</span>
+                    <span class="zone-ms">36–75 ms</span>
+                  </button>
+                  <button class="debounce-zone zone-relaxed" data-ms="150" type="button">
+                    <span class="zone-label">Relaxed</span>
+                    <span class="zone-ms">75–250 ms</span>
+                  </button>
+                </div>
+                <input id="debounceSlider" type="range" min="5" max="250" step="5" value="80" class="debounce-slider" />
+                <div class="settings-row-bottom">
+                  <span class="settings-hint">Lower = faster reaction. Higher = protection against accidental presses.</span>
+                </div>
+              </div>
             </div>
           </div>
         </div>

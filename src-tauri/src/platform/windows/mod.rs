@@ -341,8 +341,18 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
                 hotkey_diag_push(format!("vk=0x{:02X} down={}", event.vk, event.is_down));
             }
             if event.is_down {
+                // v4.2 race fix: a missed key-up leaves the vk stuck in
+                // `held`, which would swallow every later press of the same
+                // key (fast double-tap bug). If the physical key is actually
+                // up, this DOWN is a fresh press: clean stale state first.
+                let mut stale_cleaned = false;
+                if was_held && !key_down(event.vk) {
+                    held.retain(|&key| !key_code_matches(event.vk, key));
+                    stale_cleaned = true;
+                    hotkey_diag_push(format!("stale-held cleaned vk=0x{:02X}", event.vk));
+                }
                 held.insert(event.vk);
-                if !was_held {
+                if !was_held || stale_cleaned {
                     fire_hotkey_group(&bindings.toggle, event.vk, &held, || {
                         hotkey_diag_push("fired_action=toggle".into());
                         let prev = scheduler.is_active();

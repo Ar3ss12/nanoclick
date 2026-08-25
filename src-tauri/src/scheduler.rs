@@ -49,6 +49,8 @@ pub struct ClickScheduler {
     hotkey_record_toggle: Arc<AtomicBool>,
     hotkeys_version: Arc<AtomicU64>,
     hotkey_record: Arc<Mutex<String>>,
+    hotkey_debounce_ms: Arc<AtomicU32>,
+    last_toggle_instant: Arc<Mutex<Option<std::time::Instant>>>,
 }
 
 impl ClickScheduler {
@@ -84,6 +86,8 @@ impl ClickScheduler {
             hotkey_capture_pos: Arc::new(Mutex::new(initial_cfg.hotkey_capture_pos)),
             hotkey_record_toggle: Arc::new(AtomicBool::new(initial_cfg.hotkey_record_toggle)),
             hotkey_record: Arc::new(Mutex::new(initial_cfg.hotkey_record)),
+            hotkey_debounce_ms: Arc::new(AtomicU32::new(initial_cfg.hotkey_debounce_ms)),
+            last_toggle_instant: Arc::new(Mutex::new(None)),
             hotkeys_version: Arc::new(AtomicU64::new(1)),
         }
     }
@@ -117,6 +121,7 @@ impl ClickScheduler {
             stop_duration_ms: 0,
             stop_time_epoch_sec: 0,
             gui_lock_ms: 1500,
+            hotkey_debounce_ms: self.hotkey_debounce_ms.load(Ordering::Relaxed),
             active_mode: if is_auto {
                 "autoclicker".into()
             } else {
@@ -216,7 +221,46 @@ impl ClickScheduler {
     ///   - From `work` mode → ignored; Work Mode is a safety lock.
     ///   - From `autoclicker` mode, currently active → stop clicking.
     ///   - From `autoclicker` mode, currently idle → start clicking.
+
+    /// Returns true if a toggle should be applied; updates the timestamp.
+    /// Returns false (and leaves the old timestamp) if the call is still
+    /// within the debounce window of the previous accepted toggle. The
+    /// helper is split out so it can be unit-tested without touching the
+    /// full platform init.
+    fn toggle_debounce_check(
+        last: &Arc<Mutex<Option<std::time::Instant>>>,
+        debounce_ms: u32,
+    ) -> bool {
+        let mut guard = last.lock().unwrap();
+        if let Some(t) = *guard {
+            if t.elapsed().as_millis() < debounce_ms as u128 {
+                return false;
+            }
+        }
+        *guard = Some(std::time::Instant::now());
+        true
+    }
+
+    /// Free helper: stale-held cleanup decision. A key press is considered
+    /// "fresh" when the physical key is up even if the listener missed the
+    /// key-up event (channel/buffer overflow during fast tapping).
+    fn stale_held_check(physically_down: bool, is_in_held: bool) -> bool {
+        is_in_held && !physically_down
+    }
     pub fn hotkey_toggle(&self, app_handle: Option<&AppHandle>) -> String {
+        // ── v4.2 race hardening (debounce) ────────────────────────────
+        // Ignore toggles that arrive faster than hotkey_debounce_ms.
+        // Returns true when the toggle should be applied, false when it
+        // was swallowed. Updates the timestamp atomically.
+        if !Self::toggle_debounce_check(
+            &self.last_toggle_instant,
+            self.hotkey_debounce_ms.load(Ordering::Relaxed),
+        ) {
+            return if self.is_active() { "autoclicker" } else { "work" }.into();
+        }
+
+        // State-based decision (not blind inversion): resolve the action
+        // from live atomics so a duplicated event can never flip twice.
         let prev_mode = self.mode_autoclicker.load(Ordering::Relaxed);
         let was_active = self.is_active();
         if !prev_mode {
@@ -477,7 +521,39 @@ impl ClickScheduler {
                 // ── HOLD CLICK LOGIC ─────────────────────────────────────
                 if cur_click_spec.click_type == crate::platform::backend::ClickType::Hold {
                     // Press Down
-                    if platform_backend.click_mouse(&cur_click_spec) {
+                    // v4.2 instant stop: re-check active immediately before
+                // dispatching so a stop signal that arrived during the wait
+                // never produces an extra click.
+                if !active.load(Ordering::Relaxed) {
+                    break;
+                }
+                // v4.2 instant stop: Double is decomposed here so the gap
+                // between the two clicks is cancel-aware (the backend has no
+                // cancel handle; the scheduler owns the active flag).
+                if cur_click_spec.click_type == crate::platform::backend::ClickType::Double {
+                    let mut dispatched = 0usize;
+                    while dispatched < 2 && active.load(Ordering::Relaxed) {
+                        let single = crate::platform::backend::ClickSpec {
+                            click_type: crate::platform::backend::ClickType::Single,
+                            ..cur_click_spec.clone()
+                        };
+                        if platform_backend.click_mouse(&single) {
+                            clicks_done.fetch_add(1, Ordering::Relaxed);
+                            batch_click_count += 1;
+                        }
+                        dispatched += 1;
+                        if dispatched < 2 {
+                            let target = Instant::now() + Duration::from_millis(50);
+                            let event_handle =
+                                stop_event_lock.lock().unwrap().clone().expect("stop_event");
+                            if !timer.wait_until(target, event_handle)
+                                || !active.load(Ordering::Relaxed)
+                            {
+                                break;
+                            }
+                        }
+                    }
+                } else if platform_backend.click_mouse(&cur_click_spec) {
                         let total = clicks_done.fetch_add(1, Ordering::Relaxed) + 1;
                         batch_click_count += 1;
                         if let Some(ref app) = app_handle {
@@ -603,5 +679,52 @@ impl ClickScheduler {
                 );
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod hotkey_debounce_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    #[test]
+    fn first_toggle_always_passes() {
+        let last = Arc::new(Mutex::new(None));
+        assert!(ClickScheduler::toggle_debounce_check(&last, 80));
+    }
+
+    #[test]
+    fn second_toggle_within_window_is_blocked() {
+        let last = Arc::new(Mutex::new(None));
+        assert!(ClickScheduler::toggle_debounce_check(&last, 80));
+        assert!(!ClickScheduler::toggle_debounce_check(&last, 80));
+    }
+
+    #[test]
+    fn second_toggle_after_window_passes() {
+        let last = Arc::new(Mutex::new(None));
+        assert!(ClickScheduler::toggle_debounce_check(&last, 5));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert!(ClickScheduler::toggle_debounce_check(&last, 5));
+    }
+
+    #[test]
+    fn stale_held_helpers_cover_fast_double_tap() {
+        assert!(ClickScheduler::stale_held_check(false, true));
+        assert!(!ClickScheduler::stale_held_check(true, false));
+        assert!(!ClickScheduler::stale_held_check(true, true));
+    }
+
+    #[test]
+    fn debounce_block_does_not_advance_timestamp() {
+        let last = Arc::new(Mutex::new(None));
+        assert!(ClickScheduler::toggle_debounce_check(&last, 80));
+        let t0 = *last.lock().unwrap();
+        for _ in 0..5 {
+            assert!(!ClickScheduler::toggle_debounce_check(&last, 80));
+        }
+        let t1 = *last.lock().unwrap();
+        assert_eq!(t0, t1, "blocked calls must not update the debounce timestamp");
     }
 }
