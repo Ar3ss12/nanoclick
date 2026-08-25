@@ -3019,9 +3019,32 @@ function applyDebounceFromConfig(ms) {
   });
 }
 document.addEventListener("DOMContentLoaded", () => {
+  // Engine inputs that need explicit auto-save (debounce/start-delay/stop-time).
+  // Note: most engine inputs already wire saveConfig via the L760-L800 change
+  // listeners; these three were missing — without explicit input/change
+  // listeners they never persisted across restarts.
+  const startDelayInputEl = document.getElementById("startDelayInput");
+  const stopDurationInputEl = document.getElementById("stopDurationInput");
+  const stopTimeInputEl = document.getElementById("stopTimeInput");
+  if (startDelayInputEl) startDelayInputEl.addEventListener("input", () => { if (typeof saveConfig === "function") saveConfig(); });
+  if (stopDurationInputEl) stopDurationInputEl.addEventListener("input", () => { if (typeof saveConfig === "function") saveConfig(); });
+  if (stopTimeInputEl) stopTimeInputEl.addEventListener("input", () => { if (typeof saveConfig === "function") saveConfig(); });
+
   const slider = document.getElementById("debounceSlider");
-  if (slider) slider.addEventListener("input", () => applyDebounceFromConfig(slider.value));
+  if (slider) slider.addEventListener("input", () => {
+    applyDebounceFromConfig(slider.value);
+    if (typeof currentConfig !== "undefined" && currentConfig && currentConfig.engine) {
+      currentConfig.engine.hotkey_debounce_ms = Math.max(5, Math.min(250, parseInt(slider.value) || 80));
+    }
+    if (typeof saveConfig === "function") saveConfig();
+  });
   document.querySelectorAll(".debounce-zone").forEach(z => {
-    z.addEventListener("click", () => applyDebounceFromConfig(parseInt(z.dataset.ms)));
+    z.addEventListener("click", () => {
+      applyDebounceFromConfig(parseInt(z.dataset.ms));
+      if (typeof currentConfig !== "undefined" && currentConfig && currentConfig.engine) {
+        currentConfig.engine.hotkey_debounce_ms = Math.max(5, Math.min(250, parseInt(z.dataset.ms) || 80));
+      }
+      if (typeof saveConfig === "function") saveConfig();
+    });
   });
 });
