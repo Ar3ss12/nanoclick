@@ -605,7 +605,7 @@ function showCapabilityBar(message) {
 // ===== Version display sync (v1.1+) =====
 // The header/about version labels always mirror the real backend version
 // (Cargo.toml / tauri.conf.json). No more hardcoded "vX.Y" in the HTML.
-async async function syncVersionDisplay() {
+async function syncVersionDisplay() {
   try {
     const v = await invoke("get_app_version");
     // Show FULL version (e.g. "v1.1.2") instead of truncated "v1.1".
