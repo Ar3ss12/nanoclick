@@ -181,7 +181,7 @@ if (typeof window === "undefined" || !TAURI || !TAURI.core || typeof TAURI.core.
 // before installing. Downloads only happen from the configured endpoint
 // (GitHub Releases of this repository). Nothing is installed without a
 // valid signature.
-const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000; // every 6 hours
+const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000; // every 30 minutesurs
 const UPDATE_DISMISS_KEY = "nanoclick_update_dismissed_version";
 
 function showUpdateBar(version, notes) {
@@ -232,12 +232,17 @@ async function checkForAppUpdates(manual = false) {
     if (info) {
       let dismissed = null;
       try { dismissed = localStorage.getItem(UPDATE_DISMISS_KEY); } catch {}
+      console.log("[updater] latest:", info.version, "local:", "(see get_app_version)", "dismissed:", dismissed);
       if (manual || dismissed !== info.version) {
         showUpdateBar(info.version, info.body);
         if (manual) console.log("[updater] update", info.version, "available");
+      } else {
+        console.log("[updater] update", info.version, "available but previously dismissed by user");
       }
     } else if (manual) {
       console.log("[updater] up to date");
+    } else {
+      console.log("[updater] no update available");
     }
   } catch (e) {
     console.error("[updater] check failed:", e);
@@ -247,6 +252,7 @@ async function checkForAppUpdates(manual = false) {
 
 function startUpdateChecker() {
   if (!TAURI) return;
+  console.log("[updater] starting checker; first check in 3s, then every", UPDATE_CHECK_INTERVAL_MS / 1000, "s");
   setTimeout(() => checkForAppUpdates(false), 3_000); // first check shortly after launch
   setInterval(() => checkForAppUpdates(false), UPDATE_CHECK_INTERVAL_MS);
 }
@@ -599,14 +605,28 @@ function showCapabilityBar(message) {
 // ===== Version display sync (v1.1+) =====
 // The header/about version labels always mirror the real backend version
 // (Cargo.toml / tauri.conf.json). No more hardcoded "vX.Y" in the HTML.
-async function syncVersionDisplay() {
+async async function syncVersionDisplay() {
   try {
     const v = await invoke("get_app_version");
-    const short = "v" + v.split(".").slice(0, 2).join(".");
+    // Show FULL version (e.g. "v1.1.2") instead of truncated "v1.1".
+    // Strip any pre-release suffix from the runtime string for display only.
+    const display = "v" + String(v).split(/[-+]/)[0];
     document.querySelectorAll(".ver").forEach((el) => {
-      el.textContent = el.id === "aboutVersion" ? short + " PRO" : short;
+      el.textContent = el.id === "aboutVersion" ? display + " PRO" : display;
     });
-    document.title = "NanoClick v" + short.slice(1);
+    // Click on version badge = manual update check (idempotent wiring).
+    document.querySelectorAll(".ver").forEach((el) => {
+      el.style.cursor = "pointer";
+      el.title = "Click to check for updates";
+      if (!el._updateHandlerWired) {
+        el.addEventListener("click", () => {
+          console.log("[updater] manual check via version badge");
+          checkForAppUpdates(true);
+        });
+        el._updateHandlerWired = true;
+      }
+    });
+    document.title = "NanoClick " + display;
     console.log("[NanoClick] UI version synced to", v);
   } catch (err) {
     console.warn("[NanoClick] version sync failed:", err);
