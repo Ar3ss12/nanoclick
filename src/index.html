@@ -374,6 +374,57 @@
                   <span class="settings-label">Visual Click Ripple Effect</span>
                 </label>
               </div>
+              <div class="settings-row">
+                <label class="checkbox-row">
+                  <input type="checkbox" id="hudCheckbox" class="custom-checkbox">
+                  <span class="checkbox-box"></span>
+                  <span class="settings-label">Floating Click Counter HUD</span>
+                </label>
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" style="display:block;margin-bottom:6px;">Full Backup (config + presets + macros)</label>
+                <div style="display:flex;gap:8px;">
+                  <button id="exportBackupBtn" class="preset-modal-btn save" style="flex:1;">⬇ Export backup</button>
+                  <button id="importBackupBtn" class="preset-modal-btn cancel" style="flex:1;">⬆ Import backup</button>
+                </div>
+              </div>
+
+              <div class="settings-row">
+                <label class="settings-label" style="display:block;margin-bottom:6px;">Per-App Profiles (auto-switch preset when a window title contains the text)</label>
+                <div id="appProfilesList" style="display:flex;flex-direction:column;gap:6px;margin-bottom:8px;"></div>
+                <div style="display:flex;gap:6px;">
+                  <input type="text" id="appProfileTitle" placeholder="Window title contains..." style="flex:2;background:var(--bg-elev);border:1px solid var(--border);border-radius:5px;color:var(--text);padding:5px 8px;font-size:12px;">
+                  <select id="appProfilePreset" style="flex:2;background:var(--bg-elev);border:1px solid var(--border);border-radius:5px;color:var(--text);padding:5px;font-size:12px;"></select>
+                  <button id="addAppProfileBtn" class="preset-modal-btn save" style="flex:0 0 auto;padding:5px 12px;">+ Add</button>
+                </div>
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" style="display:block;margin-bottom:6px;">Image trigger (stop when this pixel matches a target color)</label>
+                <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:8px;">
+                  <div style="display:flex;gap:6px;align-items:center;">
+                    <label style="font-size:12px;flex:0 0 50px;">X</label>
+                    <input type="number" id="imgTrigX" class="num-input-right" style="flex:1;" placeholder="0">
+                    <label style="font-size:12px;flex:0 0 50px;">Y</label>
+                    <input type="number" id="imgTrigY" class="num-input-right" style="flex:1;" placeholder="0">
+                  </div>
+                  <div style="display:flex;gap:6px;align-items:center;">
+                    <label style="font-size:12px;flex:0 0 70px;">Color #</label>
+                    <input type="text" id="imgTrigColor" style="flex:1;background:var(--bg-elev);border:1px solid var(--border);border-radius:5px;color:var(--text);padding:5px 8px;font-size:12px;font-family:monospace;" placeholder="RRGGBB or #RRGGBB">
+                    <button id="pickPixelBtn" class="preset-modal-btn cancel" style="flex:0 0 auto;padding:5px 10px;" title="Read pixel at current cursor position">📍 Pick</button>
+                  </div>
+                  <div style="display:flex;gap:6px;align-items:center;">
+                    <label style="font-size:12px;flex:0 0 70px;">Tolerance</label>
+                    <input type="number" id="imgTrigTol" min="0" max="255" value="12" style="flex:1;background:var(--bg-elev);border:1px solid var(--border);border-radius:5px;color:var(--text);padding:5px 8px;font-size:12px;">
+                    <label style="font-size:12px;flex:0 0 60px;">Poll ms</label>
+                    <input type="number" id="imgTrigPoll" min="50" max="2000" value="120" style="flex:1;background:var(--bg-elev);border:1px solid var(--border);border-radius:5px;color:var(--text);padding:5px 8px;font-size:12px;">
+                  </div>
+                  <div style="display:flex;gap:6px;">
+                    <button id="setImgTrigBtn" class="preset-modal-btn save" style="flex:1;">💾 Save trigger</button>
+                    <button id="clearImgTrigBtn" class="preset-modal-btn cancel" style="flex:1;">🗑 Clear</button>
+                  </div>
+                  <div id="imgTrigStatus" style="font-size:11px;color:var(--text-dim);">No image trigger set.</div>
+                </div>
+              </div>
             </div>
           </div>
 

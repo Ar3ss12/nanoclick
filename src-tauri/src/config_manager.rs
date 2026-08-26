@@ -159,6 +159,8 @@ pub struct UiSettings {
     pub sound_feedback: bool,
     pub visual_ripple: bool,
     #[serde(default)]
+    pub show_hud: bool,
+    #[serde(default)]
     pub start_minimized: bool,
     #[serde(default)]
     pub autostart: bool,
@@ -191,6 +193,7 @@ impl Default for UiSettings {
             mode: "floating_hud".into(),
             sound_feedback: false,
             visual_ripple: true,
+            show_hud: false,
             start_minimized: false,
             autostart: false,
             minimize_to_tray: true,
@@ -202,6 +205,44 @@ impl Default for UiSettings {
     }
 }
 
+/// Auto-switch rule: when the foreground window title contains
+/// `title_contains` (case-insensitive), apply preset `preset_id`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct ImageTrigger {
+    /// Screen X coordinate of the pixel to watch.
+    pub x: i32,
+    /// Screen Y coordinate of the pixel to watch.
+    pub y: i32,
+    /// Target RGBA color (0xRRGGBBAA). The click loop polls this point
+    /// while running and stops when the pixel matches.
+    pub color_rgba: u32,
+    /// Per-channel tolerance (0..=255). The comparison accepts a pixel
+    /// when every channel is within this distance of the target.
+    #[serde(default = "default_image_trigger_tolerance")]
+    pub tolerance: u32,
+    /// Sampling interval in milliseconds (50..=2000). Faster = more
+    /// responsive but more CPU on the GDI path.
+    #[serde(default = "default_image_trigger_poll_ms")]
+    pub poll_ms: u32,
+    /// Optional human-readable label shown in the UI.
+    #[serde(default)]
+    pub label: String,
+}
+
+fn default_image_trigger_tolerance() -> u32 {
+    12
+}
+fn default_image_trigger_poll_ms() -> u32 {
+    120
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppProfile {
+    pub title_contains: String,
+    pub preset_id: String,
+    #[serde(default)]
+    pub enabled: bool,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PresetItem {
     pub id: String,
@@ -363,6 +404,14 @@ pub struct AppConfig {
     pub ui: UiSettings,
     #[serde(default = "default_presets")]
     pub presets: Vec<PresetItem>,
+    /// Window-title -> preset auto-switch rules (checked every 500 ms).
+    #[serde(default)]
+    pub app_profiles: Vec<AppProfile>,
+    /// Optional pixel-watch trigger that stops the clicker when a screen
+    /// pixel matches a target color. Single-slot for v1; multi-slot can
+    /// be added later if needed.
+    #[serde(default)]
+    pub image_trigger: Option<ImageTrigger>,
 }
 
 impl Default for AppConfig {
@@ -375,6 +424,8 @@ impl Default for AppConfig {
             hotkeys: HotkeySettings::default(),
             ui: UiSettings::default(),
             presets: default_presets(),
+            app_profiles: Vec::new(),
+            image_trigger: None,
         }
     }
 }
@@ -385,10 +436,25 @@ pub struct ConfigManager {
 
 impl ConfigManager {
     pub fn new() -> Self {
-        let proj_dirs = ProjectDirs::from("com", "nanoclick", "NanoClick");
-        let config_dir = match proj_dirs {
-            Some(dirs) => dirs.config_dir().to_path_buf(),
-            None => PathBuf::from(".nanoclick"),
+        let portable = std::env::args().any(|a| a == "--portable")
+            || std::path::Path::new("nanoclick.ini").exists();
+        Self::with_portable(portable)
+    }
+
+    pub fn with_portable(portable: bool) -> Self {
+        let config_dir = if portable {
+            // Portable mode: keep config next to the executable so the
+            // whole app can be moved/copied to a USB stick.
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+                .map(|p| p.join("nanoclick_data"))
+                .unwrap_or_else(|| PathBuf::from("./nanoclick_data"))
+        } else {
+            match ProjectDirs::from("com", "nanoclick", "NanoClick") {
+                Some(dirs) => dirs.config_dir().to_path_buf(),
+                None => PathBuf::from(".nanoclick"),
+            }
         };
 
         if !config_dir.exists() {
@@ -397,6 +463,12 @@ impl ConfigManager {
 
         let config_path = config_dir.join("config.json");
         ConfigManager { config_path }
+    }
+
+    /// True when running in portable mode (--portable flag or nanoclick.ini present).
+    pub fn is_portable() -> bool {
+        std::env::args().any(|a| a == "--portable")
+            || std::path::Path::new("nanoclick.ini").exists()
     }
 
     pub fn get_config_path(&self) -> String {

@@ -76,6 +76,11 @@ pub struct ClickScheduler {
     preset_hotkeys: Arc<Mutex<Vec<String>>>,
     hotkey_debounce_ms: Arc<AtomicU32>,
     last_toggle_instant: Arc<Mutex<Option<std::time::Instant>>>,
+    /// Optional image trigger copied from config (used by the click loop).
+    image_trigger: Arc<Mutex<Option<crate::config_manager::ImageTrigger>>>,
+    /// Set to true by the image-trigger poller to ask the click loop
+    /// to stop on the next iteration.
+    image_trigger_should_stop: Arc<AtomicBool>,
 }
 
 impl ClickScheduler {
@@ -115,6 +120,8 @@ impl ClickScheduler {
             hotkey_debounce_ms: Arc::new(AtomicU32::new(initial_cfg.hotkey_debounce_ms)),
             last_toggle_instant: Arc::new(Mutex::new(None)),
             hotkeys_version: Arc::new(AtomicU64::new(1)),
+            image_trigger: Arc::new(Mutex::new(None)),
+            image_trigger_should_stop: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -198,6 +205,13 @@ impl ClickScheduler {
         // Signal the hotkey listener that bindings changed so it re-parses
         // them once instead of diffing string snapshots on every poll.
         self.hotkeys_version.fetch_add(1, Ordering::Release);
+    }
+
+    /// Replace the active image trigger. Pass None to clear.
+    pub fn set_image_trigger(&self, trigger: Option<crate::config_manager::ImageTrigger>) {
+        *self.image_trigger.lock().unwrap() = trigger;
+        self.image_trigger_should_stop
+            .store(false, Ordering::Relaxed);
     }
 
     /// Monotonic counter bumped every time hotkey bindings are updated.
@@ -402,6 +416,27 @@ impl ClickScheduler {
         next
     }
 
+    /// Emit the HUD click counter at most every 100 ms (10 Hz) so the
+    /// tiny always-on-top window never becomes an IPC bottleneck.
+    fn hud_maybe_emit(app: &AppHandle, total: u32) {
+        use std::sync::atomic::AtomicU64;
+        use std::time::{Duration, Instant};
+        static LAST_HUD_EMIT: AtomicU64 = AtomicU64::new(0);
+        static LAST_HUD_INST: std::sync::OnceLock<std::sync::Mutex<Instant>> =
+            std::sync::OnceLock::new();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let last = LAST_HUD_EMIT.load(Ordering::Relaxed);
+        if now_ms.saturating_sub(last) < 100 {
+            return;
+        }
+        LAST_HUD_EMIT.store(now_ms, Ordering::Relaxed);
+        let _ = app.emit("hud-clicks", total);
+        let _ = Duration::from_millis(0); // keep import used
+        let _ = LAST_HUD_INST.get_or_init(|| std::sync::Mutex::new(Instant::now()));
+    }
     fn spawn_worker(&self, app_handle: Option<AppHandle>) {
         let active = Arc::clone(&self.active);
         let mode_autoclicker = Arc::clone(&self.mode_autoclicker);
@@ -424,6 +459,8 @@ impl ClickScheduler {
         let stop_duration_arc = Arc::clone(&self.stop_duration_ms);
         let stop_time_arc = Arc::clone(&self.stop_time_epoch_sec);
         let stop_event_lock = Arc::clone(&self.stop_event);
+        let image_trigger_arc = Arc::clone(&self.image_trigger);
+        let image_trigger_should_stop = Arc::clone(&self.image_trigger_should_stop);
 
         thread::spawn(move || {
             let mut rng = rand::thread_rng();
@@ -474,6 +511,50 @@ impl ClickScheduler {
                 );
             }
 
+            // ── IMAGE TRIGGER POLLER ──────────────────────────────────────
+            // Spawned ONLY when an image trigger is set; exits as soon as
+            // the click loop is no longer active.
+            let poller_should_stop = Arc::new(AtomicBool::new(false));
+            let poller_stop_flag = Arc::clone(&poller_should_stop);
+            {
+                let image_trigger_for_poller = Arc::clone(&image_trigger_arc);
+                let should_stop_flag = Arc::clone(&image_trigger_should_stop);
+                let active_flag = Arc::clone(&active);
+                let poller_done = Arc::clone(&poller_should_stop);
+                let app_for_poller = app_handle.clone();
+                std::thread::spawn(move || loop {
+                    if poller_done.load(Ordering::Relaxed) || !active_flag.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let snapshot = image_trigger_for_poller.lock().unwrap().clone();
+                    if let Some(trig) = snapshot {
+                        let poll_ms = trig.poll_ms.clamp(50, 2000) as u64;
+                        std::thread::sleep(Duration::from_millis(poll_ms));
+                        if let Some(rgba) = platform::get_pixel_rgba(trig.x, trig.y) {
+                            let tol = trig.tolerance.min(255);
+                            let tr = (trig.color_rgba >> 24) & 0xFF;
+                            let tg = (trig.color_rgba >> 16) & 0xFF;
+                            let tb = (trig.color_rgba >> 8) & 0xFF;
+                            let pr = (rgba >> 24) & 0xFF;
+                            let pg = (rgba >> 16) & 0xFF;
+                            let pb = (rgba >> 8) & 0xFF;
+                            if tr.abs_diff(pr) <= tol
+                                && tg.abs_diff(pg) <= tol
+                                && tb.abs_diff(pb) <= tol
+                            {
+                                should_stop_flag.store(true, Ordering::Relaxed);
+                                if let Some(ref app) = app_for_poller {
+                                    let _ = app.emit("image-trigger-match", trig.label.clone());
+                                }
+                                break;
+                            }
+                        }
+                    } else {
+                        std::thread::sleep(Duration::from_millis(200));
+                    }
+                });
+            }
+
             // ── START DELAY (configurable) ─────────────────────────────
             let cur_start_delay = start_delay_arc.load(Ordering::Relaxed);
             if cur_start_delay > 0 {
@@ -497,6 +578,15 @@ impl ClickScheduler {
                     && run_started_at.elapsed() >= Duration::from_millis(cur_stop_duration_ms)
                 {
                     active.store(false, Ordering::Relaxed);
+                    break;
+                }
+                // Image-trigger stop request (raised by the poller below).
+                if image_trigger_should_stop.load(Ordering::Relaxed) {
+                    active.store(false, Ordering::Relaxed);
+                    image_trigger_should_stop.store(false, Ordering::Relaxed);
+                    if let Some(ref app) = app_handle {
+                        let _ = app.emit("image-trigger-stopped", "matched target pixel");
+                    }
                     break;
                 }
                 // Stop by absolute wall-clock time
@@ -582,6 +672,9 @@ impl ClickScheduler {
                         }
                     } else if platform_backend.click_mouse(&cur_click_spec) {
                         let total = clicks_done.fetch_add(1, Ordering::Relaxed) + 1;
+                        if let Some(ref app) = app_handle {
+                            Self::hud_maybe_emit(app, total);
+                        }
                         batch_click_count += 1;
                         if let Some(ref app) = app_handle {
                             let _ = app.emit(
@@ -654,6 +747,9 @@ impl ClickScheduler {
                 }
                 if platform_backend.click_mouse(&cur_click_spec) {
                     let total = clicks_done.fetch_add(1, Ordering::Relaxed) + 1;
+                    if let Some(ref app) = app_handle {
+                        Self::hud_maybe_emit(app, total);
+                    }
                     batch_click_count += 1;
                     if let Some(ref app) = app_handle {
                         let _ = app.emit(

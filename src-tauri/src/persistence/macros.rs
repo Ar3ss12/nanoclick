@@ -21,9 +21,19 @@ pub struct MacroStore {
 
 /// Get the path to `macros.json` next to `app_config.json`.
 pub fn macros_path() -> PathBuf {
-    let dirs = directories::ProjectDirs::from("com", "nanoclick", "NanoClick")
-        .expect("ProjectDirs resolve");
-    dirs.config_dir().join(MACROS_FILE)
+    // Mirror the config directory chosen by ConfigManager so portable
+    // mode keeps everything (config + macros) next to the executable.
+    if crate::config_manager::ConfigManager::is_portable() {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .map(|p| p.join("nanoclick_data").join(MACROS_FILE))
+            .unwrap_or_else(|| PathBuf::from("./nanoclick_data").join(MACROS_FILE))
+    } else {
+        let dirs = directories::ProjectDirs::from("com", "nanoclick", "NanoClick")
+            .expect("ProjectDirs resolve");
+        dirs.config_dir().join(MACROS_FILE)
+    }
 }
 
 /// Load all saved macros from disk.

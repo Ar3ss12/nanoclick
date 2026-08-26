@@ -331,6 +331,7 @@ const configPathDisplay = document.getElementById("configPathDisplay");
 const guiLockDelayInput = document.getElementById("guiLockDelayInput");
 const jitterRadiusInput = document.getElementById("jitterRadiusInput");
 const rippleCheckbox = document.getElementById("rippleCheckbox");
+const hudCheckbox = document.getElementById("hudCheckbox");
 const footerModeShortcut = document.getElementById("footerModeShortcut");
 
 // Modal
@@ -542,6 +543,7 @@ function updateUiFromConfig(config) {
 
   if (jitterRadiusInput) jitterRadiusInput.value = config.engine.jitter_radius_px;
   if (rippleCheckbox) rippleCheckbox.checked = config.ui.visual_ripple;
+if (hudCheckbox) hudCheckbox.checked = !!config.ui.show_hud;
 
   if (startMinimizedCheckbox) startMinimizedCheckbox.checked = !!config.ui.start_minimized;
   if (autostartCheckbox) autostartCheckbox.checked = !!config.ui.autostart;
@@ -738,6 +740,7 @@ async function saveConfig() {
         currentConfig.hotkeys = { toggle: "R / K", mode_switch: "Ctrl+Alt+M", emergency_stop: "Escape", speed_up: "Ctrl+=", slow_down: "Ctrl+-", capture_pos: "Ctrl+P", record_hotkey: "Ctrl+Shift+R" };
       }
       if (rippleCheckbox) currentConfig.ui.visual_ripple = rippleCheckbox.checked;
+if (hudCheckbox) currentConfig.ui.show_hud = hudCheckbox.checked;
 
       if (!currentConfig.ui) currentConfig.ui = {};
       if (startMinimizedCheckbox) currentConfig.ui.start_minimized = startMinimizedCheckbox.checked;
@@ -835,6 +838,15 @@ if (repeatIntervalInput) repeatIntervalInput.addEventListener("change", saveConf
 if (guiLockDelayInput) guiLockDelayInput.addEventListener("change", saveConfig);
 if (jitterRadiusInput) jitterRadiusInput.addEventListener("change", saveConfig);
 if (rippleCheckbox) rippleCheckbox.addEventListener("change", saveConfig);
+if (hudCheckbox) hudCheckbox.addEventListener("change", async () => {
+  currentConfig.ui.show_hud = hudCheckbox.checked;
+  try {
+    await invoke("toggle_hud_window", { show: hudCheckbox.checked });
+  } catch (e) {
+    console.error("toggle_hud_window failed:", e);
+  }
+  saveConfig();
+});
 
 // Radio buttons change listener
 document.querySelectorAll('input[type="radio"]').forEach(r => {
@@ -1118,6 +1130,14 @@ listen("global-preset-hotkey", async (event) => {
     return;
   }
   await applyPreset(preset.id);
+});
+
+// App-profile auto-switch: payload = preset id chosen by the window-title
+// rule that matched the current foreground window.
+listen("app-profile-activate", async (event) => {
+  const presetId = String(event.payload || "");
+  if (!presetId) return;
+  await applyPreset(presetId);
 });
 setupHotkeyRecorder(emergencyRecordBtn, "emergency_stop");
 setupHotkeyRecorder(speedUpRecordBtn, "speed_up");
@@ -2642,6 +2662,27 @@ function formatActionShort(a) {
 // Post-process an already recorded Action list. The recorder's Rust
 // normalizer handles raw events; this pass handles edits and macros loaded
 // from storage, where only Actions remain.
+// Humanize: add ±jitterPercent variation to every wait interval so the
+// macro no longer looks perfectly metronomic. Values are clamped to
+// [1 ms, 30 s]; the seed is per-action so the same input produces the
+// same output (safe to run multiple times).
+function humanizeActionList(actions, jitterPercent = 20) {
+  if (!Array.isArray(actions)) return actions;
+  const pct = Math.max(0, Math.min(80, Number(jitterPercent) || 0));
+  if (pct === 0) return actions;
+  return actions.map((a) => {
+    if (!a || typeof a !== "object") return a;
+    if (a.type !== "wait") return a;
+    const original = Number(a.ms);
+    if (!Number.isFinite(original) || original < 1) return a;
+    const seed = Math.abs(((a.ms * 1103515245 + 12345) & 0x7fffffff) ^ Date.now()) % 1000;
+    const rnd = (seed / 1000) * 2 - 1; // -1..+1 deterministic-ish
+    const jittered = original * (1 + (pct / 100) * rnd);
+    const clamped = Math.max(1, Math.min(30000, Math.round(jittered)));
+    return { ...a, ms: clamped, _humanized: true };
+  });
+}
+
 function optimizeActionList(actions, level = optimizeLevel) {
   const moveThreshold = level === "subtle" ? 10 : level === "aggressive" ? 40 : 20;
   const compact = [];
@@ -2776,6 +2817,7 @@ async function openVisualEditor(macro, onChange) {
           <button class="ve-add ve-add-move" data-type="move">＋ Move</button>
           <button class="ve-add ve-add-key" data-type="key">＋ Key</button>
           <button id="veOptimizeBtn" class="btn-mini" title="Remove noise and simplify recorded actions">⚡ Optimize</button>
+          <button id="veHumanizeBtn" class="btn-mini" title="Add natural timing jitter (±20%) to wait intervals">🧬 Humanize</button>
         </div>
         <div id="veActionsList" class="ve-canvas"></div>
         <div style="margin-top:14px;display:flex;justify-content:space-between;align-items:center;gap:8px;">
@@ -2837,6 +2879,12 @@ async function openVisualEditor(macro, onChange) {
     refresh();
     const removed = before - macro.actions.length;
     console.log(`[MacroOptimize] ${macro.name}: ${before} → ${macro.actions.length} actions (${removed} removed)`);
+  });
+
+  document.getElementById("veHumanizeBtn").addEventListener("click", () => {
+    macro.actions = humanizeActionList(macro.actions, 20);
+    refresh();
+    console.log(`[MacroHumanize] ${macro.name}: applied ±20% jitter to wait intervals`);
   });
 
   const wireRowHandlers = () => {
@@ -3248,4 +3296,213 @@ document.addEventListener("DOMContentLoaded", () => {
     renderStats();
   });
   setInterval(renderStats, 1000);
+  // Restore HUD on startup if enabled.
+  if (currentConfig?.ui?.show_hud && typeof invoke === "function") {
+    invoke("toggle_hud_window", { show: true }).catch((e) =>
+      console.error("hud restore failed:", e)
+    );
+  }
+});
+
+
+// ── FULL BACKUP EXPORT / IMPORT ─────────────────────────────
+document.addEventListener("DOMContentLoaded", () => {
+  const exportBtn = document.getElementById("exportBackupBtn");
+  const importBtn = document.getElementById("importBackupBtn");
+  if (exportBtn) exportBtn.addEventListener("click", async () => {
+    try {
+      const json = await invoke("export_full_backup");
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `nanoclick_backup_${new Date().toISOString().slice(0, 10)}.json`;
+      anchor.style.display = "none";
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (err) {
+      console.error("[Backup] export failed:", err);
+      alert("Failed to export backup.");
+    }
+  });
+  if (importBtn) importBtn.addEventListener("click", () => {
+    const fileInput = document.createElement("input");
+    fileInput.type = "file";
+    fileInput.accept = ".json,application/json";
+    fileInput.addEventListener("change", async (event) => {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      const restoreConfig = confirm("Restore CONFIG + PRESETS from the backup?\n\nOK = yes, Cancel = keep current config.");
+      const restoreMacros = restoreConfig && confirm("Also restore MACROS?\n\nOK = yes (replaces current macros), Cancel = keep current macros.");
+      if (!restoreConfig && !restoreMacros) return;
+      try {
+        const backupJson = await file.text();
+        const msg = await invoke("import_full_backup", {
+          backupJson,
+          restoreConfig,
+          restoreMacros,
+        });
+        alert(`Backup restored successfully (${msg}). Restart the app to see all changes.`);
+      } catch (err) {
+        console.error("[Backup] import failed:", err);
+        alert(`Import failed: ${err}`);
+      }
+    });
+    fileInput.click();
+  });
+});
+
+
+// ── PER-APP PROFILES ────────────────────────────────────────
+function renderAppProfiles() {
+  const list = document.getElementById("appProfilesList");
+  const select = document.getElementById("appProfilePreset");
+  if (!list || !select) return;
+  ensurePresetsExist();
+  select.innerHTML = currentConfig.presets
+    .map((p, i) => `<option value="${p.id}">${i + 1}. ${escapeHtml(p.name)}</option>`)
+    .join("");
+  const profiles = currentConfig.app_profiles || [];
+  list.innerHTML = profiles.length === 0
+    ? `<div style="color:var(--text-dim);font-size:12px;">No rules yet.</div>`
+    : profiles.map((pr, idx) => `
+      <div style="display:flex;align-items:center;gap:6px;font-size:12px;">
+        <span class="ap-rule" data-idx="${idx}" style="flex:1;background:var(--bg-elev);border:1px solid var(--border);border-radius:5px;padding:4px 8px;">
+          <strong>${escapeHtml(pr.title_contains)}</strong> → ${escapeHtml(currentConfig.presets.find(p => p.id === pr.preset_id)?.name || pr.preset_id)} ${pr.enabled ? "✅" : "⏸"}</span>
+        <button class="ap-toggle" data-idx="${idx}" title="Enable/disable">${pr.enabled ? "⏸" : "▶"}</button>
+        <button class="ap-del" data-idx="${idx}" title="Delete">🗑</button>
+      </div>`).join("");
+  list.querySelectorAll(".ap-toggle").forEach(b => b.addEventListener("click", () => {
+    const i = Number(b.dataset.idx);
+    currentConfig.app_profiles[i].enabled = !currentConfig.app_profiles[i].enabled;
+    saveConfig();
+    renderAppProfiles();
+  }));
+  list.querySelectorAll(".ap-del").forEach(b => b.addEventListener("click", () => {
+    const i = Number(b.dataset.idx);
+    currentConfig.app_profiles.splice(i, 1);
+    saveConfig();
+    renderAppProfiles();
+  }));
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  renderAppProfiles();
+  const addBtn = document.getElementById("addAppProfileBtn");
+  if (addBtn) addBtn.addEventListener("click", () => {
+    const titleInput = document.getElementById("appProfileTitle");
+    const presetSelect = document.getElementById("appProfilePreset");
+    const title = (titleInput?.value || "").trim();
+    if (!title) return;
+    if (!Array.isArray(currentConfig.app_profiles)) currentConfig.app_profiles = [];
+    currentConfig.app_profiles.push({
+      title_contains: title,
+      preset_id: presetSelect?.value || "",
+      enabled: true,
+    });
+    if (titleInput) titleInput.value = "";
+    saveConfig();
+    renderAppProfiles();
+  });
+});
+
+// ── IMAGE TRIGGER (F8) ────────────────────────────────────────
+function renderImageTrigger() {
+  const status = document.getElementById("imgTrigStatus");
+  const xIn = document.getElementById("imgTrigX");
+  const yIn = document.getElementById("imgTrigY");
+  const cIn = document.getElementById("imgTrigColor");
+  const tIn = document.getElementById("imgTrigTol");
+  const pIn = document.getElementById("imgTrigPoll");
+  const trig = currentConfig.image_trigger;
+  if (!status) return;
+  if (!trig) {
+    status.textContent = "No image trigger set.";
+    return;
+  }
+  if (xIn && !xIn.value) xIn.value = trig.x;
+  if (yIn && !yIn.value) yIn.value = trig.y;
+  if (cIn && !cIn.value) {
+    const hex = (trig.color_rgba >>> 8).toString(16).padStart(6, "0").toUpperCase();
+    cIn.value = "#" + hex;
+  }
+  if (tIn && !tIn.value) tIn.value = trig.tolerance;
+  if (pIn && !pIn.value) pIn.value = trig.poll_ms;
+  status.textContent = `Active: (${trig.x}, ${trig.y}) #${(trig.color_rgba >>> 8).toString(16).padStart(6, "0").toUpperCase()} ±${trig.tolerance} / ${trig.poll_ms}ms`;
+  status.style.color = "var(--accent)";
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  renderImageTrigger();
+  const pickBtn = document.getElementById("pickPixelBtn");
+  const saveBtn = document.getElementById("setImgTrigBtn");
+  const clearBtn = document.getElementById("clearImgTrigBtn");
+  if (pickBtn) pickBtn.addEventListener("click", async () => {
+    try {
+      const [x, y] = await invoke("get_cursor_pos_now");
+      document.getElementById("imgTrigX").value = x;
+      document.getElementById("imgTrigY").value = y;
+      const rgba = await invoke("pick_screen_pixel", { x, y });
+      if (rgba != null) {
+        const hex = (rgba >>> 8).toString(16).padStart(6, "0").toUpperCase();
+        document.getElementById("imgTrigColor").value = "#" + hex;
+      }
+    } catch (e) { console.error("pickPixel failed:", e); }
+  });
+  if (saveBtn) saveBtn.addEventListener("click", async () => {
+    const x = parseInt(document.getElementById("imgTrigX").value, 10);
+    const y = parseInt(document.getElementById("imgTrigY").value, 10);
+    let hex = (document.getElementById("imgTrigColor").value || "").replace("#", "").trim();
+    if (hex.length !== 6 || !/^[0-9A-Fa-f]{6}$/.test(hex)) {
+      alert("Color must be 6 hex digits (RRGGBB).");
+      return;
+    }
+    const colorRgba = (parseInt(hex, 16) << 8) | 0xFF;
+    const tol = Math.max(0, Math.min(255, parseInt(document.getElementById("imgTrigTol").value, 10) || 12));
+    const poll = Math.max(50, Math.min(2000, parseInt(document.getElementById("imgTrigPoll").value, 10) || 120));
+    if (!Number.isFinite(x) || !Number.isFinite(y)) { alert("X and Y required."); return; }
+    const trigger = { x, y, color_rgba: colorRgba, tolerance: tol, poll_ms: poll, label: `pixel ${x},${y}` };
+    currentConfig.image_trigger = trigger;
+    try {
+      await invoke("set_image_trigger", { trigger });
+      renderImageTrigger();
+    } catch (e) { alert(`Save failed: ${e}`); }
+  });
+  if (clearBtn) clearBtn.addEventListener("click", async () => {
+    currentConfig.image_trigger = null;
+    try {
+      await invoke("set_image_trigger", { trigger: null });
+      const status = document.getElementById("imgTrigStatus");
+      if (status) { status.textContent = "No image trigger set."; status.style.color = ""; }
+    } catch (e) { alert(`Clear failed: ${e}`); }
+  });
+  listen("image-trigger-match", (e) => {
+    const status = document.getElementById("imgTrigStatus");
+    if (status) { status.textContent = `Matched: ${e.payload}`; status.style.color = "var(--accent)"; }
+  });
+});
+
+// ── PORTABLE MODE BADGE (F10) ───────────────────────────────
+document.addEventListener("DOMContentLoaded", () => {
+  if (document.getElementById("portableBadge")) return;
+  const anchor = document.getElementById("saveConfigBtn")
+    || document.querySelector(".settings-row");
+  if (!anchor) return;
+  const badge = document.createElement("div");
+  badge.id = "portableBadge";
+  badge.style.cssText = "font-size:11px;color:var(--text-dim);margin-top:6px;display:none;";
+  if (document.body && window.__TAURI__ && window.__TAURI__.path) {
+    // We can detect portable mode by asking Rust through the config path.
+    invoke("get_config_path").then((p) => {
+      const looksPortable = /\\\\nanoclick_data\\\\config\\.json$/i.test(p)
+        || /\/nanoclick_data\/config\.json$/i.test(p);
+      if (looksPortable) {
+        badge.textContent = "Portable mode: config and macros stored next to NanoClick.exe";
+        badge.style.display = "block";
+        badge.style.color = "var(--accent)";
+      }
+    }).catch(() => {});
+  }
 });

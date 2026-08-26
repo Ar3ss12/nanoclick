@@ -17,10 +17,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use windows::Win32::Foundation::{LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Graphics::Gdi::{GetDC, GetPixel, ReleaseDC, HDC};
 use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, GetCursorPos, SetCursorPos, SetWindowsHookExW, UnhookWindowsHookEx,
-    KBDLLHOOKSTRUCT, WH_KEYBOARD_LL,
+    CallNextHookEx, GetCursorPos, GetForegroundWindow, GetWindowTextW, SetCursorPos,
+    SetWindowsHookExW, UnhookWindowsHookEx, KBDLLHOOKSTRUCT, WH_KEYBOARD_LL,
 };
 
 /// Parse a config button label into the neutral MouseButton type.
@@ -861,13 +862,14 @@ mod physical_integration_tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
     use std::sync::mpsc;
-    use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, TranslateMessage,
-        UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL,
+        CallNextHookEx, DispatchMessageW, GetCursorPos, GetForegroundWindow, GetMessageW,
+        GetWindowTextW, SetCursorPos, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
+        HHOOK, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL,
     };
 
     static CAPTURE_TX: OnceLock<StdMutex<Option<mpsc::Sender<(u16, bool)>>>> = OnceLock::new();
@@ -1279,5 +1281,44 @@ mod hotpath_silence_tests {
             offenders.is_empty(),
             "file logging found on the LL-hook hot path: {offenders:?}"
         );
+    }
+}
+
+/// Title of the current foreground window (empty string if unavailable).
+pub fn get_foreground_window_title() -> Option<String> {
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.0 == 0 {
+            return None;
+        }
+        let mut buf = [0u16; 512];
+        let len = GetWindowTextW(hwnd, &mut buf);
+        if len <= 0 {
+            return None;
+        }
+        Some(String::from_utf16_lossy(&buf[..len as usize]))
+    }
+}
+
+/// Read a single pixel from the screen at (x, y). Returns RGBA as u32
+/// (R in bits 24-31, G in 16-23, B in 8-15, A in 0-7). Returns None if
+/// the coordinates are off-screen or the GDI call fails.
+pub fn get_pixel_rgba(x: i32, y: i32) -> Option<u32> {
+    unsafe {
+        let hdc_screen = GetDC(None);
+        if hdc_screen.is_invalid() {
+            return None;
+        }
+        let color_ref = GetPixel(hdc_screen, x, y);
+        let _ = ReleaseDC(None, hdc_screen);
+        let raw: u32 = color_ref.0;
+        // CLR_INVALID = 0xFFFF_FFFF (== u32::MAX)
+        if raw == u32::MAX {
+            return None;
+        }
+        let r = (raw & 0xFF) as u8;
+        let g = ((raw >> 8) & 0xFF) as u8;
+        let b = ((raw >> 16) & 0xFF) as u8;
+        Some(((r as u32) << 24) | ((g as u32) << 16) | ((b as u32) << 8) | 0xFF)
     }
 }

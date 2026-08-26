@@ -3,7 +3,8 @@
   "identifier": "default",
   "description": "Default capabilities for Autoclicker Pro GUI",
   "windows": [
-    "main"
+    "main",
+    "hud"
   ],
   "permissions": [
     "core:default",

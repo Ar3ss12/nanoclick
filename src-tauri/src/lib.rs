@@ -13,7 +13,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use tauri::{AppHandle, Manager, RunEvent, State};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
 use tauri_plugin_updater::UpdaterExt;
 
 static DEBUG_LOG_FILE: OnceLock<Mutex<Option<File>>> = OnceLock::new();
@@ -145,6 +145,41 @@ fn relaunch_app(app: AppHandle) {
     app.restart();
 }
 
+#[tauri::command]
+fn toggle_hud_window(app: AppHandle, show: bool) -> Result<(), String> {
+    use tauri::LogicalPosition;
+    use tauri::WebviewWindowBuilder;
+    if let Some(win) = app.get_webview_window("hud") {
+        if !show {
+            let _ = win.close();
+            return Ok(());
+        }
+        let _ = win.show();
+        return Ok(());
+    }
+    if !show {
+        return Ok(());
+    }
+    WebviewWindowBuilder::new(&app, "hud", tauri::WebviewUrl::App("hud.html".into()))
+        .title("NanoClick HUD")
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .resizable(false)
+        .focused(false)
+        .inner_size(120.0, 34.0)
+        .position(40.0, 40.0)
+        .build()
+        .map_err(|e| format!("hud window: {e}"))?;
+    // Click-through so the HUD never blocks the mouse.
+    if let Some(win) = app.get_webview_window("hud") {
+        use tauri::PhysicalPosition;
+        let _ = win.set_position(PhysicalPosition::new(60, 60));
+        let _ = win.set_ignore_cursor_events(true);
+    }
+    Ok(())
+}
 #[derive(serde::Serialize)]
 struct UpdateInfo {
     version: String,
@@ -235,6 +270,7 @@ pub fn run() {
     scheduler.set_config(config::Config::from(initial_app_cfg.clone()));
 
     let scheduler_for_setup = Arc::clone(&scheduler);
+    let config_manager_arc = Arc::clone(&config_manager);
 
     let app_state = AppState {
         scheduler,
@@ -264,6 +300,44 @@ pub fn run() {
         .manage(macro_state)
         .setup(move |app| {
             let handle = app.handle().clone();
+
+            // ── App-profile auto-switch thread ────────────────────────
+            // Every 500 ms: read the foreground window title; when it matches
+            // an enabled app_profile rule whose preset differs from the last
+            // applied one, emit 'app-profile-activate' with the preset id.
+            {
+                let cm = config_manager_arc.clone();
+                let h = handle.clone();
+                std::thread::spawn(move || {
+                    let mut last_preset: Option<String> = None;
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        let profiles = {
+                            let cfg = cm.load();
+                            if cfg.app_profiles.is_empty() {
+                                continue;
+                            }
+                            cfg.app_profiles
+                                .into_iter()
+                                .filter(|p| p.enabled && !p.title_contains.is_empty())
+                                .collect::<Vec<_>>()
+                        };
+                        let Some(title) = platform::get_foreground_window_title() else {
+                            continue;
+                        };
+                        let lower = title.to_lowercase();
+                        for p in profiles {
+                            if lower.contains(&p.title_contains.to_lowercase()) {
+                                if last_preset.as_deref() != Some(p.preset_id.as_str()) {
+                                    last_preset = Some(p.preset_id.clone());
+                                    let _ = h.emit("app-profile-activate", p.preset_id);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
             // v4.2 — start hotkeys through the HotkeyBackend contract.
             let hk = platform::default_hotkey_backend(scheduler_for_setup, handle);
             if let Err(e) = hk.start() {
@@ -284,6 +358,12 @@ pub fn run() {
             get_status,
             open_config_folder,
             set_windows_autostart,
+            toggle_hud_window,
+            commands::export_full_backup,
+            commands::import_full_backup,
+            commands::set_image_trigger,
+            commands::pick_screen_pixel,
+            commands::get_cursor_pos_now,
             // v3.2 Macro Engine commands
             commands::list_macros,
             commands::save_macro,

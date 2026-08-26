@@ -62,6 +62,32 @@ impl Default for MacroState {
 
 // ─── Persistence ────────────────────────────────────────────────
 
+// ─── Image trigger (F8) ─────────────────────────────────────
+
+#[tauri::command]
+pub fn set_image_trigger(
+    state: State<'_, crate::AppState>,
+    trigger: Option<crate::config_manager::ImageTrigger>,
+) -> Result<(), String> {
+    state.scheduler.set_image_trigger(trigger.clone());
+    // Persist alongside the rest of the config so a restart keeps it.
+    let mut cfg = state.config_manager.load();
+    cfg.image_trigger = trigger;
+    state.config_manager.save(&cfg)
+}
+
+#[tauri::command]
+pub fn pick_screen_pixel(x: i32, y: i32) -> Option<u32> {
+    platform::get_pixel_rgba(x, y)
+}
+
+#[tauri::command]
+pub fn get_cursor_pos_now() -> (i32, i32) {
+    platform::get_cursor_pos()
+}
+
+// ─── Recorder ────────────────────────────────────────────────
+
 #[tauri::command]
 pub fn list_macros() -> Vec<Macro> {
     persistence::macros::load_macros()
@@ -209,6 +235,67 @@ fn uuid_like_id() -> String {
 
 // ─── Tests ───────────────────────────────────────────────────────
 
+// ── Full backup: config + presets + macros in one file ──────
+
+#[tauri::command]
+pub fn export_full_backup(state: State<'_, crate::AppState>) -> Result<String, String> {
+    let app_cfg = state.config_manager.load();
+    let macros = crate::persistence::macros::load_macros();
+    let backup = serde_json::json!({
+        "backup_version": 1,
+        "exported_at": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        "app_version": env!("CARGO_PKG_VERSION"),
+        "config": app_cfg,
+        "macros": macros,
+    });
+    serde_json::to_string_pretty(&backup).map_err(|e| format!("serialize backup: {e}"))
+}
+
+#[tauri::command]
+pub fn import_full_backup(
+    state: State<'_, crate::AppState>,
+    backup_json: String,
+    restore_config: bool,
+    restore_macros: bool,
+) -> Result<String, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(&backup_json).map_err(|e| format!("parse backup: {e}"))?;
+    if value
+        .get("backup_version")
+        .and_then(serde_json::Value::as_u64)
+        != Some(1)
+    {
+        return Err("unsupported or missing backup_version (expected 1)".into());
+    }
+    let mut restored: Vec<String> = Vec::new();
+    if restore_config {
+        if let Some(cfg_value) = value.get("config") {
+            let cfg: crate::config_manager::AppConfig =
+                serde_json::from_value(cfg_value.clone())
+                    .map_err(|e| format!("invalid config in backup: {e}"))?;
+            state.config_manager.save(&cfg)?;
+            if let Some(trigger) = cfg.image_trigger.clone() {
+                state.scheduler.set_image_trigger(Some(trigger));
+            }
+            restored.push("config+presets".to_string());
+        }
+    }
+    if restore_macros {
+        if let Some(macros_value) = value.get("macros") {
+            let macros: Vec<crate::core::Macro> = serde_json::from_value(macros_value.clone())
+                .map_err(|e| format!("invalid macros in backup: {e}"))?;
+            crate::persistence::macros::save_macros(&macros)?;
+            restored.push(format!("{} macros", macros.len()));
+        }
+    }
+    if restored.is_empty() {
+        return Err("nothing selected to restore".into());
+    }
+    Ok(format!("restored: {}", restored.join(", ")))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
