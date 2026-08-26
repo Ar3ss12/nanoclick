@@ -73,6 +73,7 @@ pub struct ClickScheduler {
     hotkey_record_toggle: Arc<AtomicBool>,
     hotkeys_version: Arc<AtomicU64>,
     hotkey_record: Arc<Mutex<String>>,
+    preset_hotkeys: Arc<Mutex<Vec<String>>>,
     hotkey_debounce_ms: Arc<AtomicU32>,
     last_toggle_instant: Arc<Mutex<Option<std::time::Instant>>>,
 }
@@ -110,6 +111,7 @@ impl ClickScheduler {
             hotkey_capture_pos: Arc::new(Mutex::new(initial_cfg.hotkey_capture_pos)),
             hotkey_record_toggle: Arc::new(AtomicBool::new(initial_cfg.hotkey_record_toggle)),
             hotkey_record: Arc::new(Mutex::new(initial_cfg.hotkey_record)),
+            preset_hotkeys: Arc::new(Mutex::new(initial_cfg.hotkey_preset_slots.clone())),
             hotkey_debounce_ms: Arc::new(AtomicU32::new(initial_cfg.hotkey_debounce_ms)),
             last_toggle_instant: Arc::new(Mutex::new(None)),
             hotkeys_version: Arc::new(AtomicU64::new(1)),
@@ -141,6 +143,7 @@ impl ClickScheduler {
             hotkey_capture_pos: self.hotkey_capture_pos.lock().unwrap().clone(),
             hotkey_record_toggle: self.hotkey_record_toggle.load(Ordering::Relaxed),
             hotkey_record: self.hotkey_record.lock().unwrap().clone(),
+            hotkey_preset_slots: self.preset_hotkeys.lock().unwrap().clone(),
             start_delay_ms: 0,
             stop_duration_ms: 0,
             stop_time_epoch_sec: 0,
@@ -191,6 +194,7 @@ impl ClickScheduler {
         self.hotkey_record_toggle
             .store(cfg.hotkey_record_toggle, Ordering::Relaxed);
         *self.hotkey_record.lock().unwrap() = cfg.hotkey_record;
+        *self.preset_hotkeys.lock().unwrap() = cfg.hotkey_preset_slots;
         // Signal the hotkey listener that bindings changed so it re-parses
         // them once instead of diffing string snapshots on every poll.
         self.hotkeys_version.fetch_add(1, Ordering::Release);

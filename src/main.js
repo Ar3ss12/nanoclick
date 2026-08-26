@@ -1106,6 +1106,19 @@ listen("global-capture-pos", async (event) => {
   if (fixedRadio) fixedRadio.checked = true;
   await invoke("save_app_config", { config: currentConfig });
 });
+
+// Preset slot hotkeys: payload = zero-based slot index (0..8).
+listen("global-preset-hotkey", async (event) => {
+  const slot = Number(event.payload);
+  if (!Number.isInteger(slot) || slot < 0 || slot > 8) return;
+  ensurePresetsExist();
+  const preset = currentConfig.presets?.[slot];
+  if (!preset) {
+    console.warn(`preset slot ${slot + 1} is empty`);
+    return;
+  }
+  await applyPreset(preset.id);
+});
 setupHotkeyRecorder(emergencyRecordBtn, "emergency_stop");
 setupHotkeyRecorder(speedUpRecordBtn, "speed_up");
 setupHotkeyRecorder(slowDownRecordBtn, "slow_down");
@@ -1600,6 +1613,69 @@ function inspectPreset(presetId) {
   modal.classList.remove("hidden");
 }
 
+// ── PRESET HOTKEY SLOTS (1-9) ────────────────────────────────
+// Each preset can be bound to a global hotkey. Bindings are stored in
+// currentConfig.hotkeys.preset_hotkeys[slotIndex] (empty string = unbound).
+function renderPresetHotkeySlots() {
+  const grid = document.getElementById("presetHotkeySlots");
+  if (!grid) return;
+  if (!Array.isArray(currentConfig.hotkeys.preset_hotkeys)) currentConfig.hotkeys.preset_hotkeys = [];
+  const slots = currentConfig.hotkeys.preset_hotkeys;
+  while (slots.length < 9) slots.push("");
+
+  const captureBinding = (btn, slotIdx, labelEl) => {
+    btn.classList.add("recording");
+    labelEl.textContent = "Press key...";
+    const pressed = [];
+    const onKey = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const name = codeToPhysicalKey(e.code, e.key);
+      if (!pressed.includes(name)) pressed.push(name);
+      const mods = pressed.filter(k => ["Ctrl", "Alt", "Shift"].includes(k));
+      const keys = pressed.filter(k => !["Ctrl", "Alt", "Shift"].includes(k));
+      labelEl.textContent = [...mods, ...keys].join("+") || "Press key...";
+    };
+    const finish = () => {
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("keyup", done, true);
+      window.removeEventListener("click", done, true);
+      btn.classList.remove("recording");
+      const mods = pressed.filter(k => ["Ctrl", "Alt", "Shift"].includes(k));
+      const keys = pressed.filter(k => !["Ctrl", "Alt", "Shift"].includes(k));
+      const binding = [...mods, ...keys].join("+");
+      // clear any other slot that already used this binding
+      if (binding) slots.forEach((v, i2) => { if (v === binding && i2 !== slotIdx) slots[i2] = ""; });
+      slots[slotIdx] = binding;
+      labelEl.textContent = binding || "Not set";
+      saveConfig();
+    };
+    const done = () => setTimeout(finish, 150);
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("keyup", done, true);
+  };
+
+  grid.innerHTML = slots.map((binding, idx) => `
+    <div style="display:flex;align-items:center;gap:4px;font-size:11px;">
+      <span style="color:var(--text-dim);min-width:12px;">${idx + 1}</span>
+      <button class="ph-slot-btn" data-slot="${idx}" title="Click then press keys"
+        style="flex:1;background:var(--bg-elev);border:1px solid var(--border);border-radius:5px;color:var(--text);padding:3px 6px;cursor:pointer;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${binding || "Not set"}</button>
+    </div>`).join("");
+
+  grid.querySelectorAll(".ph-slot-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const slotIdx = Number(btn.dataset.slot);
+      captureBinding(btn, slotIdx, btn);
+    });
+    btn.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      const slotIdx = Number(btn.dataset.slot);
+      currentConfig.hotkeys.preset_hotkeys[slotIdx] = "";
+      btn.textContent = "Not set";
+      saveConfig();
+    });
+  });
+}
 function openPresetEditModal(p = null) {
   const modal = document.getElementById("presetEditModal");
   const editIdInput = document.getElementById("presetEditId");
@@ -1626,6 +1702,7 @@ function openPresetEditModal(p = null) {
   const coordRow = document.getElementById("presetFixedCoordRow");
   const modalTitle = document.getElementById("presetModalTitle");
 
+  renderPresetHotkeySlots();
   if (p) {
     if (modalTitle) modalTitle.textContent = "✏️ Edit Preset";
     if (editIdInput) editIdInput.value = p.id;
@@ -3089,4 +3166,86 @@ document.addEventListener("DOMContentLoaded", () => {
       if (typeof saveConfig === "function") saveConfig();
     });
   });
+});
+
+// ── STATISTICS VIEW ──────────────────────────────────────────
+// Session stats come from live status-update events. All-time stats are
+// persisted in currentConfig.stats (survive restarts, saved atomically).
+const _stats = {
+  sessionClicks: 0,
+  activeMs: 0,
+  lastUpdate: null,
+  activeNow: false,
+};
+
+function ensureStatsConfig() {
+  if (!currentConfig.stats || typeof currentConfig.stats !== "object") {
+    currentConfig.stats = { total_clicks: 0, presets_applied: 0 };
+  }
+  return currentConfig.stats;
+}
+
+function fmtDuration(ms) {
+  const sec = Math.floor(ms / 1000);
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ${sec % 60}s`;
+  const h = Math.floor(min / 60);
+  return `${h}h ${min % 60}m`;
+}
+
+function renderStats() {
+  const sc = document.getElementById("statSessionClicks");
+  const at = document.getElementById("statActiveTime");
+  const ac = document.getElementById("statAvgCps");
+  const tc = document.getElementById("statTotalClicks");
+  const pa = document.getElementById("statPresetsApplied");
+  if (sc) sc.textContent = _stats.sessionClicks.toLocaleString();
+  if (at) at.textContent = fmtDuration(_stats.activeMs);
+  if (ac) ac.textContent = _stats.activeMs > 500 ? (_stats.sessionClicks / (_stats.activeMs / 1000)).toFixed(1) : "—";
+  const st = ensureStatsConfig();
+  if (tc) tc.textContent = Number(st.total_clicks || 0).toLocaleString();
+  if (pa) pa.textContent = Number(st.presets_applied || 0).toLocaleString();
+}
+
+listen("status-update", async (event) => {
+  const d = event.payload || {};
+  const now = Date.now();
+  if (_stats.lastUpdate && _stats.activeNow && d.active) {
+    _stats.activeMs += now - _stats.lastUpdate;
+  }
+  _stats.activeNow = !!d.active;
+  _stats.lastUpdate = now;
+  const clicks = Number(d.clicks_done) || 0;
+  if (d.active && clicks >= _stats.sessionClicks) _stats.sessionClicks = clicks;
+  // All-time counter: persist in ~200-click batches to limit disk writes.
+  const st = ensureStatsConfig();
+  const lastSaved = Number(st._last_saved_clicks || 0);
+  if (clicks > 0 && clicks - lastSaved >= 200) {
+    st.total_clicks = Number(st.total_clicks || 0) + (clicks - lastSaved);
+    st._last_saved_clicks = clicks;
+    saveConfigThrottled();
+  }
+  renderStats();
+});
+
+// Count preset switches (manual + hotkey) by wrapping applyPreset.
+const _origApplyPresetForStats = applyPreset;
+applyPreset = async function (presetId) {
+  const st = ensureStatsConfig();
+  st.presets_applied = Number(st.presets_applied || 0) + 1;
+  saveConfigThrottled();
+  return _origApplyPresetForStats(presetId);
+};
+
+document.addEventListener("DOMContentLoaded", () => {
+  const resetBtn = document.getElementById("statsResetBtn");
+  if (resetBtn) resetBtn.addEventListener("click", () => {
+    currentConfig.stats = { total_clicks: 0, presets_applied: 0 };
+    _stats.sessionClicks = 0;
+    _stats.activeMs = 0;
+    saveConfig();
+    renderStats();
+  });
+  setInterval(renderStats, 1000);
 });

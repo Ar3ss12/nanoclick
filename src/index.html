@@ -535,7 +535,31 @@
         <div id="viewStats" class="view">
           <div class="config-card" style="margin-top:16px;">
             <div class="config-card-header">📊 STATISTICS</div>
-            <p style="color:var(--text-dim);padding:16px 0;">Session statistics coming soon.</p>
+            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;padding:16px 0;">
+              <div class="stat-tile" style="background:var(--bg-elev);border:1px solid var(--border);border-radius:8px;padding:14px;text-align:center;">
+                <div class="stat-value" id="statSessionClicks" style="font-size:26px;font-weight:700;font-family:'Fira Code',monospace;">0</div>
+                <div style="color:var(--text-dim);font-size:12px;margin-top:4px;">clicks this session</div>
+              </div>
+              <div class="stat-tile" style="background:var(--bg-elev);border:1px solid var(--border);border-radius:8px;padding:14px;text-align:center;">
+                <div class="stat-value" id="statActiveTime" style="font-size:26px;font-weight:700;font-family:'Fira Code',monospace;">0s</div>
+                <div style="color:var(--text-dim);font-size:12px;margin-top:4px;">active clicking time</div>
+              </div>
+              <div class="stat-tile" style="background:var(--bg-elev);border:1px solid var(--border);border-radius:8px;padding:14px;text-align:center;">
+                <div class="stat-value" id="statAvgCps" style="font-size:26px;font-weight:700;font-family:'Fira Code',monospace;">—</div>
+                <div style="color:var(--text-dim);font-size:12px;margin-top:4px;">avg CPS while active</div>
+              </div>
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px;padding-bottom:16px;">
+              <div class="stat-tile" style="background:var(--bg-elev);border:1px solid var(--border);border-radius:8px;padding:14px;text-align:center;">
+                <div class="stat-value" id="statTotalClicks" style="font-size:22px;font-weight:700;font-family:'Fira Code',monospace;">0</div>
+                <div style="color:var(--text-dim);font-size:12px;margin-top:4px;">all-time clicks (saved)</div>
+              </div>
+              <div class="stat-tile" style="background:var(--bg-elev);border:1px solid var(--border);border-radius:8px;padding:14px;text-align:center;">
+                <div class="stat-value" id="statPresetsApplied" style="font-size:22px;font-weight:700;font-family:'Fira Code',monospace;">0</div>
+                <div style="color:var(--text-dim);font-size:12px;margin-top:4px;">preset switches</div>
+              </div>
+            </div>
+            <button id="statsResetBtn" class="preset-modal-btn cancel" style="margin-bottom:16px;">Reset all-time stats</button>
           </div>
         </div>
 
@@ -731,6 +755,7 @@
         </div>
       </div>
       <div class="modal-footer">
+        <div id="presetHotkeySlots" style="width:100%;margin-bottom:10px;display:grid;grid-template-columns:repeat(3,1fr);gap:6px;"></div>
         <button id="presetCancelBtn" class="preset-modal-btn cancel">Cancel</button>
         <button id="presetSaveBtn" class="preset-modal-btn save">💾 Save preset</button>
       </div>

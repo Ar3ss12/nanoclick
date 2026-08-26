@@ -105,6 +105,10 @@ pub struct HotkeySettings {
     pub record_toggle: bool,
     #[serde(default = "default_record_hotkey")]
     pub record_hotkey: String,
+    /// Per-slot preset hotkeys: index 0 = preset slot 1 ... 8 = slot 9.
+    /// Empty string disables that slot.
+    #[serde(default)]
+    pub preset_hotkeys: Vec<String>,
 }
 
 fn default_toggle() -> String {
@@ -143,6 +147,7 @@ impl Default for HotkeySettings {
             capture_pos: "Ctrl+P".into(),
             record_toggle: true,
             record_hotkey: "Ctrl+Shift+R".into(),
+            preset_hotkeys: Vec::new(),
         }
     }
 }

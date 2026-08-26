@@ -61,7 +61,12 @@ pub fn save_macros(macros: &[Macro]) -> Result<(), String> {
         macros: macros.to_vec(),
     };
     let json = serde_json::to_string_pretty(&store).map_err(|e| format!("serialize: {}", e))?;
-    fs::write(&path, json).map_err(|e| format!("write {:?}: {}", path, e))?;
+    // Atomic write: temp file + rename so a crash mid-write can't leave a
+    // truncated macros.json (same pattern as config_manager::save).
+    let tmp_path = path.with_extension("json.tmp");
+    fs::write(&tmp_path, json).map_err(|e| format!("write {:?}: {}", tmp_path, e))?;
+    fs::rename(&tmp_path, &path)
+        .map_err(|e| format!("rename {:?} -> {:?}: {}", tmp_path, path, e))?;
     Ok(())
 }
 

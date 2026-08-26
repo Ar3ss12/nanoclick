@@ -384,6 +384,15 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
                         hotkey_diag_push("fired_action=record_toggle".into());
                         let _ = app_handle.emit("global-record-toggle", ());
                     });
+
+                    // Preset slot hotkeys: slot 1..9 -> global-preset-hotkey(idx).
+                    for (slot_idx, combos) in bindings.preset_slots.iter().enumerate() {
+                        let slot = slot_idx as u32;
+                        fire_hotkey_group(combos, event.vk, &held, || {
+                            hotkey_diag_push(format!("fired_action=preset_slot_{}", slot + 1));
+                            let _ = app_handle.clone().emit("global-preset-hotkey", slot);
+                        });
+                    }
                 }
             } else {
                 held.retain(|&key| !key_code_matches(event.vk, key));
@@ -471,6 +480,7 @@ struct HotkeySnapshot {
     capture_pos: String,
     record_toggle: bool,
     record_hotkey: String,
+    preset_slots: Vec<String>,
 }
 
 impl HotkeySnapshot {
@@ -485,6 +495,7 @@ impl HotkeySnapshot {
             capture_pos: cfg.hotkey_capture_pos,
             record_toggle: cfg.hotkey_record_toggle,
             record_hotkey: cfg.hotkey_record,
+            preset_slots: cfg.hotkey_preset_slots,
         }
     }
 }
@@ -509,6 +520,8 @@ struct HotkeyBindings {
     slow_down: Vec<HotkeyCombo>,
     capture_pos: Vec<HotkeyCombo>,
     record_toggle: Vec<HotkeyCombo>,
+    /// Per-slot preset combos: outer index = slot number - 1.
+    preset_slots: Vec<Vec<HotkeyCombo>>,
     invalid_bindings: usize,
 }
 
@@ -545,6 +558,17 @@ impl HotkeyBindings {
             (Vec::new(), 0)
         };
         invalid_bindings += invalid;
+        let (preset_slots, invalid) = {
+            let mut slots = Vec::with_capacity(snapshot.preset_slots.len());
+            let mut inv = 0usize;
+            for label in &snapshot.preset_slots {
+                let (combos, n) = combos_from_label(label);
+                inv += n;
+                slots.push(combos);
+            }
+            (slots, inv)
+        };
+        invalid_bindings += invalid;
         HotkeyBindings {
             toggle,
             mode_switch,
@@ -553,6 +577,7 @@ impl HotkeyBindings {
             slow_down,
             capture_pos,
             record_toggle,
+            preset_slots,
             invalid_bindings,
         }
     }
@@ -1209,6 +1234,7 @@ mod physical_integration_tests {
             capture_pos: "Ctrl+P".into(),
             record_toggle: true,
             record_hotkey: "F9".into(),
+            preset_slots: Vec::new(),
         };
         let bindings_before = HotkeyBindings::from_snapshot(&before);
         assert!(bindings_before.toggle.iter().any(|c| c.trigger == 0x52));
