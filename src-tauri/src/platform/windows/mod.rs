@@ -1322,3 +1322,17 @@ pub fn get_pixel_rgba(x: i32, y: i32) -> Option<u32> {
         Some(((r as u32) << 24) | ((g as u32) << 16) | ((b as u32) << 8) | 0xFF)
     }
 }
+
+/// Virtual desktop extent (multi-monitor aware). Returns (width, height)
+/// in pixels. Used by the multi-point sequence canvas to size the grid.
+pub fn get_screen_size() -> (i32, i32) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+    };
+    unsafe {
+        (
+            GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            GetSystemMetrics(SM_CYVIRTUALSCREEN),
+        )
+    }
+}

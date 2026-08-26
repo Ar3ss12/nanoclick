@@ -86,6 +86,12 @@ pub fn get_cursor_pos_now() -> (i32, i32) {
     platform::get_cursor_pos()
 }
 
+#[tauri::command]
+pub fn get_primary_screen_size() -> serde_json::Value {
+    let (w, h) = platform::get_screen_size();
+    serde_json::json!({ "width": w, "height": h })
+}
+
 // ─── Recorder ────────────────────────────────────────────────
 
 #[tauri::command]

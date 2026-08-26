@@ -774,9 +774,21 @@
           </div>
 
           <div class="preset-form-group">
-            <label>Multi-point sequence (JSON, optional)</label>
-            <textarea id="prPoints" class="select-input" rows="4" placeholder='[{"x":100,"y":100,"delay_ms":50},{"x":300,"y":200,"delay_ms":0}]' style="font-family:monospace;font-size:11px;"></textarea>
-            <small style="color:var(--text-dim);">When non-empty, visits each point in order with the per-point delay. Position mode is ignored.</small>
+            <label>Multi-point sequence</label>
+            <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;flex-wrap:wrap;">
+              <button type="button" id="prPointsAdd" class="preset-modal-btn save" style="padding:4px 10px;font-size:11px;">+ Add</button>
+              <button type="button" id="prPointsClear" class="preset-modal-btn cancel" style="padding:4px 10px;font-size:11px;">Clear</button>
+              <button type="button" id="prPointsCapture" class="preset-modal-btn save" style="padding:4px 10px;font-size:11px;">Use capture-pos as first point</button>
+              <span style="flex:1;font-size:11px;color:var(--text-dim);text-align:right;" id="prPointsHint">Click on the grid to add a point. Drag to move. Double-click to remove.</span>
+            </div>
+            <div style="position:relative;background:var(--bg-elev);border:1px solid var(--border);border-radius:6px;overflow:hidden;">
+              <canvas id="prPointsCanvas" width="640" height="320" style="display:block;width:100%;cursor:crosshair;background:#0d1117;"></canvas>
+              <textarea id="prPoints" class="hidden"></textarea>
+            </div>
+            <small style="color:var(--text-dim);display:flex;justify-content:space-between;margin-top:4px;">
+              <span>Points: <span id="prPointsCount">0</span></span>
+              <span id="prPointsJsonHint">JSON kept in sync automatically.</span>
+            </small>
           </div>
 
           <div id="presetFixedCoordRow" class="preset-form-group coord-group hidden">
@@ -848,5 +860,6 @@
 
   <div id="rippleContainer" class="ripple-container"></div>
   <script type="module" src="main.js"></script>
+  <script src="sequence_editor.js"></script>
 </body>
 </html>

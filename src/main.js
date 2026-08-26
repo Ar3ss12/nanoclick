@@ -1779,10 +1779,10 @@ function openPresetEditModal(p = null) {
     if (repeatModeSelect) repeatModeSelect.value = currentConfig.engine.repeat_mode || "unlimited";
     if (repeatCountInput) repeatCountInput.value = currentConfig.engine.repeat_count || 0;
     if (repeatIntervalInput) repeatIntervalInput.value = currentConfig.engine.repeat_interval_ms ?? 1000;
-    if (p && p.points && document.getElementById("prPoints")) {
-      document.getElementById("prPoints").value = JSON.stringify(p.points, null, 2);
-    } else if (document.getElementById("prPoints")) {
-      document.getElementById("prPoints").value = "[]";
+    if (p && p.points && Array.isArray(p.points)) {
+      window.SequenceEditor?.setPoints(p.points);
+    } else {
+      window.SequenceEditor?.setPoints([]);
     }
   }
 
@@ -1819,9 +1819,7 @@ function savePresetFromModal() {
   if (editId) {
     const idx = currentConfig.presets.findIndex(x => x.id === editId);
     if (idx !== -1) {
-      const pointsRaw = document.getElementById("prPoints")?.value || "[]";
-      let points = [];
-      try { points = JSON.parse(pointsRaw); } catch (_) {}
+      const points = window.SequenceEditor?.getPoints() || [];
       currentConfig.presets[idx] = {
         ...currentConfig.presets[idx],
         name,
@@ -1846,9 +1844,7 @@ function savePresetFromModal() {
       };
     }
   } else {
-    const pointsRaw = document.getElementById("prPoints")?.value || "[]";
-    let points = [];
-    try { points = JSON.parse(pointsRaw); } catch (_) {}
+    const points = window.SequenceEditor?.getPoints() || [];
     const newId = "preset_" + Date.now();
     currentConfig.presets.push({
       id: newId,

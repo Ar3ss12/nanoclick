@@ -364,6 +364,7 @@ pub fn run() {
             commands::set_image_trigger,
             commands::pick_screen_pixel,
             commands::get_cursor_pos_now,
+            commands::get_primary_screen_size,
             // v3.2 Macro Engine commands
             commands::list_macros,
             commands::save_macro,
