@@ -140,7 +140,6 @@ fn debug_log(level: String, message: String) {
     debug_log_internal(&level, &message);
 }
 
-
 #[tauri::command]
 fn relaunch_app(app: AppHandle) {
     app.restart();
@@ -266,8 +265,7 @@ pub fn run() {
         .setup(move |app| {
             let handle = app.handle().clone();
             // v4.2 — start hotkeys through the HotkeyBackend contract.
-            let hk =
-                platform::default_hotkey_backend(scheduler_for_setup, handle);
+            let hk = platform::default_hotkey_backend(scheduler_for_setup, handle);
             if let Err(e) = hk.start() {
                 crate::debug_log_internal("warn", &format!("[Hotkeys] backend start failed: {e}"));
             }
@@ -301,7 +299,7 @@ pub fn run() {
             commands::is_macro_running,
             debug_log,
             check_for_updates,
-        relaunch_app,
+            relaunch_app,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

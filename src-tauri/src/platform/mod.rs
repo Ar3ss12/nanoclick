@@ -42,9 +42,19 @@ impl backend::InputBackend for NoopInputBackend {
     fn mouse_up(&self, _b: crate::core::action::MouseButton) {}
     fn scroll_wheel(&self, _dx: i32, _dy: i32) {}
     fn set_cursor_pos(&self, _x: i32, _y: i32) {}
-    fn send_key(&self, _k: crate::core::action::KeyCode, _m: crate::core::action::Modifiers, _up: bool) {}
-    fn cursor_position(&self) -> (i32, i32) { (0, 0) }
-    fn click_mouse(&self, _spec: &backend::ClickSpec) -> bool { false }
+    fn send_key(
+        &self,
+        _k: crate::core::action::KeyCode,
+        _m: crate::core::action::Modifiers,
+        _up: bool,
+    ) {
+    }
+    fn cursor_position(&self) -> (i32, i32) {
+        (0, 0)
+    }
+    fn click_mouse(&self, _spec: &backend::ClickSpec) -> bool {
+        false
+    }
     fn release_mouse_hold(&self, _b: crate::core::action::MouseButton) {}
 }
 
@@ -52,14 +62,12 @@ impl backend::InputBackend for NoopInputBackend {
 /// concrete backend type (v4.2 completion criterion: core/scheduler/
 /// commands/lib contain zero `platform::windows` references).
 #[cfg(target_os = "windows")]
-pub fn default_input_backend()
--> std::sync::Arc<dyn backend::InputBackend> {
+pub fn default_input_backend() -> std::sync::Arc<dyn backend::InputBackend> {
     std::sync::Arc::new(windows::WindowsBackend)
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn default_input_backend()
--> std::sync::Arc<dyn backend::InputBackend> {
+pub fn default_input_backend() -> std::sync::Arc<dyn backend::InputBackend> {
     std::sync::Arc::new(NoopInputBackend)
 }
 
@@ -90,7 +98,9 @@ impl backend::HotkeyBackend for NoopHotkeyBackend {
         Err("global hotkeys unavailable on this platform".into())
     }
     fn stop(&self) {}
-    fn is_running(&self) -> bool { false }
+    fn is_running(&self) -> bool {
+        false
+    }
 }
 
 /// Stop the global hotkey listener through the backend contract.
@@ -108,14 +118,16 @@ pub fn default_input_backend_hotkey_stop() {
 
 /// Recorder backend factory — label is parsed at the platform boundary.
 #[cfg(target_os = "windows")]
-pub fn default_recorder_backend(ignored_hotkey_label: &str)
--> std::sync::Arc<dyn backend::RecorderBackend> {
+pub fn default_recorder_backend(
+    ignored_hotkey_label: &str,
+) -> std::sync::Arc<dyn backend::RecorderBackend> {
     std::sync::Arc::new(windows::WindowsRecorderBackend::new(ignored_hotkey_label))
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn default_recorder_backend(_ignored_hotkey_label: &str)
--> std::sync::Arc<dyn backend::RecorderBackend> {
+pub fn default_recorder_backend(
+    _ignored_hotkey_label: &str,
+) -> std::sync::Arc<dyn backend::RecorderBackend> {
     std::sync::Arc::new(NoopRecorderBackend)
 }
 
@@ -124,8 +136,10 @@ pub struct NoopRecorderBackend;
 
 #[cfg(not(target_os = "windows"))]
 impl backend::RecorderBackend for NoopRecorderBackend {
-    fn start(&self, _sender: std::sync::mpsc::Sender<crate::recorder::raw_event::RawEvent>)
-    -> Result<(), String> {
+    fn start(
+        &self,
+        _sender: std::sync::mpsc::Sender<crate::recorder::raw_event::RawEvent>,
+    ) -> Result<(), String> {
         Err("global input recording unavailable on this platform".into())
     }
     fn stop(&self) {}

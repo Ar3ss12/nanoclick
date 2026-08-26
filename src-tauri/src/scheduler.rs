@@ -1,11 +1,9 @@
 use crate::config::Config;
-use crate::platform::{
-    self, backend::ClickSpec, NativeEventHandle, PlatformTimer,
-};
+use crate::platform::{self, backend::ClickSpec, NativeEventHandle, PlatformTimer};
 use rand::Rng;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::collections::VecDeque;
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
@@ -283,7 +281,12 @@ impl ClickScheduler {
             &self.last_toggle_instant,
             self.hotkey_debounce_ms.load(Ordering::Relaxed),
         ) {
-            return if self.is_active() { "autoclicker" } else { "work" }.into();
+            return if self.is_active() {
+                "autoclicker"
+            } else {
+                "work"
+            }
+            .into();
         }
 
         // State-based decision (not blind inversion): resolve the action
@@ -542,38 +545,38 @@ impl ClickScheduler {
                 if cur_click_spec.click_type == crate::platform::backend::ClickType::Hold {
                     // Press Down
                     // v4.2 instant stop: re-check active immediately before
-                // dispatching so a stop signal that arrived during the wait
-                // never produces an extra click.
-                if !active.load(Ordering::Relaxed) {
-                    break;
-                }
-                // v4.2 instant stop: Double is decomposed here so the gap
-                // between the two clicks is cancel-aware (the backend has no
-                // cancel handle; the scheduler owns the active flag).
-                if cur_click_spec.click_type == crate::platform::backend::ClickType::Double {
-                    let mut dispatched = 0usize;
-                    while dispatched < 2 && active.load(Ordering::Relaxed) {
-                        let single = crate::platform::backend::ClickSpec {
-                            click_type: crate::platform::backend::ClickType::Single,
-                            ..cur_click_spec.clone()
-                        };
-                        if platform_backend.click_mouse(&single) {
-                            clicks_done.fetch_add(1, Ordering::Relaxed);
-                            batch_click_count += 1;
-                        }
-                        dispatched += 1;
-                        if dispatched < 2 {
-                            let target = Instant::now() + Duration::from_millis(50);
-                            let event_handle =
-                                stop_event_lock.lock().unwrap().clone().expect("stop_event");
-                            if !timer.wait_until(target, event_handle)
-                                || !active.load(Ordering::Relaxed)
-                            {
-                                break;
+                    // dispatching so a stop signal that arrived during the wait
+                    // never produces an extra click.
+                    if !active.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    // v4.2 instant stop: Double is decomposed here so the gap
+                    // between the two clicks is cancel-aware (the backend has no
+                    // cancel handle; the scheduler owns the active flag).
+                    if cur_click_spec.click_type == crate::platform::backend::ClickType::Double {
+                        let mut dispatched = 0usize;
+                        while dispatched < 2 && active.load(Ordering::Relaxed) {
+                            let single = crate::platform::backend::ClickSpec {
+                                click_type: crate::platform::backend::ClickType::Single,
+                                ..cur_click_spec.clone()
+                            };
+                            if platform_backend.click_mouse(&single) {
+                                clicks_done.fetch_add(1, Ordering::Relaxed);
+                                batch_click_count += 1;
+                            }
+                            dispatched += 1;
+                            if dispatched < 2 {
+                                let target = Instant::now() + Duration::from_millis(50);
+                                let event_handle =
+                                    stop_event_lock.lock().unwrap().clone().expect("stop_event");
+                                if !timer.wait_until(target, event_handle)
+                                    || !active.load(Ordering::Relaxed)
+                                {
+                                    break;
+                                }
                             }
                         }
-                    }
-                } else if platform_backend.click_mouse(&cur_click_spec) {
+                    } else if platform_backend.click_mouse(&cur_click_spec) {
                         let total = clicks_done.fetch_add(1, Ordering::Relaxed) + 1;
                         batch_click_count += 1;
                         if let Some(ref app) = app_handle {
@@ -753,7 +756,10 @@ mod hotkey_debounce_tests {
             assert!(!ClickScheduler::toggle_debounce_check(&last, 80));
         }
         let t1 = *last.lock().unwrap();
-        assert_eq!(t0, t1, "blocked calls must not update the debounce timestamp");
+        assert_eq!(
+            t0, t1,
+            "blocked calls must not update the debounce timestamp"
+        );
     }
 
     #[test]
@@ -767,7 +773,11 @@ mod hotkey_debounce_tests {
         assert_eq!(dump.len(), 128, "ring buffer should cap at 128");
         // oldest entries should be the first ones dropped, so first in dump
         // is line 22 (150 - 128)
-        assert!(dump[0].contains("22"), "expected line 22 first; got {}", dump[0]);
+        assert!(
+            dump[0].contains("22"),
+            "expected line 22 first; got {}",
+            dump[0]
+        );
         assert!(dump.last().unwrap().contains("149"));
     }
 
@@ -796,13 +806,16 @@ mod single_mode_active_precheck_tests {
         // Find the single-mode click invocation (not the one inside the
         // while-loop for double decomposition).
         // The active pre-check must appear BEFORE the click_mouse call.
-        let precheck_off = src.find("// v4.2 instant stop (single mode): wait_until returned success")
+        let precheck_off = src
+            .find("// v4.2 instant stop (single mode): wait_until returned success")
             .expect("precheck comment not present in scheduler.rs");
         // The single-mode click_mouse call is the SECOND occurrence in the
         // source: the first is inside the double-decomposition loop.
-        let mut click_positions = src.match_indices("if platform_backend.click_mouse(&cur_click_spec)");
-        click_positions.next();  // skip double-mode
-        let (click_off, _) = click_positions.next()
+        let mut click_positions =
+            src.match_indices("if platform_backend.click_mouse(&cur_click_spec)");
+        click_positions.next(); // skip double-mode
+        let (click_off, _) = click_positions
+            .next()
             .expect("single-mode click_mouse call missing");
         assert!(
             precheck_off < click_off,
@@ -815,10 +828,12 @@ mod single_mode_active_precheck_tests {
     #[test]
     fn hotkey_toggle_no_longer_writes_to_log_file() {
         let src = include_str!("scheduler.rs");
-        let start = src.find("pub fn hotkey_toggle")
+        let start = src
+            .find("pub fn hotkey_toggle")
             .expect("hotkey_toggle not found");
         let after = start;
-        let end = src[after..].find("mode_str.to_string()")
+        let end = src[after..]
+            .find("mode_str.to_string()")
             .map(|o| start + o + "mode_str.to_string()".len())
             .expect("hotkey_toggle body end not found");
         let body = &src[start..end];

@@ -108,8 +108,7 @@ pub fn record_start(
     let (handle, tx) = RecorderHandle::start_with_external_sender(rec_mode);
     // v4.2 — start capture through the RecorderBackend contract; the
     // hotkey label is parsed inside the platform boundary.
-    let recorder_backend =
-        platform::default_recorder_backend(&record_hotkey.unwrap_or_default());
+    let recorder_backend = platform::default_recorder_backend(&record_hotkey.unwrap_or_default());
     recorder_backend.start(tx)?;
     *slot = Some(RecorderSession { handle });
     Ok(())

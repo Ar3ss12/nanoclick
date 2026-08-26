@@ -35,7 +35,6 @@ pub fn parse_button_label(label: &str) -> MouseButton {
     }
 }
 
-
 /// Get current OS cursor position.
 pub fn get_cursor_pos() -> (i32, i32) {
     unsafe {
@@ -311,9 +310,7 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
             let snapshot = HotkeySnapshot::from_scheduler(&scheduler);
             bindings = HotkeyBindings::from_snapshot(&snapshot);
             log_bindings(&bindings);
-            hotkey_diag_push(format!(
-                "bindings re-parsed on version {current_version}"
-            ));
+            hotkey_diag_push(format!("bindings re-parsed on version {current_version}"));
         }
         let fallback_events = if received.is_err() {
             held.retain(|&key| key_down(key));
@@ -357,9 +354,7 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
                         hotkey_diag_push("fired_action=toggle".into());
                         let prev = scheduler.is_active();
                         let mode = scheduler.hotkey_toggle(Some(&app_handle));
-                        hotkey_diag_push(format!(
-                            "toggle done was_active={prev} mode={mode}"
-                        ));
+                        hotkey_diag_push(format!("toggle done was_active={prev} mode={mode}"));
                     });
                     fire_hotkey_group(&bindings.mode_switch, event.vk, &held, || {
                         hotkey_diag_push("fired_action=mode_switch".into());
@@ -447,9 +442,7 @@ fn fire_hotkey_group<F: FnOnce()>(group: &[HotkeyCombo], vk: u16, held: &HashSet
     {
         fire();
     } else if group.iter().any(|combo| combo.trigger_matches(vk)) {
-        hotkey_diag_push(format!(
-            "reject required_key_not_held trigger=0x{vk:02X}"
-        ));
+        hotkey_diag_push(format!("reject required_key_not_held trigger=0x{vk:02X}"));
     }
 }
 
@@ -841,15 +834,15 @@ mod hotkey_tests {
 #[cfg(test)]
 mod physical_integration_tests {
     use super::*;
-    use std::sync::mpsc;
     use std::sync::atomic::AtomicBool;
+    use std::sync::mpsc;
     use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        KEYBDINPUT, KEYEVENTF_KEYUP, INPUT, INPUT_0, INPUT_KEYBOARD, SendInput, VIRTUAL_KEY,
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, DispatchMessageW, GetMessageW, MSG, SetWindowsHookExW,
-        TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, WH_KEYBOARD_LL,
+        CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, TranslateMessage,
+        UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL,
     };
 
     static CAPTURE_TX: OnceLock<StdMutex<Option<mpsc::Sender<(u16, bool)>>>> = OnceLock::new();
@@ -947,7 +940,10 @@ mod physical_integration_tests {
                     }
                 }
             }
-            crate::debug_log_internal("info", &format!("[tests] capture hook dead, reinstall #{attempt}"));
+            crate::debug_log_internal(
+                "info",
+                &format!("[tests] capture hook dead, reinstall #{attempt}"),
+            );
             ensure_hook();
         }
     }
@@ -959,7 +955,11 @@ mod physical_integration_tests {
                 ki: KEYBDINPUT {
                     wVk: VIRTUAL_KEY(vk),
                     wScan: 0,
-                    dwFlags: if up { KEYEVENTF_KEYUP } else { Default::default() },
+                    dwFlags: if up {
+                        KEYEVENTF_KEYUP
+                    } else {
+                        Default::default()
+                    },
                     time: 0,
                     dwExtraInfo: 0,
                 },
@@ -1000,11 +1000,12 @@ mod physical_integration_tests {
     /// TEST_LOCK and drain everything they inject.
     fn swap_channel() -> mpsc::Receiver<(u16, bool)> {
         let (tx, rx) = mpsc::channel();
-        *CAPTURE_TX.get_or_init(|| StdMutex::new(None)).lock().unwrap() = Some(tx);
+        *CAPTURE_TX
+            .get_or_init(|| StdMutex::new(None))
+            .lock()
+            .unwrap() = Some(tx);
         rx
     }
-
-
 
     #[test]
     fn physical_sendinput_events_reach_hook_and_drive_matcher() {
@@ -1062,7 +1063,10 @@ mod physical_integration_tests {
                 held.retain(|&key| !key_code_matches(*vk, key));
             }
         }
-        assert_eq!(fired, 1, "combo: Ctrl+M must fire exactly once over {combo_events:?}");
+        assert_eq!(
+            fired, 1,
+            "combo: Ctrl+M must fire exactly once over {combo_events:?}"
+        );
 
         // ── Part 3: numpad key arrives with expected VK ──────────────
         inject_key(0x61, false); // NUMPAD1 down
@@ -1108,8 +1112,7 @@ mod physical_integration_tests {
         // ── Part 2: matcher fires exactly once per press for Num bindings ─
         for vk in KEYPAD {
             let label = format!("Num{}", vk - 0x60);
-            let combo = parse_hotkey_combo(&label)
-                .unwrap_or_else(|| panic!("{label} must parse"));
+            let combo = parse_hotkey_combo(&label).unwrap_or_else(|| panic!("{label} must parse"));
             assert_eq!(combo.trigger, vk, "{label} trigger mismatch");
             let mut held = HashSet::new();
             held.insert(vk);
@@ -1218,7 +1221,6 @@ mod physical_integration_tests {
         assert!(!bindings_after.toggle.iter().any(|c| c.trigger == 0x52));
     }
 }
-
 
 #[cfg(test)]
 mod hotpath_silence_tests {

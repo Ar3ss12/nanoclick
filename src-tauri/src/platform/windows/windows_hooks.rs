@@ -99,10 +99,7 @@ impl WindowsRecorderBackend {
 }
 
 impl crate::platform::backend::RecorderBackend for WindowsRecorderBackend {
-    fn start(
-        &self,
-        sender: Sender<RawEvent>,
-    ) -> Result<(), String> {
+    fn start(&self, sender: Sender<RawEvent>) -> Result<(), String> {
         let label = self.ignored_hotkey_label.lock().unwrap().clone();
         spawn_recorder_hooks(sender, label);
         Ok(())

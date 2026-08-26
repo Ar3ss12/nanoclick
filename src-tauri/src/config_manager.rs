@@ -426,9 +426,16 @@ impl ConfigManager {
 
         let json = serde_json::to_string_pretty(config)
             .map_err(|e| format!("Failed to serialize config: {}", e))?;
-        fs::write(&self.config_path, json).map_err(|e| {
+
+        // Atomic write: serialize to a temp file first, then rename over the
+        // real config. A crash/BSOD mid-write can no longer leave a truncated
+        // config.json behind - rename is atomic on NTFS.
+        let tmp_path = self.config_path.with_extension("json.tmp");
+        fs::write(&tmp_path, json)
+            .map_err(|e| format!("Failed to write temp config file to {:?}: {}", tmp_path, e))?;
+        fs::rename(&tmp_path, &self.config_path).map_err(|e| {
             format!(
-                "Failed to write config file to {:?}: {}",
+                "Failed to replace config file {:?}: {}",
                 self.config_path, e
             )
         })?;

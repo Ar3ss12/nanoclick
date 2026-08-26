@@ -196,7 +196,9 @@ mod contract_tests {
         fn scroll_wheel(&self, _: i32, _: i32) {}
         fn set_cursor_pos(&self, _: i32, _: i32) {}
         fn send_key(&self, _: KeyCode, _: Modifiers, _: bool) {}
-        fn cursor_position(&self) -> (i32, i32) { (0, 0) }
+        fn cursor_position(&self) -> (i32, i32) {
+            (0, 0)
+        }
         fn click_mouse(&self, spec: &ClickSpec) -> bool {
             self.clicks.fetch_add(1, Ordering::Relaxed);
             *self.last_spec.lock().unwrap() = Some((
@@ -218,7 +220,10 @@ mod contract_tests {
 
     impl Default for MockRecorderBackend {
         fn default() -> Self {
-            Self { started: AtomicUsize::new(0), stopped: AtomicUsize::new(0) }
+            Self {
+                started: AtomicUsize::new(0),
+                stopped: AtomicUsize::new(0),
+            }
         }
     }
 
@@ -247,14 +252,20 @@ mod contract_tests {
     #[test]
     fn position_mode_parses_from_config_labels() {
         assert_eq!(PositionMode::from_config_str("fixed"), PositionMode::Fixed);
-        assert_eq!(PositionMode::from_config_str("cursor"), PositionMode::Cursor);
+        assert_eq!(
+            PositionMode::from_config_str("cursor"),
+            PositionMode::Cursor
+        );
         assert_eq!(PositionMode::from_config_str("junk"), PositionMode::Cursor);
     }
 
     #[test]
     fn hotkey_action_maps_config_labels() {
         assert_eq!(HotkeyAction::from_label("mode"), HotkeyAction::ModeSwitch);
-        assert_eq!(HotkeyAction::from_label("emergency"), HotkeyAction::EmergencyStop);
+        assert_eq!(
+            HotkeyAction::from_label("emergency"),
+            HotkeyAction::EmergencyStop
+        );
         // Unknown labels default to the primary start/stop action.
         assert_eq!(HotkeyAction::from_label("???"), HotkeyAction::StartStop);
     }

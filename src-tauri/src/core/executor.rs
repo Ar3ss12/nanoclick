@@ -272,8 +272,8 @@ pub fn global() -> Option<ExecutorHandle> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::RepeatMode;
     use crate::core::action::{KeyCode, Modifiers};
+    use crate::core::RepeatMode;
 
     fn dummy_macro(actions: Vec<Action>) -> Macro {
         Macro {
@@ -388,14 +388,26 @@ mod tests {
     }
 
     impl crate::platform::backend::InputBackend for MockBackend {
-        fn mouse_click(&self, _: MouseButton) { self.clicks.fetch_add(1, Ordering::Relaxed); }
+        fn mouse_click(&self, _: MouseButton) {
+            self.clicks.fetch_add(1, Ordering::Relaxed);
+        }
         fn mouse_down(&self, _: MouseButton) {}
         fn mouse_up(&self, _: MouseButton) {}
-        fn scroll_wheel(&self, _: i32, _: i32) { self.scrolls.fetch_add(1, Ordering::Relaxed); }
-        fn set_cursor_pos(&self, _: i32, _: i32) { self.moves.fetch_add(1, Ordering::Relaxed); }
-        fn send_key(&self, _: KeyCode, _: Modifiers, _: bool) { self.keys.fetch_add(1, Ordering::Relaxed); }
-        fn cursor_position(&self) -> (i32, i32) { (0, 0) }
-        fn click_mouse(&self, _: &crate::platform::backend::ClickSpec) -> bool { true }
+        fn scroll_wheel(&self, _: i32, _: i32) {
+            self.scrolls.fetch_add(1, Ordering::Relaxed);
+        }
+        fn set_cursor_pos(&self, _: i32, _: i32) {
+            self.moves.fetch_add(1, Ordering::Relaxed);
+        }
+        fn send_key(&self, _: KeyCode, _: Modifiers, _: bool) {
+            self.keys.fetch_add(1, Ordering::Relaxed);
+        }
+        fn cursor_position(&self) -> (i32, i32) {
+            (0, 0)
+        }
+        fn click_mouse(&self, _: &crate::platform::backend::ClickSpec) -> bool {
+            true
+        }
         fn release_mouse_hold(&self, _: MouseButton) {}
     }
 
@@ -405,9 +417,18 @@ mod tests {
         let h = ExecutorHandle::with_backend(Arc::clone(&backend) as Arc<dyn InputBackend>);
         let m = dummy_macro(vec![
             Action::MouseMove { x: 10, y: 20 },
-            Action::MouseClick { button: MouseButton::Left, count: 2 },
-            Action::KeyPress { key: KeyCode(0x41), mods: Modifiers::default() },
-            Action::Scroll { delta_x: 0, delta_y: -1 },
+            Action::MouseClick {
+                button: MouseButton::Left,
+                count: 2,
+            },
+            Action::KeyPress {
+                key: KeyCode(0x41),
+                mods: Modifiers::default(),
+            },
+            Action::Scroll {
+                delta_x: 0,
+                delta_y: -1,
+            },
         ]);
         h.step(&m);
         h.step(&m);

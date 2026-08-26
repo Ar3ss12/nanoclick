@@ -60,7 +60,6 @@ pub fn parse_button_label(_label: &str) -> crate::core::action::MouseButton {
 }
 
 /// Default input backend — capability-honest no-op on this platform.
-pub fn default_input_backend()
--> std::sync::Arc<dyn crate::platform::backend::InputBackend> {
+pub fn default_input_backend() -> std::sync::Arc<dyn crate::platform::backend::InputBackend> {
     std::sync::Arc::new(crate::platform::NoopInputBackend)
 }

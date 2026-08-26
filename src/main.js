@@ -681,6 +681,28 @@ function safeInt(val, fallback) {
   return isNaN(n) ? fallback : n;
 }
 
+// ── saveConfigThrottled ──────────────────────────────────────
+// Slider "input" events fire dozens of times per second while dragging.
+// Persisting on every tick means dozens of disk writes per second.
+// This wrapper coalesces bursts: at most one real saveConfig() per 250ms,
+// with a trailing call so the FINAL value always lands on disk.
+let _saveCfgLast = 0;
+let _saveCfgTimer = null;
+function saveConfigThrottled() {
+  const now = Date.now();
+  if (now - _saveCfgLast >= 250) {
+    _saveCfgLast = now;
+    saveConfig();
+    return;
+  }
+  if (_saveCfgTimer) clearTimeout(_saveCfgTimer);
+  _saveCfgTimer = setTimeout(() => {
+    _saveCfgTimer = null;
+    _saveCfgLast = Date.now();
+    saveConfig();
+  }, 250);
+}
+
 async function saveConfig() {
   const op = stage("SaveConfig");
   try {
@@ -743,7 +765,7 @@ if (limitRange) limitRange.addEventListener("input", (e) => {
   const safeVal = isNaN(val) ? 0 : val;
   if (limitInput) limitInput.value = safeVal;
   updateLimitBadge(safeVal);
-  saveConfig();
+  saveConfigThrottled();
 });
 
 // ── CPS slider + number input (Dashboard) ────────────────────
@@ -755,7 +777,7 @@ if (cpsRange) cpsRange.addEventListener("input", (e) => {
   if (cpsInput) cpsInput.value = safeVal;
   if (displayCps) displayCps.textContent = safeVal.toFixed(1);
   if (currentConfig?.engine) currentConfig.engine.target_cps = safeVal;
-  saveConfig();
+  saveConfigThrottled();
 });
 if (cpsInput) cpsInput.addEventListener("input", (e) => {
   const val = parseFloat(e.target.value);
@@ -768,7 +790,7 @@ if (cpsInput) cpsInput.addEventListener("input", (e) => {
   }
   if (displayCps) displayCps.textContent = safeVal.toFixed(1);
   if (currentConfig?.engine) currentConfig.engine.target_cps = safeVal;
-  saveConfig();
+  saveConfigThrottled();
 });
 
 // ── Jitter slider + number input (Dashboard) ─────────────────
@@ -777,14 +799,14 @@ if (randomRange) randomRange.addEventListener("input", (e) => {
   const safeVal = isNaN(val) ? 0 : Math.max(0, Math.min(30, val));
   if (randomInput) randomInput.value = safeVal;
   if (currentConfig?.engine) currentConfig.engine.jitter_percent = safeVal;
-  saveConfig();
+  saveConfigThrottled();
 });
 if (randomInput) randomInput.addEventListener("input", (e) => {
   const val = parseFloat(e.target.value);
   const safeVal = isNaN(val) ? 0 : Math.max(0, Math.min(30, val));
   if (randomRange) randomRange.value = safeVal;
   if (currentConfig?.engine) currentConfig.engine.jitter_percent = safeVal;
-  saveConfig();
+  saveConfigThrottled();
 });
 
 if (limitInput) limitInput.addEventListener("input", (e) => {
@@ -3046,9 +3068,9 @@ document.addEventListener("DOMContentLoaded", () => {
   const startDelayInputEl = document.getElementById("startDelayInput");
   const stopDurationInputEl = document.getElementById("stopDurationInput");
   const stopTimeInputEl = document.getElementById("stopTimeInput");
-  if (startDelayInputEl) startDelayInputEl.addEventListener("input", () => { if (typeof saveConfig === "function") saveConfig(); });
-  if (stopDurationInputEl) stopDurationInputEl.addEventListener("input", () => { if (typeof saveConfig === "function") saveConfig(); });
-  if (stopTimeInputEl) stopTimeInputEl.addEventListener("input", () => { if (typeof saveConfig === "function") saveConfig(); });
+  if (startDelayInputEl) startDelayInputEl.addEventListener("input", () => { if (typeof saveConfig === "function") saveConfigThrottled(); });
+  if (stopDurationInputEl) stopDurationInputEl.addEventListener("input", () => { if (typeof saveConfig === "function") saveConfigThrottled(); });
+  if (stopTimeInputEl) stopTimeInputEl.addEventListener("input", () => { if (typeof saveConfig === "function") saveConfigThrottled(); });
 
   const slider = document.getElementById("debounceSlider");
   if (slider) slider.addEventListener("input", () => {
@@ -3056,7 +3078,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (typeof currentConfig !== "undefined" && currentConfig && currentConfig.engine) {
       currentConfig.engine.hotkey_debounce_ms = Math.max(5, Math.min(250, parseInt(slider.value) || 80));
     }
-    if (typeof saveConfig === "function") saveConfig();
+    if (typeof saveConfig === "function") saveConfigThrottled();
   });
   document.querySelectorAll(".debounce-zone").forEach(z => {
     z.addEventListener("click", () => {
