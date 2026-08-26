@@ -1509,6 +1509,8 @@ async function applyPreset(presetId) {
       currentConfig.engine.start_delay_ms = Number(p.start_delay_ms) || 0;
       currentConfig.engine.stop_duration_min = Number(p.stop_duration_min) || 0;
       currentConfig.engine.stop_time_str = p.stop_time_str || "";
+      // Multi-point sequence: copy onto engine so the scheduler picks it up.
+      currentConfig.engine.sequence_points = Array.isArray(p.points) ? p.points : [];
       return "engine fields copied";
     });
 
@@ -1777,6 +1779,11 @@ function openPresetEditModal(p = null) {
     if (repeatModeSelect) repeatModeSelect.value = currentConfig.engine.repeat_mode || "unlimited";
     if (repeatCountInput) repeatCountInput.value = currentConfig.engine.repeat_count || 0;
     if (repeatIntervalInput) repeatIntervalInput.value = currentConfig.engine.repeat_interval_ms ?? 1000;
+    if (p && p.points && document.getElementById("prPoints")) {
+      document.getElementById("prPoints").value = JSON.stringify(p.points, null, 2);
+    } else if (document.getElementById("prPoints")) {
+      document.getElementById("prPoints").value = "[]";
+    }
   }
 
   if (positionSelect && coordRow) {
@@ -1812,6 +1819,9 @@ function savePresetFromModal() {
   if (editId) {
     const idx = currentConfig.presets.findIndex(x => x.id === editId);
     if (idx !== -1) {
+      const pointsRaw = document.getElementById("prPoints")?.value || "[]";
+      let points = [];
+      try { points = JSON.parse(pointsRaw); } catch (_) {}
       currentConfig.presets[idx] = {
         ...currentConfig.presets[idx],
         name,
@@ -1831,10 +1841,14 @@ function savePresetFromModal() {
         repeat_interval_ms: repeatIntervalMs,
         start_delay_ms: startDelaySec * 1000,
         stop_duration_min: stopDurationMin,
-        stop_time_str: stopTimeStr
+        stop_time_str: stopTimeStr,
+        points,
       };
     }
   } else {
+    const pointsRaw = document.getElementById("prPoints")?.value || "[]";
+    let points = [];
+    try { points = JSON.parse(pointsRaw); } catch (_) {}
     const newId = "preset_" + Date.now();
     currentConfig.presets.push({
       id: newId,
@@ -1858,7 +1872,8 @@ function savePresetFromModal() {
       stop_time_str: stopTimeStr,
       hold_duration_ms: holdDurationMs,
       hold_interval_ms: holdIntervalMs,
-      is_default: false
+      is_default: false,
+      points,
     });
   }
 

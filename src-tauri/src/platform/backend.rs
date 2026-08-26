@@ -53,7 +53,7 @@ impl PositionMode {
 
 /// Fully-typed click request. Replaces the old stringly-typed
 /// `click_mouse_ext(&str button, &str click_type, ...)` contract.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ClickSpec {
     pub button: MouseButton,
     pub click_type: ClickType,
@@ -61,6 +61,15 @@ pub struct ClickSpec {
     pub fixed_x: i32,
     pub fixed_y: i32,
     pub jitter_radius: u32,
+    /// Optional multi-point click sequence. When non-empty the executor
+    /// visits each point in order with the per-point delay. When empty
+    /// the executor falls back to the legacy single-point behaviour
+    /// (fixed_x/fixed_y + jitter_radius).
+    pub points: Vec<crate::config_manager::SequencePoint>,
+    /// Cursor index into `points` for the next click. The scheduler
+    /// increments this after every click; the executor resets it to 0
+    /// when it reaches the end (looping).
+    pub point_index: u32,
 }
 
 /// Every synthesized-input primitive the executor needs.
@@ -280,6 +289,8 @@ mod contract_tests {
             fixed_x: 100,
             fixed_y: 200,
             jitter_radius: 5,
+            points: Vec::new(),
+            point_index: 0,
         };
         assert!(backend.click_mouse(&spec));
         backend.release_mouse_hold(spec.button);

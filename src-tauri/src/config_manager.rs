@@ -39,6 +39,12 @@ pub struct EngineSettings {
     pub gui_lock_ms: u64,
     #[serde(default = "default_hotkey_debounce_ms")]
     pub hotkey_debounce_ms: u32,
+    /// Optional multi-point click sequence. When non-empty the engine
+    /// visits each point in order with its per-point delay. Per-run
+    /// override lives on each `PresetItem.points` (UI populates this
+    /// when a preset with `points` is selected).
+    #[serde(default)]
+    pub sequence_points: Vec<SequencePoint>,
 }
 
 fn default_click_type() -> String {
@@ -82,6 +88,7 @@ impl Default for EngineSettings {
             stop_time_str: String::new(),
             gui_lock_ms: 1500,
             hotkey_debounce_ms: 80,
+            sequence_points: Vec::new(),
         }
     }
 }
@@ -244,6 +251,16 @@ pub struct AppProfile {
     pub enabled: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SequencePoint {
+    pub x: i32,
+    pub y: i32,
+    /// Delay in milliseconds AFTER clicking this point before moving to
+    /// the next one (or repeating the cycle). 0 means "no extra wait".
+    #[serde(default)]
+    pub delay_ms: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PresetItem {
     pub id: String,
     pub name: String,
@@ -282,6 +299,12 @@ pub struct PresetItem {
     pub stop_time_str: String,
     #[serde(default)]
     pub is_default: bool,
+    /// Optional multi-point sequence. When this is non-empty the
+    /// scheduler visits each point in order with the per-point delay.
+    /// When empty the engine falls back to the legacy single-point
+    /// behaviour (fixed_x/fixed_y + jitter_radius).
+    #[serde(default)]
+    pub points: Vec<SequencePoint>,
 }
 
 fn default_button() -> String {
@@ -317,6 +340,7 @@ fn default_presets() -> Vec<PresetItem> {
             stop_duration_min: 0,
             stop_time_str: String::new(),
             is_default: true,
+            points: Vec::new(),
         },
         PresetItem {
             id: "gaming_boost".into(),
@@ -341,6 +365,7 @@ fn default_presets() -> Vec<PresetItem> {
             stop_duration_min: 0,
             stop_time_str: String::new(),
             is_default: true,
+            points: Vec::new(),
         },
         PresetItem {
             id: "human_emulation".into(),
@@ -365,6 +390,7 @@ fn default_presets() -> Vec<PresetItem> {
             stop_duration_min: 0,
             stop_time_str: String::new(),
             is_default: true,
+            points: Vec::new(),
         },
         PresetItem {
             id: "afk_farm".into(),
@@ -389,6 +415,7 @@ fn default_presets() -> Vec<PresetItem> {
             stop_duration_min: 0,
             stop_time_str: String::new(),
             is_default: true,
+            points: Vec::new(),
         },
     ]
 }

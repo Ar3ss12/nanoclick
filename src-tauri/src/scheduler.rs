@@ -75,6 +75,9 @@ pub struct ClickScheduler {
     hotkey_record: Arc<Mutex<String>>,
     preset_hotkeys: Arc<Mutex<Vec<String>>>,
     hotkey_debounce_ms: Arc<AtomicU32>,
+    /// Optional multi-point sequence. When non-empty the click loop
+    /// visits each point in order with the per-point delay.
+    sequence_points: Arc<Mutex<Vec<crate::config_manager::SequencePoint>>>,
     last_toggle_instant: Arc<Mutex<Option<std::time::Instant>>>,
     /// Optional image trigger copied from config (used by the click loop).
     image_trigger: Arc<Mutex<Option<crate::config_manager::ImageTrigger>>>,
@@ -118,6 +121,7 @@ impl ClickScheduler {
             hotkey_record: Arc::new(Mutex::new(initial_cfg.hotkey_record)),
             preset_hotkeys: Arc::new(Mutex::new(initial_cfg.hotkey_preset_slots.clone())),
             hotkey_debounce_ms: Arc::new(AtomicU32::new(initial_cfg.hotkey_debounce_ms)),
+            sequence_points: Arc::new(Mutex::new(initial_cfg.sequence_points.clone())),
             last_toggle_instant: Arc::new(Mutex::new(None)),
             hotkeys_version: Arc::new(AtomicU64::new(1)),
             image_trigger: Arc::new(Mutex::new(None)),
@@ -161,6 +165,7 @@ impl ClickScheduler {
             } else {
                 "work".into()
             },
+            sequence_points: self.sequence_points.lock().unwrap().clone(),
         }
     }
 
@@ -202,6 +207,7 @@ impl ClickScheduler {
             .store(cfg.hotkey_record_toggle, Ordering::Relaxed);
         *self.hotkey_record.lock().unwrap() = cfg.hotkey_record;
         *self.preset_hotkeys.lock().unwrap() = cfg.hotkey_preset_slots;
+        *self.sequence_points.lock().unwrap() = cfg.sequence_points.clone();
         // Signal the hotkey listener that bindings changed so it re-parses
         // them once instead of diffing string snapshots on every poll.
         self.hotkeys_version.fetch_add(1, Ordering::Release);
@@ -455,6 +461,7 @@ impl ClickScheduler {
         let hold_interval_arc = Arc::clone(&self.hold_interval_ms);
         let repeat_interval_arc = Arc::clone(&self.repeat_interval_ms);
         let jitter_radius_arc = Arc::clone(&self.jitter_radius_px);
+        let sequence_points_arc = Arc::clone(&self.sequence_points);
         let start_delay_arc = Arc::clone(&self.start_delay_ms);
         let stop_duration_arc = Arc::clone(&self.stop_duration_ms);
         let stop_time_arc = Arc::clone(&self.stop_time_epoch_sec);
@@ -483,7 +490,13 @@ impl ClickScheduler {
                 fixed_x: fixed_x_arc.load(Ordering::Relaxed) as i32,
                 fixed_y: fixed_y_arc.load(Ordering::Relaxed) as i32,
                 jitter_radius: jitter_radius_arc.load(Ordering::Relaxed),
+                points: sequence_points_arc.lock().unwrap().clone(),
+                point_index: 0,
             };
+            // When a sequence is active the click loop positions the cursor
+            // at each point in order. Snapshot the points once and reuse.
+            let active_sequence: Vec<crate::config_manager::SequencePoint> =
+                cur_click_spec.points.clone();
             let cur_repeat_mode = repeat_mode_arc.lock().unwrap().clone();
             let cur_repeat_count = repeat_count_arc.load(Ordering::Relaxed);
             let cur_hold_duration = hold_duration_arc.load(Ordering::Relaxed).max(10);
@@ -744,6 +757,38 @@ impl ClickScheduler {
                 // dispatch one phantom click after stop.
                 if !active.load(Ordering::Relaxed) {
                     break;
+                }
+                // ── Multi-point sequence handling ──────────────────────
+                // When active_sequence is non-empty we move the cursor to
+                // the next point in order before clicking, then wait the
+                // point-specific delay before the next iteration.
+                if !active_sequence.is_empty() {
+                    let idx = (batch_click_count as usize) % active_sequence.len();
+                    let p = &active_sequence[idx];
+                    platform_backend.set_cursor_pos(p.x, p.y);
+                    let mut seq_spec = cur_click_spec.clone();
+                    seq_spec.fixed_x = p.x;
+                    seq_spec.fixed_y = p.y;
+                    seq_spec.points.clear();
+                    seq_spec.point_index = 0;
+                    if platform_backend.click_mouse(&seq_spec) {
+                        let total = clicks_done.fetch_add(1, Ordering::Relaxed) + 1;
+                        if let Some(ref app) = app_handle {
+                            Self::hud_maybe_emit(app, total);
+                        }
+                        batch_click_count += 1;
+                        if p.delay_ms > 0 {
+                            let event_handle =
+                                stop_event_lock.lock().unwrap().clone().expect("stop_event");
+                            let target = Instant::now() + Duration::from_millis(p.delay_ms as u64);
+                            let _ = timer.wait_until(target, event_handle);
+                            if !active.load(Ordering::Relaxed) {
+                                break;
+                            }
+                        }
+                    }
+                    // Continue to next iteration so cadence can advance.
+                    continue;
                 }
                 if platform_backend.click_mouse(&cur_click_spec) {
                     let total = clicks_done.fetch_add(1, Ordering::Relaxed) + 1;

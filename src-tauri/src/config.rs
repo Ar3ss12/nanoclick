@@ -31,6 +31,11 @@ pub struct Config {
     pub gui_lock_ms: u64,
     pub hotkey_debounce_ms: u32,
     pub active_mode: String,
+    /// Optional multi-point click sequence. When non-empty the engine
+    /// visits each point in order with the per-point delay, looping
+    /// until stopped. Empty falls back to the legacy single-point
+    /// behaviour (fixed_x/fixed_y + jitter_radius_px).
+    pub sequence_points: Vec<crate::config_manager::SequencePoint>,
 }
 
 impl Default for Config {
@@ -65,6 +70,7 @@ impl Default for Config {
             gui_lock_ms: 1500,
             hotkey_debounce_ms: 80,
             active_mode: "autoclicker".into(),
+            sequence_points: Vec::new(),
         }
     }
 }
@@ -101,6 +107,7 @@ impl From<AppConfig> for Config {
             gui_lock_ms: app_cfg.engine.gui_lock_ms,
             hotkey_debounce_ms: app_cfg.engine.hotkey_debounce_ms,
             active_mode: app_cfg.active_mode,
+            sequence_points: app_cfg.engine.sequence_points.clone(),
         }
     }
 }

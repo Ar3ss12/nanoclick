@@ -773,6 +773,12 @@
             </select>
           </div>
 
+          <div class="preset-form-group">
+            <label>Multi-point sequence (JSON, optional)</label>
+            <textarea id="prPoints" class="select-input" rows="4" placeholder='[{"x":100,"y":100,"delay_ms":50},{"x":300,"y":200,"delay_ms":0}]' style="font-family:monospace;font-size:11px;"></textarea>
+            <small style="color:var(--text-dim);">When non-empty, visits each point in order with the per-point delay. Position mode is ignored.</small>
+          </div>
+
           <div id="presetFixedCoordRow" class="preset-form-group coord-group hidden">
             <label>X / Y coordinates</label>
             <div style="display:flex; gap:6px;">
