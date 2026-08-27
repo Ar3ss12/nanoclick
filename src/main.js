@@ -21,11 +21,17 @@ function logCall(direction, label, extra) {
   try { console.log(`[${ts()}] [${direction}] ${label}`, extra ?? ""); } catch (_) { /* never throw out of a logger */ }
 }
 
-// ── invoke wrapper ──────────────────────────────────────
-// Logs:  cmd name, args summary, elapsed ms, success value or error message.
-const rawInvoke = TAURI?.core?.invoke
-  ? TAURI.core.invoke
-  : async () => { throw new Error("Tauri invoke not available"); };
+function getRawInvoke() {
+  return (typeof window !== "undefined" && window.__TAURI__?.core?.invoke)
+      || (typeof window !== "undefined" && window.__TAURI_INTERNALS__?.invoke)
+      || null;
+}
+
+function getRawListen() {
+  return (typeof window !== "undefined" && window.__TAURI__?.event?.listen)
+      || null;
+}
+
 const invoke = async function(cmd, args) {
   const start = performance.now();
   const argSummary = args
@@ -39,6 +45,10 @@ const invoke = async function(cmd, args) {
     : {};
   logCall("→IPC", `${cmd}`, argSummary);
   try {
+    const rawInvoke = getRawInvoke();
+    if (!rawInvoke) {
+      throw new Error("Tauri invoke not available (window.__TAURI__ missing)");
+    }
     const result = await rawInvoke(cmd, args);
     const ms = (performance.now() - start).toFixed(1);
     const resultSummary = Array.isArray(result) ? `[Array:${result.length}]`
@@ -55,15 +65,14 @@ const invoke = async function(cmd, args) {
 window.invoke = invoke;
 
 // ── listen wrapper ──────────────────────────────────────
-// Logs: subscription start + every payload received. For high-frequency
-// events (~30/s status-updates during clicking), use `listenSilent` to
-// skip the per-event log and let the handler log only what matters.
-const rawListen = TAURI?.event?.listen
-  ? TAURI.event.listen
-  : async () => () => {};
 const listen = async function(eventName, handler) {
   logCall("→SUB", `event="${eventName}"`);
   try {
+    const rawListen = getRawListen();
+    if (!rawListen) {
+      logCall("✗SUB", `event="${eventName}" subscribe skipped — window.__TAURI__.event missing`);
+      return () => {};
+    }
     const unlisten = await rawListen(eventName, (event) => {
       const payloadKeys = event?.payload && typeof event.payload === "object"
         ? Object.keys(event.payload).join(",") : typeof event?.payload;
@@ -85,10 +94,14 @@ const listen = async function(eventName, handler) {
 window.listen = listen;
 
 // Silent variant — no per-event payload log, only sub start/result.
-// Use for noisy events where the handler does its own throttled logging.
 const listenSilent = async function(eventName, handler) {
   logCall("→SUB•", `event="${eventName}" (silent — handler will log)`);
   try {
+    const rawListen = getRawListen();
+    if (!rawListen) {
+      logCall("✗SUB", `event="${eventName}" subscribe skipped — window.__TAURI__.event missing`);
+      return () => {};
+    }
     const unlisten = await rawListen(eventName, (event) => {
       try {
         return handler(event);
@@ -163,16 +176,17 @@ function stage(name) {
   };
 }
 
-// Diagnostic banner: if Tauri globals are missing, dump the page state so
-// we can see *why* the UI is dead instead of staring at a blank window.
-if (typeof window === "undefined" || !TAURI || !TAURI.core || typeof TAURI.core.invoke !== "function") {
-  document.addEventListener("DOMContentLoaded", () => {
+// Diagnostic banner: if Tauri globals are missing, dump the page state on DOMContentLoaded
+document.addEventListener("DOMContentLoaded", () => {
+  const currentTauri = (typeof window !== "undefined" && window.__TAURI__) || null;
+  const currentInvoke = currentTauri?.core?.invoke || window.__TAURI_INTERNALS__?.invoke;
+  if (!currentInvoke) {
     const err = document.createElement("div");
     err.style.cssText = "position:fixed;top:0;left:0;right:0;padding:24px;background:#7f1d1d;color:#fff;font:14px monospace;z-index:99999;white-space:pre-wrap";
-    err.textContent = "NanoClick WebView error: window.__TAURI__ is " + (TAURI ? "missing .core.invoke" : "undefined") + ".\\n\\nThis usually means Tauri did not inject the global, or this page is loaded outside Tauri.\\n\\nKeys present: " + (TAURI ? Object.keys(TAURI).join(", ") : "<none>");
+    err.textContent = "NanoClick WebView error: window.__TAURI__ is " + (currentTauri ? "missing .core.invoke" : "undefined") + ".\n\nKeys present: " + (currentTauri ? Object.keys(currentTauri).join(", ") : "<none>");
     document.body.appendChild(err);
-  });
-}
+  }
+});
 
 // (invoke/listen wrappers are defined above with full logging)
 

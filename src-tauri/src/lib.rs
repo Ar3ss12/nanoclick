@@ -206,9 +206,6 @@ async fn check_for_updates(app: AppHandle) -> Result<Option<UpdateInfo>, String>
 /// (hotkey listener, scheduler, etc). Writes to the same file as the JS log
 /// so stage-by-stage diagnostics live in one place.
 pub(crate) fn debug_log_internal(level: &str, message: &str) {
-    if !cfg!(debug_assertions) && level == "info" {
-        return;
-    }
     let prefix = match level {
         "error" => "[RUST ERROR]",
         "warn" => "[RUST WARN]",
