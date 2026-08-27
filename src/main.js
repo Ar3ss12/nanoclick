@@ -429,6 +429,70 @@ function initNavigation() {
   });
 }
 
+function initEventListeners() {
+  // Hotkey recorders (buttons are now populated via initDomElements)
+  setupHotkeyRecorder(hotkeyRecordBtn, "toggle");
+  setupHotkeyRecorder(modeSwitchRecordBtn, "mode_switch");
+  setupHotkeyRecorder(recordMacroHotkeyBtn, "record_hotkey");
+  setupHotkeyRecorder(emergencyRecordBtn, "emergency_stop");
+  setupHotkeyRecorder(speedUpRecordBtn, "speed_up");
+  setupHotkeyRecorder(slowDownRecordBtn, "slow_down");
+  setupHotkeyRecorder(pickPosRecordBtn, "capture_pos");
+
+  // Open config folder button
+  if (openConfigFolderBtn) {
+    openConfigFolderBtn.addEventListener("click", async () => {
+      try { await invoke("open_config_folder"); }
+      catch (err) { console.error("Failed to open config folder:", err); }
+    });
+  }
+
+  // Behavior checkboxes
+  if (autostartCheckbox) {
+    autostartCheckbox.addEventListener("change", async () => {
+      saveConfig();
+      try { await invoke("set_windows_autostart", { enable: autostartCheckbox.checked }); }
+      catch (err) { console.error("Failed to set Windows autostart:", err); }
+    });
+  }
+  if (startMinimizedCheckbox) startMinimizedCheckbox.addEventListener("change", saveConfig);
+  if (minimizeToTrayCheckbox) minimizeToTrayCheckbox.addEventListener("change", saveConfig);
+  if (notificationsCheckbox) notificationsCheckbox.addEventListener("change", saveConfig);
+  if (pauseFocusLossCheckbox) pauseFocusLossCheckbox.addEventListener("change", saveConfig);
+
+  // Theme select
+  if (themeSelect) {
+    themeSelect.addEventListener("change", () => {
+      applyTheme(themeSelect.value, currentConfig.ui?.accent_color);
+      saveConfig();
+    });
+  }
+
+  // Accent swatches
+  if (accentSwatches && accentSwatches.forEach) {
+    accentSwatches.forEach(swatch => {
+      swatch.addEventListener("click", () => {
+        const color = swatch.getAttribute("data-accent");
+        updateSwatchActiveState(color);
+        applyTheme(themeSelect?.value || "cyberpunk", color);
+        saveConfig();
+      });
+    });
+  }
+
+  // Mode toggle button
+  if (modeToggleBtn) {
+    modeToggleBtn.addEventListener("click", async () => {
+      try {
+        const newMode = await invoke("toggle_mode");
+        setModeDisplay(newMode);
+      } catch (err) {
+        console.error("Failed to toggle mode:", err);
+      }
+    });
+  }
+}
+
 // ── MODE DISPLAY ────────────────────────────────────────────
 function setModeDisplay(mode) {
   currentConfig.active_mode = mode;
@@ -1085,9 +1149,7 @@ function setupHotkeyRecorder(btn, targetKey) {
   });
 }
 
-setupHotkeyRecorder(hotkeyRecordBtn, "toggle");
-setupHotkeyRecorder(modeSwitchRecordBtn, "mode_switch");
-setupHotkeyRecorder(recordMacroHotkeyBtn, "record_hotkey");
+// (hotkey recorders wired in initEventListeners)
 
 let lastRecordToggleAt = 0;
 
@@ -1182,38 +1244,6 @@ listen("app-profile-activate", async (event) => {
   if (!presetId) return;
   await applyPreset(presetId);
 });
-setupHotkeyRecorder(emergencyRecordBtn, "emergency_stop");
-setupHotkeyRecorder(speedUpRecordBtn, "speed_up");
-setupHotkeyRecorder(slowDownRecordBtn, "slow_down");
-setupHotkeyRecorder(pickPosRecordBtn, "capture_pos");
-
-// ── OPEN CONFIG FOLDER BUTTON ────────────────────────────────
-if (openConfigFolderBtn) {
-  openConfigFolderBtn.addEventListener("click", async () => {
-    try {
-      await invoke("open_config_folder");
-    } catch (err) {
-      console.error("Failed to open config folder:", err);
-    }
-  });
-}
-
-// ── BEHAVIOR AUTOSTART LISTENER ──────────────────────────────
-if (autostartCheckbox) {
-  autostartCheckbox.addEventListener("change", async () => {
-    saveConfig();
-    try {
-      await invoke("set_windows_autostart", { enable: autostartCheckbox.checked });
-    } catch (err) {
-      console.error("Failed to set Windows autostart:", err);
-    }
-  });
-}
-if (startMinimizedCheckbox) startMinimizedCheckbox.addEventListener("change", saveConfig);
-if (minimizeToTrayCheckbox) minimizeToTrayCheckbox.addEventListener("change", saveConfig);
-if (notificationsCheckbox) notificationsCheckbox.addEventListener("change", saveConfig);
-if (pauseFocusLossCheckbox) pauseFocusLossCheckbox.addEventListener("change", saveConfig);
-
 // ── DYNAMIC THEMES & ACCENT ENGINE ───────────────────────────
 function applyTheme(themeName, accentHex) {
   document.documentElement.setAttribute("data-theme", themeName || "cyberpunk");
@@ -1226,42 +1256,15 @@ function applyTheme(themeName, accentHex) {
 }
 
 function updateSwatchActiveState(accentHex) {
-  accentSwatches.forEach(swatch => {
-    if (swatch.getAttribute("data-accent").toLowerCase() === accentHex.toLowerCase()) {
-      swatch.classList.add("active");
-    } else {
-      swatch.classList.remove("active");
-    }
-  });
-}
-
-if (themeSelect) {
-  themeSelect.addEventListener("change", () => {
-    const theme = themeSelect.value;
-    applyTheme(theme, currentConfig.ui?.accent_color);
-    saveConfig();
-  });
-}
-
-accentSwatches.forEach(swatch => {
-  swatch.addEventListener("click", () => {
-    const color = swatch.getAttribute("data-accent");
-    updateSwatchActiveState(color);
-    applyTheme(themeSelect?.value || "cyberpunk", color);
-    saveConfig();
-  });
-});
-
-// ── MODE TOGGLE ─────────────────────────────────────────────
-if (modeToggleBtn) {
-  modeToggleBtn.addEventListener("click", async () => {
-    try {
-      const newMode = await invoke("toggle_mode");
-      setModeDisplay(newMode);
-    } catch (err) {
-      console.error("Failed to toggle mode:", err);
-    }
-  });
+  if (accentSwatches && accentSwatches.forEach) {
+    accentSwatches.forEach(swatch => {
+      if (swatch.getAttribute("data-accent").toLowerCase() === accentHex.toLowerCase()) {
+        swatch.classList.add("active");
+      } else {
+        swatch.classList.remove("active");
+      }
+    });
+  }
 }
 
 // ── PRESETS MANAGER V2 ──────────────────────────────────────
@@ -3212,6 +3215,7 @@ onDomReady(() => {
 
   initDomElements();
   initNavigation();
+  initEventListeners();
   loadConfig();
   syncVersionDisplay();
   checkPlatformCapabilities();
