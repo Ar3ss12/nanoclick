@@ -52,6 +52,7 @@ const invoke = async function(cmd, args) {
     throw err;
   }
 };
+window.invoke = invoke;
 
 // ── listen wrapper ──────────────────────────────────────
 // Logs: subscription start + every payload received. For high-frequency
@@ -81,6 +82,7 @@ const listen = async function(eventName, handler) {
     return () => {}; // never throw — silent noop is the original behavior
   }
 };
+window.listen = listen;
 
 // Silent variant — no per-event payload log, only sub start/result.
 // Use for noisy events where the handler does its own throttled logging.
@@ -1779,11 +1781,12 @@ function openPresetEditModal(p = null) {
     if (repeatModeSelect) repeatModeSelect.value = currentConfig.engine.repeat_mode || "unlimited";
     if (repeatCountInput) repeatCountInput.value = currentConfig.engine.repeat_count || 0;
     if (repeatIntervalInput) repeatIntervalInput.value = currentConfig.engine.repeat_interval_ms ?? 1000;
-    if (p && p.points && Array.isArray(p.points)) {
-      window.SequenceEditor?.setPoints(p.points);
-    } else {
-      window.SequenceEditor?.setPoints([]);
-    }
+  }
+
+  if (p && p.points && Array.isArray(p.points)) {
+    window.SequenceEditor?.setPoints(p.points);
+  } else {
+    window.SequenceEditor?.setPoints([]);
   }
 
   if (positionSelect && coordRow) {
@@ -1791,6 +1794,7 @@ function openPresetEditModal(p = null) {
   }
 
   modal.classList.remove("hidden");
+  setTimeout(() => window.SequenceEditor?.draw(), 50);
 }
 
 function savePresetFromModal() {

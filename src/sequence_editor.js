@@ -13,9 +13,15 @@ const SE = (window.SequenceEditor = (() => {
   const SNAP = 25;
   const GUTTER = 24;
 
+  function getInvoke() {
+    return window.invoke || window.__TAURI__?.core?.invoke || null;
+  }
+
   async function refreshScreenSize() {
     try {
-      const w = await invoke("get_primary_screen_size").catch(() => null);
+      const inv = getInvoke();
+      if (!inv) return;
+      const w = await inv("get_primary_screen_size").catch(() => null);
       if (w && w.width && w.height) {
         lastPrimaryW = w.width;
         lastPrimaryH = w.height;
@@ -234,7 +240,9 @@ const SE = (window.SequenceEditor = (() => {
     if (capBtn) {
       capBtn.addEventListener("click", async () => {
         try {
-          const pos = await invoke("get_cursor_pos_now");
+          const inv = getInvoke();
+          if (!inv) return;
+          const pos = await inv("get_cursor_pos_now");
           if (pos && Number.isFinite(pos.x) && Number.isFinite(pos.y)) {
             points.unshift({ x: pos.x | 0, y: pos.y | 0, delay_ms: 0 });
             draw();
