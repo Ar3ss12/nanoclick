@@ -176,8 +176,19 @@ function stage(name) {
   };
 }
 
+// Helper to execute callback immediately if DOM is already parsed/interactive (common in ES modules),
+// or subscribe to DOMContentLoaded if DOM is still loading.
+function onDomReady(fn) {
+  if (typeof document !== "undefined" && document.readyState !== "loading") {
+    fn();
+  } else if (typeof document !== "undefined") {
+    document.addEventListener("DOMContentLoaded", fn);
+  }
+}
+if (typeof window !== "undefined") window.onDomReady = onDomReady;
+
 // Diagnostic banner: if Tauri globals are missing, dump the page state on DOMContentLoaded
-document.addEventListener("DOMContentLoaded", () => {
+onDomReady(() => {
   const currentTauri = (typeof window !== "undefined" && window.__TAURI__) || null;
   const currentInvoke = currentTauri?.core?.invoke || window.__TAURI_INTERNALS__?.invoke;
   if (!currentInvoke) {
@@ -3151,7 +3162,7 @@ function makeAction(type) {
 }
 
 // ── INIT ────────────────────────────────────────────────────
-window.addEventListener("DOMContentLoaded", () => {
+onDomReady(() => {
   // Set up the console → Tauri debug_log pipe FIRST so every subsequent
   // console.log/error/warn (including the "DOM ready" message below) is
   // captured. Without this order, the first few logs use the original
@@ -3214,7 +3225,7 @@ function applyDebounceFromConfig(ms) {
       (zm === 150 && clamped > 75));
   });
 }
-document.addEventListener("DOMContentLoaded", () => {
+onDomReady(() => {
   // Engine inputs that need explicit auto-save (debounce/start-delay/stop-time).
   // Note: most engine inputs already wire saveConfig via the L760-L800 change
   // listeners; these three were missing — without explicit input/change
@@ -3315,7 +3326,7 @@ applyPreset = async function (presetId) {
   return _origApplyPresetForStats(presetId);
 };
 
-document.addEventListener("DOMContentLoaded", () => {
+onDomReady(() => {
   const resetBtn = document.getElementById("statsResetBtn");
   if (resetBtn) resetBtn.addEventListener("click", () => {
     currentConfig.stats = { total_clicks: 0, presets_applied: 0 };
@@ -3335,7 +3346,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
 
 // ── FULL BACKUP EXPORT / IMPORT ─────────────────────────────
-document.addEventListener("DOMContentLoaded", () => {
+onDomReady(() => {
   const exportBtn = document.getElementById("exportBackupBtn");
   const importBtn = document.getElementById("importBackupBtn");
   if (exportBtn) exportBtn.addEventListener("click", async () => {
@@ -3417,7 +3428,7 @@ function renderAppProfiles() {
   }));
 }
 
-document.addEventListener("DOMContentLoaded", () => {
+onDomReady(() => {
   renderAppProfiles();
   const addBtn = document.getElementById("addAppProfileBtn");
   if (addBtn) addBtn.addEventListener("click", () => {
@@ -3463,7 +3474,7 @@ function renderImageTrigger() {
   status.style.color = "var(--accent)";
 }
 
-document.addEventListener("DOMContentLoaded", () => {
+onDomReady(() => {
   renderImageTrigger();
   const pickBtn = document.getElementById("pickPixelBtn");
   const saveBtn = document.getElementById("setImgTrigBtn");
@@ -3514,7 +3525,7 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 // ── PORTABLE MODE BADGE (F10) ───────────────────────────────
-document.addEventListener("DOMContentLoaded", () => {
+onDomReady(() => {
   if (document.getElementById("portableBadge")) return;
   const anchor = document.getElementById("saveConfigBtn")
     || document.querySelector(".settings-row");
