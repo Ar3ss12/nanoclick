@@ -329,68 +329,105 @@ let isRunning = false;
 let isButtonLocked = false;
 let guiLockTimer = null;
 
-// DOM Elements
-const statusBadge = document.getElementById("statusBadge");
-const modeToggleBtn = document.getElementById("modeToggleBtn");
-const clickCounter = document.getElementById("clickCounter");
-const displayCps = document.getElementById("displayCps");
-const toggleBtn = document.getElementById("toggleBtn");
-const toggleBtnText = document.getElementById("toggleBtnText");
+// DOM Elements (declared in module scope, populated dynamically in initDomElements)
+let statusBadge, modeToggleBtn, clickCounter, displayCps, toggleBtn, toggleBtnText;
+let cpsRange, cpsInput, randomRange, randomInput, limitInput, limitRange, clickTypeSelect;
+let posXInput, posYInput, repeatCountInput, hotkeyRecordBtn, modeSwitchRecordBtn, recordMacroHotkeyBtn;
+let hotkeyRecordLabel, modeSwitchRecordLabel, recordMacroHotkeyLabel;
+let configPathDisplay, guiLockDelayInput, jitterRadiusInput, rippleCheckbox, hudCheckbox, footerModeShortcut;
+let onboardingModal, onboardingBtn;
+let limitBadge, holdSubSettings, holdDurationInput, holdIntervalInput, repeatIntervalInput;
+let pickPosBtn, pickPosStatus, openConfigFolderBtn;
+let startMinimizedCheckbox, autostartCheckbox, minimizeToTrayCheckbox, notificationsCheckbox, pauseFocusLossCheckbox;
+let themeSelect, accentSwatches;
+let emergencyRecordBtn, speedUpRecordBtn, slowDownRecordBtn, pickPosRecordBtn;
 
-const cpsRange = document.getElementById("cpsRange");
-const cpsInput = document.getElementById("cpsInput");
-const randomRange = document.getElementById("randomRange");
-const randomInput = document.getElementById("randomInput");
-const limitInput = document.getElementById("limitInput");
-const limitRange = document.getElementById("limitRange");
-const clickTypeSelect = document.getElementById("clickTypeSelect");
-const posXInput = document.getElementById("posXInput");
-const posYInput = document.getElementById("posYInput");
-const repeatCountInput = document.getElementById("repeatCountInput");
-const hotkeyRecordBtn = document.getElementById("hotkeyRecordBtn");
-const modeSwitchRecordBtn = document.getElementById("modeSwitchRecordBtn");
-const recordMacroHotkeyBtn = document.getElementById("recordMacroHotkeyBtn");
-const hotkeyRecordLabel = document.getElementById("hotkeyRecordLabel");
-const modeSwitchRecordLabel = document.getElementById("modeSwitchRecordLabel");
-const recordMacroHotkeyLabel = document.getElementById("recordMacroHotkeyLabel");
+function initDomElements() {
+  statusBadge = document.getElementById("statusBadge");
+  modeToggleBtn = document.getElementById("modeToggleBtn");
+  clickCounter = document.getElementById("clickCounter");
+  displayCps = document.getElementById("displayCps");
+  toggleBtn = document.getElementById("toggleBtn");
+  toggleBtnText = document.getElementById("toggleBtnText");
 
-const configPathDisplay = document.getElementById("configPathDisplay");
-const guiLockDelayInput = document.getElementById("guiLockDelayInput");
-const jitterRadiusInput = document.getElementById("jitterRadiusInput");
-const rippleCheckbox = document.getElementById("rippleCheckbox");
-const hudCheckbox = document.getElementById("hudCheckbox");
-const footerModeShortcut = document.getElementById("footerModeShortcut");
+  cpsRange = document.getElementById("cpsRange");
+  cpsInput = document.getElementById("cpsInput");
+  randomRange = document.getElementById("randomRange");
+  randomInput = document.getElementById("randomInput");
+  limitInput = document.getElementById("limitInput");
+  limitRange = document.getElementById("limitRange");
+  clickTypeSelect = document.getElementById("clickTypeSelect");
+  posXInput = document.getElementById("posXInput");
+  posYInput = document.getElementById("posYInput");
+  repeatCountInput = document.getElementById("repeatCountInput");
+  hotkeyRecordBtn = document.getElementById("hotkeyRecordBtn");
+  modeSwitchRecordBtn = document.getElementById("modeSwitchRecordBtn");
+  recordMacroHotkeyBtn = document.getElementById("recordMacroHotkeyBtn");
+  hotkeyRecordLabel = document.getElementById("hotkeyRecordLabel");
+  modeSwitchRecordLabel = document.getElementById("modeSwitchRecordLabel");
+  recordMacroHotkeyLabel = document.getElementById("recordMacroHotkeyLabel");
 
-// Modal
-const onboardingModal = document.getElementById("onboardingModal");
-const onboardingBtn = document.getElementById("onboardingBtn");
+  configPathDisplay = document.getElementById("configPathDisplay");
+  guiLockDelayInput = document.getElementById("guiLockDelayInput");
+  jitterRadiusInput = document.getElementById("jitterRadiusInput");
+  rippleCheckbox = document.getElementById("rippleCheckbox");
+  hudCheckbox = document.getElementById("hudCheckbox");
+  footerModeShortcut = document.getElementById("footerModeShortcut");
 
-// ── SIDEBAR NAVIGATION ──────────────────────────────────────
-document.querySelectorAll(".nav-item").forEach(navBtn => {
-  navBtn.addEventListener("click", async () => {
-    const viewId = navBtn.getAttribute("data-view");
-    if (!viewId) return;
+  onboardingModal = document.getElementById("onboardingModal");
+  onboardingBtn = document.getElementById("onboardingBtn");
 
-    // Auto-pause autoclicker when navigating away from Dashboard
-    if (viewId !== "viewDashboard" && isRunning) {
-      try {
-        const active = await invoke("toggle_autoclicker");
-        setRunningState(active);
-      } catch (err) {
-        console.error("Auto-pause on navigation failed:", err);
+  limitBadge = document.getElementById("limitBadge");
+  holdSubSettings = document.getElementById("holdSubSettings");
+  holdDurationInput = document.getElementById("holdDurationInput");
+  holdIntervalInput = document.getElementById("holdIntervalInput");
+  repeatIntervalInput = document.getElementById("repeatIntervalInput");
+  pickPosBtn = document.getElementById("pickPosBtn");
+  pickPosStatus = document.getElementById("pickPosStatus");
+  openConfigFolderBtn = document.getElementById("openConfigFolderBtn");
+
+  startMinimizedCheckbox = document.getElementById("startMinimizedCheckbox");
+  autostartCheckbox = document.getElementById("autostartCheckbox");
+  minimizeToTrayCheckbox = document.getElementById("minimizeToTrayCheckbox");
+  notificationsCheckbox = document.getElementById("notificationsCheckbox");
+  pauseFocusLossCheckbox = document.getElementById("pauseFocusLossCheckbox");
+
+  themeSelect = document.getElementById("themeSelect");
+  accentSwatches = document.querySelectorAll("#accentSwatches .swatch");
+
+  emergencyRecordBtn = document.getElementById("emergencyRecordBtn");
+  speedUpRecordBtn = document.getElementById("speedUpRecordBtn");
+  slowDownRecordBtn = document.getElementById("slowDownRecordBtn");
+  pickPosRecordBtn = document.getElementById("pickPosRecordBtn");
+}
+
+function initNavigation() {
+  document.querySelectorAll(".nav-item").forEach(navBtn => {
+    navBtn.addEventListener("click", async () => {
+      const viewId = navBtn.getAttribute("data-view");
+      if (!viewId) return;
+
+      // Auto-pause autoclicker when navigating away from Dashboard
+      if (viewId !== "viewDashboard" && isRunning) {
+        try {
+          const active = await invoke("toggle_autoclicker");
+          setRunningState(active);
+        } catch (err) {
+          console.error("Auto-pause on navigation failed:", err);
+        }
       }
-    }
 
-    // Update nav active state
-    document.querySelectorAll(".nav-item").forEach(b => b.classList.remove("active"));
-    navBtn.classList.add("active");
+      // Update nav active state
+      document.querySelectorAll(".nav-item").forEach(b => b.classList.remove("active"));
+      navBtn.classList.add("active");
 
-    // Show the target view
-    document.querySelectorAll(".view").forEach(v => v.classList.remove("active"));
-    const target = document.getElementById(viewId);
-    if (target) target.classList.add("active");
+      // Show the target view
+      document.querySelectorAll(".view").forEach(v => v.classList.remove("active"));
+      const target = document.getElementById(viewId);
+      if (target) target.classList.add("active");
+    });
   });
-});
+}
 
 // ── MODE DISPLAY ────────────────────────────────────────────
 function setModeDisplay(mode) {
@@ -436,28 +473,7 @@ function setModeDisplay(mode) {
   }
 }
 
-const limitBadge = document.getElementById("limitBadge");
-const holdSubSettings = document.getElementById("holdSubSettings");
-const holdDurationInput = document.getElementById("holdDurationInput");
-const holdIntervalInput = document.getElementById("holdIntervalInput");
-const repeatIntervalInput = document.getElementById("repeatIntervalInput");
-const pickPosBtn = document.getElementById("pickPosBtn");
-const pickPosStatus = document.getElementById("pickPosStatus");
-const openConfigFolderBtn = document.getElementById("openConfigFolderBtn");
-
-const startMinimizedCheckbox = document.getElementById("startMinimizedCheckbox");
-const autostartCheckbox = document.getElementById("autostartCheckbox");
-const minimizeToTrayCheckbox = document.getElementById("minimizeToTrayCheckbox");
-const notificationsCheckbox = document.getElementById("notificationsCheckbox");
-const pauseFocusLossCheckbox = document.getElementById("pauseFocusLossCheckbox");
-
-const themeSelect = document.getElementById("themeSelect");
-const accentSwatches = document.querySelectorAll("#accentSwatches .swatch");
-
-const emergencyRecordBtn = document.getElementById("emergencyRecordBtn");
-const speedUpRecordBtn = document.getElementById("speedUpRecordBtn");
-const slowDownRecordBtn = document.getElementById("slowDownRecordBtn");
-const pickPosRecordBtn = document.getElementById("pickPosRecordBtn");
+// (All DOM elements initialized in initDomElements)
 
 function updateLimitBadge(val) {
   if (!limitBadge) return;
@@ -3194,6 +3210,8 @@ onDomReady(() => {
     console.error("[unhandled-rejection]", e.reason);
   });
 
+  initDomElements();
+  initNavigation();
   loadConfig();
   syncVersionDisplay();
   checkPlatformCapabilities();
