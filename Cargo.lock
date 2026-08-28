@@ -232,6 +232,7 @@ dependencies = [
  "serde_json",
  "tauri",
  "tauri-build",
+ "tauri-codegen",
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
  "windows 0.52.0",

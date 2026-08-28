@@ -8,20 +8,7 @@
   },
   "app": {
     "withGlobalTauri": true,
-    "windows": [
-      {
-        "title": "NanoClick",
-        "width": 900,
-        "height": 590,
-        "minWidth": 860,
-        "minHeight": 540,
-        "resizable": true,
-        "decorations": true,
-        "transparent": false,
-        "center": true,
-        "devtools": false
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": null
     }

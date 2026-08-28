@@ -1,6 +1,10 @@
 fn main() {
     // Force rebuild when frontend files change — Tauri embeds these at compile time
     // via include_dir!/tauri::generate_context!, so we have to invalidate the build.
+    //
+    // IMPORTANT: also rerun-if-changed the whole frontend directory. On Windows
+    // mtime on a directory does NOT update when files inside change, so without
+    // this Tauri misses `index.html` edits and ships stale HTML/JS.
     println!("cargo:rerun-if-changed=../src/index.html");
     println!("cargo:rerun-if-changed=../src/main.js");
     println!("cargo:rerun-if-changed=../src/style.css");
