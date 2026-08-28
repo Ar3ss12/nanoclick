@@ -49,7 +49,11 @@ function getRawListen() {
 const origLog = console.log;
 const origError = console.error;
 const origWarn = console.warn;
+let inLogPipe = false;
+
 const sendToBackend = async (level, args) => {
+  if (inLogPipe) return;
+  inLogPipe = true;
   try {
     const msg = args.map(a => {
       try { return typeof a === 'string' ? a : JSON.stringify(a); }
@@ -59,11 +63,16 @@ const sendToBackend = async (level, args) => {
     if (inv) {
       await inv("debug_log", { level, message: msg });
     }
-  } catch (_) {}
+  } catch (_) {
+  } finally {
+    inLogPipe = false;
+  }
 };
+
 console.log = (...args) => { origLog.apply(console, args); sendToBackend("info", args); };
 console.error = (...args) => { origError.apply(console, args); sendToBackend("error", args); };
 console.warn = (...args) => { origWarn.apply(console, args); sendToBackend("warn", args); };
+
 window.addEventListener("error", (e) => {
   const msg = `[uncaught-error] ${e.message || "Unknown error"} at ${(e.filename || "main.js")}:${(e.lineno || 0)}:${(e.colno || 0)}`;
   console.error(msg, e.error?.stack || "");
@@ -75,7 +84,17 @@ window.addEventListener("unhandledrejection", (e) => {
   dbg("FATAL UNHANDLED PROMISE REJECTION:", reasonStr);
 });
 
+function logCall(direction, label, extra) {
+  if (!DEBUG_UI || inLogPipe) return;
+  if (typeof label === "string" && label.startsWith("debug_log")) return;
+  try { console.log(`[${ts()}] [${direction}] ${label}`, extra ?? ""); } catch (_) { /* never throw out of a logger */ }
+}
+
 const invoke = async function(cmd, args) {
+  if (cmd === "debug_log") {
+    const rawInvoke = getRawInvoke();
+    return rawInvoke ? rawInvoke("debug_log", args) : Promise.resolve();
+  }
   const start = performance.now();
   const argSummary = args
     ? Object.keys(args).reduce((acc, k) => {
