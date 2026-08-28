@@ -8,16 +8,29 @@
 // Tauri 2.x internals.
 const TAURI = (typeof window !== "undefined" && window.__TAURI__) || null;
 
+// ── DEBUG MODE INFRASTRUCTURE ────────────────────────────────────
+// Verbose UI & IPC logs are generated ONLY when DEBUG_UI is true.
+// Toggled via config or setDebugMode().
+let DEBUG_UI = false;
+
+function setDebugMode(enabled) {
+  DEBUG_UI = !!enabled;
+  getRawInvoke()?.("set_debug_mode", { enabled: DEBUG_UI })?.catch(() => {});
+}
+
+function dbg(...args) {
+  if (DEBUG_UI) console.log("[UI-DBG]", ...args);
+}
+
 // ── LOGGING INFRASTRUCTURE ──────────────────────────────────────
 // Per-call wrappers for `invoke` and `listen` so every IPC round-trip
 // shows up in the dev log with timing + success/failure status.
-// Without this, an "operation didn't happen" symptom had no trail to
-// diagnose — the log was a wall of silence.
 function ts() {
   const d = new Date();
   return d.toTimeString().slice(0, 8) + "." + String(d.getMilliseconds()).padStart(3, "0");
 }
 function logCall(direction, label, extra) {
+  if (!DEBUG_UI) return;
   try { console.log(`[${ts()}] [${direction}] ${label}`, extra ?? ""); } catch (_) { /* never throw out of a logger */ }
 }
 
@@ -389,6 +402,16 @@ const emergencyRecordBtn = document.getElementById("emergencyRecordBtn");
 const speedUpRecordBtn   = document.getElementById("speedUpRecordBtn");
 const slowDownRecordBtn  = document.getElementById("slowDownRecordBtn");
 const pickPosRecordBtn   = document.getElementById("pickPosRecordBtn");
+
+// ── DOM PRESENCE DIAGNOSTIC ──────────────────────────────────
+// Logged at module-eval time (= after HTML is parsed, ES modules are deferred).
+// If any key element shows null here, HTML IDs are out of sync with JS.
+dbg("readyState at module eval:", document.readyState);
+dbg("toggleBtn:",     toggleBtn     ? "✓" : "NULL — id=toggleBtn missing in HTML");
+dbg("modeToggleBtn:", modeToggleBtn ? "✓" : "NULL — id=modeToggleBtn missing in HTML");
+dbg("cpsRange:",      cpsRange      ? "✓" : "NULL — id=cpsRange missing in HTML");
+dbg("limitRange:",    limitRange    ? "✓" : "NULL — id=limitRange missing in HTML");
+dbg("nav-items:",     document.querySelectorAll(".nav-item").length, "found");
 
 // ── SIDEBAR NAVIGATION (wired immediately — DOM is ready at module eval) ──
 document.querySelectorAll(".nav-item").forEach(navBtn => {
@@ -2197,10 +2220,11 @@ async function executeStartAutomation() {
 
 // ── TOGGLE AUTOCLICKER ──────────────────────────────────────
 if (toggleBtn) {
-  // Busy flag prevents double-fire while a previous toggle is mid-flight.
+  dbg("toggleBtn found — wiring click listener");
   let toggleBusy = false;
 
   toggleBtn.addEventListener("click", async () => {
+    dbg("toggleBtn CLICKED — isRunning:", isRunning, "isButtonLocked:", isButtonLocked, "toggleBusy:", toggleBusy);
     const clickOp = stage("Click");
     let clickTime;
     try {
@@ -3191,6 +3215,8 @@ onDomReady(() => {
     console.error("[unhandled-rejection]", e.reason);
   });
 
+  invoke("get_debug_mode").then(d => { DEBUG_UI = !!d; }).catch(() => {});
+  dbg("loadConfig() called");
   loadConfig();
   syncVersionDisplay();
   checkPlatformCapabilities();

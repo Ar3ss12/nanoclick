@@ -11,7 +11,7 @@ use config_manager::{AppConfig, ConfigManager};
 use scheduler::ClickScheduler;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
 use tauri_plugin_updater::UpdaterExt;
@@ -19,6 +19,15 @@ use tauri_plugin_updater::UpdaterExt;
 static DEBUG_LOG_FILE: OnceLock<Mutex<Option<File>>> = OnceLock::new();
 static DEBUG_LOG_BYTES: AtomicU64 = AtomicU64::new(0);
 const DEBUG_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
+static DEBUG_MODE: AtomicBool = AtomicBool::new(cfg!(debug_assertions));
+
+pub(crate) fn is_debug_mode() -> bool {
+    DEBUG_MODE.load(Ordering::Relaxed)
+}
+
+pub(crate) fn set_debug_mode_enabled(enabled: bool) {
+    DEBUG_MODE.store(enabled, Ordering::Relaxed);
+}
 
 pub struct AppState {
     pub scheduler: Arc<ClickScheduler>,
@@ -134,10 +143,19 @@ fn set_windows_autostart(enable: bool) -> Result<(), String> {
     Ok(())
 }
 
-// ── DEBUG: capture JS console output via invoke ──
 #[tauri::command]
 fn debug_log(level: String, message: String) {
     debug_log_internal(&level, &message);
+}
+
+#[tauri::command]
+fn set_debug_mode(enabled: bool) {
+    set_debug_mode_enabled(enabled);
+}
+
+#[tauri::command]
+fn get_debug_mode() -> bool {
+    is_debug_mode()
 }
 
 #[tauri::command]
@@ -206,6 +224,9 @@ async fn check_for_updates(app: AppHandle) -> Result<Option<UpdateInfo>, String>
 /// (hotkey listener, scheduler, etc). Writes to the same file as the JS log
 /// so stage-by-stage diagnostics live in one place.
 pub(crate) fn debug_log_internal(level: &str, message: &str) {
+    if !is_debug_mode() && level != "error" && level != "warn" && level != "stage-fail" {
+        return;
+    }
     let prefix = match level {
         "error" => "[RUST ERROR]",
         "warn" => "[RUST WARN]",
@@ -376,6 +397,8 @@ pub fn run() {
             commands::stop_macro,
             commands::is_macro_running,
             debug_log,
+            set_debug_mode,
+            get_debug_mode,
             check_for_updates,
             relaunch_app,
         ])
