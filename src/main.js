@@ -11,7 +11,7 @@ const TAURI = (typeof window !== "undefined" && window.__TAURI__) || null;
 // ── DEBUG MODE INFRASTRUCTURE ────────────────────────────────────
 // Verbose UI & IPC logs are generated ONLY when DEBUG_UI is true.
 // Toggled via config or setDebugMode().
-let DEBUG_UI = false;
+let DEBUG_UI = true;
 
 function setDebugMode(enabled) {
   DEBUG_UI = !!enabled;
@@ -417,10 +417,12 @@ dbg("nav-items:",     document.querySelectorAll(".nav-item").length, "found");
 document.querySelectorAll(".nav-item").forEach(navBtn => {
   navBtn.addEventListener("click", async () => {
     const viewId = navBtn.getAttribute("data-view");
+    dbg("Nav click — target viewId:", viewId);
     if (!viewId) return;
 
     // Auto-pause autoclicker when navigating away from Dashboard
     if (viewId !== "viewDashboard" && isRunning) {
+      dbg("Navigating away from Dashboard while running — auto-pausing");
       try {
         const active = await invoke("toggle_autoclicker");
         setRunningState(active);
@@ -433,7 +435,12 @@ document.querySelectorAll(".nav-item").forEach(navBtn => {
     navBtn.classList.add("active");
     document.querySelectorAll(".view").forEach(v => v.classList.remove("active"));
     const target = document.getElementById(viewId);
-    if (target) target.classList.add("active");
+    if (target) {
+      target.classList.add("active");
+      dbg("Nav success — view activated:", viewId);
+    } else {
+      dbg("Nav ERROR — target view element not found:", viewId);
+    }
   });
 });
 
@@ -1006,6 +1013,7 @@ function setupHotkeyRecorder(btn, targetKey) {
   if (!btn) return;
   btn.addEventListener("click", () => {
     if (activeRecordingBtn) return;
+    dbg("Hotkey recorder STARTED for targetKey:", targetKey);
     activeRecordingBtn = btn;
     btn.classList.add("recording");
     const labelEl = btn.querySelector("span:last-child");
@@ -1035,9 +1043,11 @@ function setupHotkeyRecorder(btn, targetKey) {
 
       const bindingStr = [...modifiers, ...regularKeys].join("+");
       labelEl.textContent = bindingStr || "Press key...";
+      dbg("Hotkey keydown:", physicalName, "current sequence:", bindingStr);
 
       if (finishTimeout) clearTimeout(finishTimeout);
       finishTimeout = setTimeout(() => {
+        dbg("Hotkey recording finalized for:", targetKey, "->", bindingStr);
         finalizeRecording(bindingStr);
       }, 400);
     };
@@ -1258,12 +1268,16 @@ accentSwatches.forEach(swatch => {
 
 // ── MODE TOGGLE ─────────────────────────────────────────────
 if (modeToggleBtn) {
+  dbg("modeToggleBtn found — wiring click listener");
   modeToggleBtn.addEventListener("click", async () => {
+    dbg("modeToggleBtn CLICKED — requesting mode toggle");
     try {
       const newMode = await invoke("toggle_mode");
+      dbg("modeToggleBtn toggled successfully — newMode:", newMode);
       setModeDisplay(newMode);
     } catch (err) {
       console.error("Failed to toggle mode:", err);
+      dbg("modeToggleBtn ERROR:", err);
     }
   });
 }

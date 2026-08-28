@@ -19,7 +19,7 @@ use tauri_plugin_updater::UpdaterExt;
 static DEBUG_LOG_FILE: OnceLock<Mutex<Option<File>>> = OnceLock::new();
 static DEBUG_LOG_BYTES: AtomicU64 = AtomicU64::new(0);
 const DEBUG_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
-static DEBUG_MODE: AtomicBool = AtomicBool::new(cfg!(debug_assertions));
+static DEBUG_MODE: AtomicBool = AtomicBool::new(true);
 
 pub(crate) fn is_debug_mode() -> bool {
     DEBUG_MODE.load(Ordering::Relaxed)
