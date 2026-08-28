@@ -45,6 +45,36 @@ function getRawListen() {
       || null;
 }
 
+// ── CONSOLE → TAURI BACKEND PIPE (TOP-LEVEL INITIALIZATION) ────
+const origLog = console.log;
+const origError = console.error;
+const origWarn = console.warn;
+const sendToBackend = async (level, args) => {
+  try {
+    const msg = args.map(a => {
+      try { return typeof a === 'string' ? a : JSON.stringify(a); }
+      catch { return String(a); }
+    }).join(' ');
+    const inv = getRawInvoke();
+    if (inv) {
+      await inv("debug_log", { level, message: msg });
+    }
+  } catch (_) {}
+};
+console.log = (...args) => { origLog.apply(console, args); sendToBackend("info", args); };
+console.error = (...args) => { origError.apply(console, args); sendToBackend("error", args); };
+console.warn = (...args) => { origWarn.apply(console, args); sendToBackend("warn", args); };
+window.addEventListener("error", (e) => {
+  const msg = `[uncaught-error] ${e.message || "Unknown error"} at ${(e.filename || "main.js")}:${(e.lineno || 0)}:${(e.colno || 0)}`;
+  console.error(msg, e.error?.stack || "");
+  dbg("FATAL EXCEPTION DETECTED:", msg);
+});
+window.addEventListener("unhandledrejection", (e) => {
+  const reasonStr = e.reason instanceof Error ? (e.reason.stack || e.reason.message) : String(e.reason);
+  console.error("[unhandled-rejection]", reasonStr);
+  dbg("FATAL UNHANDLED PROMISE REJECTION:", reasonStr);
+});
+
 const invoke = async function(cmd, args) {
   const start = performance.now();
   const argSummary = args
@@ -771,7 +801,7 @@ async function saveConfig() {
       currentConfig.engine.jitter_percent = parseFloat(randomInput?.value) || 0.0;
       currentConfig.engine.click_limit = safeInt(limitInput?.value, 0);
       currentConfig.engine.gui_lock_ms = safeInt(guiLockDelayInput?.value, 1500) || 1500;
-      currentConfig.engine.hotkey_debounce_ms = safeInt(debounceSlider?.value, 80);
+      currentConfig.engine.hotkey_debounce_ms = safeInt(document.getElementById("debounceSlider")?.value, 80);
       currentConfig.engine.jitter_radius_px = safeInt(jitterRadiusInput?.value, 3) || 3;
 
       const startDelayInput = document.getElementById("startDelayInput");
@@ -2337,13 +2367,17 @@ if (toggleBtn) {
 
 // ── ONBOARDING ──────────────────────────────────────────────
 if (onboardingBtn) {
+  dbg("onboardingBtn found — wiring click listener");
   onboardingBtn.addEventListener("click", async () => {
+    dbg("onboardingBtn CLICKED — completing onboarding");
     try {
       const config = await invoke("complete_onboarding");
+      dbg("onboarding completed successfully — hiding modal");
       onboardingModal.classList.add("hidden");
       updateUiFromConfig(config);
     } catch (err) {
       console.error("Failed to complete onboarding:", err);
+      dbg("onboarding ERROR:", err);
     }
   });
 }
@@ -3198,37 +3232,7 @@ function makeAction(type) {
 
 // ── INIT ────────────────────────────────────────────────────
 onDomReady(() => {
-  // Set up the console → Tauri debug_log pipe FIRST so every subsequent
-  // console.log/error/warn (including the "DOM ready" message below) is
-  // captured. Without this order, the first few logs use the original
-  // console.log and never reach nanoclick_web.log.
-  const origLog = console.log;
-  const origError = console.error;
-  const origWarn = console.warn;
-  const sendToBackend = async (level, args) => {
-    try {
-      const msg = args.map(a => {
-        try { return typeof a === 'string' ? a : JSON.stringify(a); }
-        catch { return String(a); }
-      }).join(' ');
-      // Use the Tauri 2.x internals (or legacy `__TAURI__.core.invoke` for old builds).
-      const inv = (typeof window !== "undefined" && window.__TAURI_INTERNALS__?.invoke)
-        || window.__TAURI__?.core?.invoke;
-      if (inv) {
-        await inv("debug_log", { level, message: msg });
-      }
-    } catch (_) {}
-  };
-  console.log = (...args) => { origLog.apply(console, args); sendToBackend("info", args); };
-  console.error = (...args) => { origError.apply(console, args); sendToBackend("error", args); };
-  console.warn = (...args) => { origWarn.apply(console, args); sendToBackend("warn", args); };
-  window.addEventListener("error", (e) => {
-    console.error("[uncaught]", e.message, "at", e.filename + ":" + e.lineno);
-  });
-  window.addEventListener("unhandledrejection", (e) => {
-    console.error("[unhandled-rejection]", e.reason);
-  });
-
+  dbg("onDomReady fired — initializing app state");
   invoke("get_debug_mode").then(d => { DEBUG_UI = !!d; }).catch(() => {});
   dbg("loadConfig() called");
   loadConfig();
