@@ -337,6 +337,17 @@ pub fn run() {
     crate::core::set_global((*macro_executor).clone());
 
     let app = tauri::Builder::default()
+        .on_page_load(|webview, payload| {
+            debug_log_internal(
+                "info",
+                &format!(
+                    "[PageLoad] label={} event={:?} url={}",
+                    webview.label(),
+                    payload.event(),
+                    webview.url().map(|u| u.to_string()).unwrap_or_else(|_| "(error)".into())
+                ),
+            );
+        })
         // Must be registered first so a second launch is forwarded to the
         // existing process before any hooks or workers are started.
         .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
