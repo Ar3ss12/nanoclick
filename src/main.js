@@ -329,169 +329,90 @@ let isRunning = false;
 let isButtonLocked = false;
 let guiLockTimer = null;
 
-// DOM Elements (declared in module scope, populated dynamically in initDomElements)
-let statusBadge, modeToggleBtn, clickCounter, displayCps, toggleBtn, toggleBtnText;
-let cpsRange, cpsInput, randomRange, randomInput, limitInput, limitRange, clickTypeSelect;
-let posXInput, posYInput, repeatCountInput, hotkeyRecordBtn, modeSwitchRecordBtn, recordMacroHotkeyBtn;
-let hotkeyRecordLabel, modeSwitchRecordLabel, recordMacroHotkeyLabel;
-let configPathDisplay, guiLockDelayInput, jitterRadiusInput, rippleCheckbox, hudCheckbox, footerModeShortcut;
-let onboardingModal, onboardingBtn;
-let limitBadge, holdSubSettings, holdDurationInput, holdIntervalInput, repeatIntervalInput;
-let pickPosBtn, pickPosStatus, openConfigFolderBtn;
-let startMinimizedCheckbox, autostartCheckbox, minimizeToTrayCheckbox, notificationsCheckbox, pauseFocusLossCheckbox;
-let themeSelect, accentSwatches;
-let emergencyRecordBtn, speedUpRecordBtn, slowDownRecordBtn, pickPosRecordBtn;
+// DOM Elements — queried at module evaluation time.
+// ES modules are always deferred: they execute AFTER the full HTML is parsed,
+// so getElementById is safe here without any DOMContentLoaded wrapper.
+const statusBadge     = document.getElementById("statusBadge");
+const modeToggleBtn   = document.getElementById("modeToggleBtn");
+const clickCounter    = document.getElementById("clickCounter");
+const displayCps      = document.getElementById("displayCps");
+const toggleBtn       = document.getElementById("toggleBtn");
+const toggleBtnText   = document.getElementById("toggleBtnText");
 
-function initDomElements() {
-  statusBadge = document.getElementById("statusBadge");
-  modeToggleBtn = document.getElementById("modeToggleBtn");
-  clickCounter = document.getElementById("clickCounter");
-  displayCps = document.getElementById("displayCps");
-  toggleBtn = document.getElementById("toggleBtn");
-  toggleBtnText = document.getElementById("toggleBtnText");
+const cpsRange        = document.getElementById("cpsRange");
+const cpsInput        = document.getElementById("cpsInput");
+const randomRange     = document.getElementById("randomRange");
+const randomInput     = document.getElementById("randomInput");
+const limitInput      = document.getElementById("limitInput");
+const limitRange      = document.getElementById("limitRange");
+const clickTypeSelect = document.getElementById("clickTypeSelect");
+const posXInput       = document.getElementById("posXInput");
+const posYInput       = document.getElementById("posYInput");
+const repeatCountInput    = document.getElementById("repeatCountInput");
+const hotkeyRecordBtn     = document.getElementById("hotkeyRecordBtn");
+const modeSwitchRecordBtn = document.getElementById("modeSwitchRecordBtn");
+const recordMacroHotkeyBtn = document.getElementById("recordMacroHotkeyBtn");
+const hotkeyRecordLabel   = document.getElementById("hotkeyRecordLabel");
+const modeSwitchRecordLabel = document.getElementById("modeSwitchRecordLabel");
+const recordMacroHotkeyLabel = document.getElementById("recordMacroHotkeyLabel");
 
-  cpsRange = document.getElementById("cpsRange");
-  cpsInput = document.getElementById("cpsInput");
-  randomRange = document.getElementById("randomRange");
-  randomInput = document.getElementById("randomInput");
-  limitInput = document.getElementById("limitInput");
-  limitRange = document.getElementById("limitRange");
-  clickTypeSelect = document.getElementById("clickTypeSelect");
-  posXInput = document.getElementById("posXInput");
-  posYInput = document.getElementById("posYInput");
-  repeatCountInput = document.getElementById("repeatCountInput");
-  hotkeyRecordBtn = document.getElementById("hotkeyRecordBtn");
-  modeSwitchRecordBtn = document.getElementById("modeSwitchRecordBtn");
-  recordMacroHotkeyBtn = document.getElementById("recordMacroHotkeyBtn");
-  hotkeyRecordLabel = document.getElementById("hotkeyRecordLabel");
-  modeSwitchRecordLabel = document.getElementById("modeSwitchRecordLabel");
-  recordMacroHotkeyLabel = document.getElementById("recordMacroHotkeyLabel");
+const configPathDisplay  = document.getElementById("configPathDisplay");
+const guiLockDelayInput  = document.getElementById("guiLockDelayInput");
+const jitterRadiusInput  = document.getElementById("jitterRadiusInput");
+const rippleCheckbox     = document.getElementById("rippleCheckbox");
+const hudCheckbox        = document.getElementById("hudCheckbox");
+const footerModeShortcut = document.getElementById("footerModeShortcut");
 
-  configPathDisplay = document.getElementById("configPathDisplay");
-  guiLockDelayInput = document.getElementById("guiLockDelayInput");
-  jitterRadiusInput = document.getElementById("jitterRadiusInput");
-  rippleCheckbox = document.getElementById("rippleCheckbox");
-  hudCheckbox = document.getElementById("hudCheckbox");
-  footerModeShortcut = document.getElementById("footerModeShortcut");
+// Modal
+const onboardingModal = document.getElementById("onboardingModal");
+const onboardingBtn   = document.getElementById("onboardingBtn");
 
-  onboardingModal = document.getElementById("onboardingModal");
-  onboardingBtn = document.getElementById("onboardingBtn");
+const limitBadge        = document.getElementById("limitBadge");
+const holdSubSettings   = document.getElementById("holdSubSettings");
+const holdDurationInput = document.getElementById("holdDurationInput");
+const holdIntervalInput = document.getElementById("holdIntervalInput");
+const repeatIntervalInput = document.getElementById("repeatIntervalInput");
+const pickPosBtn        = document.getElementById("pickPosBtn");
+const pickPosStatus     = document.getElementById("pickPosStatus");
+const openConfigFolderBtn = document.getElementById("openConfigFolderBtn");
 
-  limitBadge = document.getElementById("limitBadge");
-  holdSubSettings = document.getElementById("holdSubSettings");
-  holdDurationInput = document.getElementById("holdDurationInput");
-  holdIntervalInput = document.getElementById("holdIntervalInput");
-  repeatIntervalInput = document.getElementById("repeatIntervalInput");
-  pickPosBtn = document.getElementById("pickPosBtn");
-  pickPosStatus = document.getElementById("pickPosStatus");
-  openConfigFolderBtn = document.getElementById("openConfigFolderBtn");
+const startMinimizedCheckbox  = document.getElementById("startMinimizedCheckbox");
+const autostartCheckbox       = document.getElementById("autostartCheckbox");
+const minimizeToTrayCheckbox  = document.getElementById("minimizeToTrayCheckbox");
+const notificationsCheckbox   = document.getElementById("notificationsCheckbox");
+const pauseFocusLossCheckbox  = document.getElementById("pauseFocusLossCheckbox");
 
-  startMinimizedCheckbox = document.getElementById("startMinimizedCheckbox");
-  autostartCheckbox = document.getElementById("autostartCheckbox");
-  minimizeToTrayCheckbox = document.getElementById("minimizeToTrayCheckbox");
-  notificationsCheckbox = document.getElementById("notificationsCheckbox");
-  pauseFocusLossCheckbox = document.getElementById("pauseFocusLossCheckbox");
+const themeSelect    = document.getElementById("themeSelect");
+const accentSwatches = document.querySelectorAll("#accentSwatches .swatch");
 
-  themeSelect = document.getElementById("themeSelect");
-  accentSwatches = document.querySelectorAll("#accentSwatches .swatch");
+const emergencyRecordBtn = document.getElementById("emergencyRecordBtn");
+const speedUpRecordBtn   = document.getElementById("speedUpRecordBtn");
+const slowDownRecordBtn  = document.getElementById("slowDownRecordBtn");
+const pickPosRecordBtn   = document.getElementById("pickPosRecordBtn");
 
-  emergencyRecordBtn = document.getElementById("emergencyRecordBtn");
-  speedUpRecordBtn = document.getElementById("speedUpRecordBtn");
-  slowDownRecordBtn = document.getElementById("slowDownRecordBtn");
-  pickPosRecordBtn = document.getElementById("pickPosRecordBtn");
-}
+// ── SIDEBAR NAVIGATION (wired immediately — DOM is ready at module eval) ──
+document.querySelectorAll(".nav-item").forEach(navBtn => {
+  navBtn.addEventListener("click", async () => {
+    const viewId = navBtn.getAttribute("data-view");
+    if (!viewId) return;
 
-function initNavigation() {
-  document.querySelectorAll(".nav-item").forEach(navBtn => {
-    navBtn.addEventListener("click", async () => {
-      const viewId = navBtn.getAttribute("data-view");
-      if (!viewId) return;
-
-      // Auto-pause autoclicker when navigating away from Dashboard
-      if (viewId !== "viewDashboard" && isRunning) {
-        try {
-          const active = await invoke("toggle_autoclicker");
-          setRunningState(active);
-        } catch (err) {
-          console.error("Auto-pause on navigation failed:", err);
-        }
-      }
-
-      // Update nav active state
-      document.querySelectorAll(".nav-item").forEach(b => b.classList.remove("active"));
-      navBtn.classList.add("active");
-
-      // Show the target view
-      document.querySelectorAll(".view").forEach(v => v.classList.remove("active"));
-      const target = document.getElementById(viewId);
-      if (target) target.classList.add("active");
-    });
-  });
-}
-
-function initEventListeners() {
-  // Hotkey recorders (buttons are now populated via initDomElements)
-  setupHotkeyRecorder(hotkeyRecordBtn, "toggle");
-  setupHotkeyRecorder(modeSwitchRecordBtn, "mode_switch");
-  setupHotkeyRecorder(recordMacroHotkeyBtn, "record_hotkey");
-  setupHotkeyRecorder(emergencyRecordBtn, "emergency_stop");
-  setupHotkeyRecorder(speedUpRecordBtn, "speed_up");
-  setupHotkeyRecorder(slowDownRecordBtn, "slow_down");
-  setupHotkeyRecorder(pickPosRecordBtn, "capture_pos");
-
-  // Open config folder button
-  if (openConfigFolderBtn) {
-    openConfigFolderBtn.addEventListener("click", async () => {
-      try { await invoke("open_config_folder"); }
-      catch (err) { console.error("Failed to open config folder:", err); }
-    });
-  }
-
-  // Behavior checkboxes
-  if (autostartCheckbox) {
-    autostartCheckbox.addEventListener("change", async () => {
-      saveConfig();
-      try { await invoke("set_windows_autostart", { enable: autostartCheckbox.checked }); }
-      catch (err) { console.error("Failed to set Windows autostart:", err); }
-    });
-  }
-  if (startMinimizedCheckbox) startMinimizedCheckbox.addEventListener("change", saveConfig);
-  if (minimizeToTrayCheckbox) minimizeToTrayCheckbox.addEventListener("change", saveConfig);
-  if (notificationsCheckbox) notificationsCheckbox.addEventListener("change", saveConfig);
-  if (pauseFocusLossCheckbox) pauseFocusLossCheckbox.addEventListener("change", saveConfig);
-
-  // Theme select
-  if (themeSelect) {
-    themeSelect.addEventListener("change", () => {
-      applyTheme(themeSelect.value, currentConfig.ui?.accent_color);
-      saveConfig();
-    });
-  }
-
-  // Accent swatches
-  if (accentSwatches && accentSwatches.forEach) {
-    accentSwatches.forEach(swatch => {
-      swatch.addEventListener("click", () => {
-        const color = swatch.getAttribute("data-accent");
-        updateSwatchActiveState(color);
-        applyTheme(themeSelect?.value || "cyberpunk", color);
-        saveConfig();
-      });
-    });
-  }
-
-  // Mode toggle button
-  if (modeToggleBtn) {
-    modeToggleBtn.addEventListener("click", async () => {
+    // Auto-pause autoclicker when navigating away from Dashboard
+    if (viewId !== "viewDashboard" && isRunning) {
       try {
-        const newMode = await invoke("toggle_mode");
-        setModeDisplay(newMode);
+        const active = await invoke("toggle_autoclicker");
+        setRunningState(active);
       } catch (err) {
-        console.error("Failed to toggle mode:", err);
+        console.error("Auto-pause on navigation failed:", err);
       }
-    });
-  }
-}
+    }
+
+    document.querySelectorAll(".nav-item").forEach(b => b.classList.remove("active"));
+    navBtn.classList.add("active");
+    document.querySelectorAll(".view").forEach(v => v.classList.remove("active"));
+    const target = document.getElementById(viewId);
+    if (target) target.classList.add("active");
+  });
+});
 
 // ── MODE DISPLAY ────────────────────────────────────────────
 function setModeDisplay(mode) {
@@ -1149,7 +1070,10 @@ function setupHotkeyRecorder(btn, targetKey) {
   });
 }
 
-// (hotkey recorders wired in initEventListeners)
+// Wire hotkey recorder buttons at module-eval time (DOM is ready for ES modules)
+setupHotkeyRecorder(hotkeyRecordBtn, "toggle");
+setupHotkeyRecorder(modeSwitchRecordBtn, "mode_switch");
+setupHotkeyRecorder(recordMacroHotkeyBtn, "record_hotkey");
 
 let lastRecordToggleAt = 0;
 
@@ -1244,6 +1168,32 @@ listen("app-profile-activate", async (event) => {
   if (!presetId) return;
   await applyPreset(presetId);
 });
+setupHotkeyRecorder(emergencyRecordBtn, "emergency_stop");
+setupHotkeyRecorder(speedUpRecordBtn, "speed_up");
+setupHotkeyRecorder(slowDownRecordBtn, "slow_down");
+setupHotkeyRecorder(pickPosRecordBtn, "capture_pos");
+
+// ── OPEN CONFIG FOLDER BUTTON ────────────────────────────────
+if (openConfigFolderBtn) {
+  openConfigFolderBtn.addEventListener("click", async () => {
+    try { await invoke("open_config_folder"); }
+    catch (err) { console.error("Failed to open config folder:", err); }
+  });
+}
+
+// ── BEHAVIOR AUTOSTART LISTENER ──────────────────────────────
+if (autostartCheckbox) {
+  autostartCheckbox.addEventListener("change", async () => {
+    saveConfig();
+    try { await invoke("set_windows_autostart", { enable: autostartCheckbox.checked }); }
+    catch (err) { console.error("Failed to set Windows autostart:", err); }
+  });
+}
+if (startMinimizedCheckbox) startMinimizedCheckbox.addEventListener("change", saveConfig);
+if (minimizeToTrayCheckbox) minimizeToTrayCheckbox.addEventListener("change", saveConfig);
+if (notificationsCheckbox) notificationsCheckbox.addEventListener("change", saveConfig);
+if (pauseFocusLossCheckbox) pauseFocusLossCheckbox.addEventListener("change", saveConfig);
+
 // ── DYNAMIC THEMES & ACCENT ENGINE ───────────────────────────
 function applyTheme(themeName, accentHex) {
   document.documentElement.setAttribute("data-theme", themeName || "cyberpunk");
@@ -1265,6 +1215,34 @@ function updateSwatchActiveState(accentHex) {
       }
     });
   }
+}
+
+// Wire theme & accent listeners
+if (themeSelect) {
+  themeSelect.addEventListener("change", () => {
+    applyTheme(themeSelect.value, currentConfig.ui?.accent_color);
+    saveConfig();
+  });
+}
+accentSwatches.forEach(swatch => {
+  swatch.addEventListener("click", () => {
+    const color = swatch.getAttribute("data-accent");
+    updateSwatchActiveState(color);
+    applyTheme(themeSelect?.value || "cyberpunk", color);
+    saveConfig();
+  });
+});
+
+// ── MODE TOGGLE ─────────────────────────────────────────────
+if (modeToggleBtn) {
+  modeToggleBtn.addEventListener("click", async () => {
+    try {
+      const newMode = await invoke("toggle_mode");
+      setModeDisplay(newMode);
+    } catch (err) {
+      console.error("Failed to toggle mode:", err);
+    }
+  });
 }
 
 // ── PRESETS MANAGER V2 ──────────────────────────────────────
@@ -3213,9 +3191,6 @@ onDomReady(() => {
     console.error("[unhandled-rejection]", e.reason);
   });
 
-  initDomElements();
-  initNavigation();
-  initEventListeners();
   loadConfig();
   syncVersionDisplay();
   checkPlatformCapabilities();
