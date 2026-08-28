@@ -143,9 +143,22 @@ fn set_windows_autostart(enable: bool) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(serde::Deserialize)]
+struct LogItem {
+    level: String,
+    message: String,
+}
+
 #[tauri::command]
 fn debug_log(level: String, message: String) {
     debug_log_internal(&level, &message);
+}
+
+#[tauri::command]
+fn debug_log_batch(logs: Vec<LogItem>) {
+    for item in logs {
+        debug_log_internal(&item.level, &item.message);
+    }
 }
 
 #[tauri::command]
@@ -397,6 +410,7 @@ pub fn run() {
             commands::stop_macro,
             commands::is_macro_running,
             debug_log,
+            debug_log_batch,
             set_debug_mode,
             get_debug_mode,
             check_for_updates,

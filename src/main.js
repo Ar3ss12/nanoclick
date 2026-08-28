@@ -22,12 +22,43 @@ function setDebugMode(enabled) {
 const origLog = console.log;
 const origError = console.error;
 const origWarn = console.warn;
-let inLogPipe = false;
+
+const logBuffer = [];
+let isFlushingLogs = false;
+
+function enqueueLog(level, args) {
+  if (logBuffer.length > 1000) logBuffer.shift();
+  try {
+    const msg = args.map(a => {
+      if (typeof a === 'string') return a;
+      try { return JSON.stringify(a); }
+      catch { return String(a); }
+    }).join(' ');
+    logBuffer.push({ level, message: msg });
+  } catch (_) {}
+}
+
+function flushLogBuffer() {
+  if (isFlushingLogs || logBuffer.length === 0) return;
+  isFlushingLogs = true;
+  const batch = logBuffer.splice(0, 100);
+  try {
+    const inv = getRawInvoke();
+    if (inv) {
+      inv("debug_log_batch", { logs: batch }).catch(() => {});
+    }
+  } catch (_) {
+  } finally {
+    isFlushingLogs = false;
+  }
+}
+
+setInterval(flushLogBuffer, 300);
 
 function dbg(...args) {
   if (DEBUG_UI) {
     origLog.call(console, "[UI-DBG]", ...args);
-    sendToBackend("info", ["[UI-DBG]", ...args]);
+    enqueueLog("info", ["[UI-DBG]", ...args]);
   }
 }
 
@@ -37,11 +68,11 @@ function ts() {
 }
 
 function logCall(direction, label, extra) {
-  if (!DEBUG_UI || inLogPipe) return;
+  if (!DEBUG_UI) return;
   if (typeof label === "string" && label.startsWith("debug_log")) return;
   try {
     origLog.call(console, `[${ts()}] [${direction}] ${label}`, extra ?? "");
-    sendToBackend("info", [`[${ts()}] [${direction}] ${label}`, extra ?? ""]);
+    enqueueLog("info", [`[${ts()}] [${direction}] ${label}`, extra ?? ""]);
   } catch (_) {}
 }
 
@@ -56,37 +87,18 @@ function getRawListen() {
       || null;
 }
 
-// ── CONSOLE → TAURI BACKEND PIPE (TOP-LEVEL INITIALIZATION) ────
-const sendToBackend = (level, args) => {
-  if (inLogPipe) return;
-  inLogPipe = true;
-  try {
-    const msg = args.map(a => {
-      try { return typeof a === 'string' ? a : JSON.stringify(a); }
-      catch { return String(a); }
-    }).join(' ');
-    const inv = getRawInvoke();
-    if (inv) {
-      inv("debug_log", { level, message: msg }).catch(() => {});
-    }
-  } catch (_) {
-  } finally {
-    inLogPipe = false;
-  }
-};
-
-console.log = (...args) => { origLog.apply(console, args); sendToBackend("info", args); };
-console.error = (...args) => { origError.apply(console, args); sendToBackend("error", args); };
-console.warn = (...args) => { origWarn.apply(console, args); sendToBackend("warn", args); };
+console.log = (...args) => { origLog.apply(console, args); enqueueLog("info", args); };
+console.error = (...args) => { origError.apply(console, args); enqueueLog("error", args); };
+console.warn = (...args) => { origWarn.apply(console, args); enqueueLog("warn", args); };
 
 window.addEventListener("error", (e) => {
   const msg = `[uncaught-error] ${e.message || "Unknown error"} at ${(e.filename || "main.js")}:${(e.lineno || 0)}:${(e.colno || 0)}`;
-  console.error(msg, e.error?.stack || "");
+  origError.call(console, msg, e.error?.stack || "");
   dbg("FATAL EXCEPTION DETECTED:", msg);
 });
 window.addEventListener("unhandledrejection", (e) => {
   const reasonStr = e.reason instanceof Error ? (e.reason.stack || e.reason.message) : String(e.reason);
-  console.error("[unhandled-rejection]", reasonStr);
+  origError.call(console, "[unhandled-rejection]", reasonStr);
   dbg("FATAL UNHANDLED PROMISE REJECTION:", reasonStr);
 });
 
