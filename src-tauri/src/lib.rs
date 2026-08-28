@@ -318,40 +318,6 @@ macro_rules! stage {
 }
 
 pub fn run() {
-    // Ensure WebView2 has its own user-data folder before wry / WebView2 are
-    // initialised. Without an explicit folder WebView2 may fail to create one
-    // under AppData and silently fall back to about:blank on first launch.
-    if std::env::var_os("WEBVIEW2_USER_DATA_FOLDER").is_none() {
-        if let Some(proj_dirs) = directories::ProjectDirs::from("com", "NanoClick", "NanoClick") {
-            let user_data_dir = proj_dirs.data_dir().join("WebView2");
-            match std::fs::create_dir_all(&user_data_dir) {
-                Ok(_) => {
-                    std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", &user_data_dir);
-                    debug_log_internal(
-                        "info",
-                        &format!("[startup] WEBVIEW2_USER_DATA_FOLDER={}", user_data_dir.display()),
-                    );
-                }
-                Err(e) => {
-                    debug_log_internal(
-                        "warn",
-                        &format!("[startup] failed to create WebView2 user-data folder at {:?}: {e}", user_data_dir),
-                    );
-                }
-            }
-        } else {
-            debug_log_internal("warn", "[startup] directories::ProjectDirs returned None");
-        }
-    } else {
-        debug_log_internal(
-            "info",
-            &format!(
-                "[startup] WEBVIEW2_USER_DATA_FOLDER already set to {:?}",
-                std::env::var_os("WEBVIEW2_USER_DATA_FOLDER")
-            ),
-        );
-    }
-
     let config_manager = Arc::new(ConfigManager::new());
     let initial_app_cfg = config_manager.load();
 
@@ -371,17 +337,6 @@ pub fn run() {
     crate::core::set_global((*macro_executor).clone());
 
     let app = tauri::Builder::default()
-        .on_page_load(|webview, payload| {
-            debug_log_internal(
-                "info",
-                &format!(
-                    "[PageLoad] label={:?} event={:?} url={}",
-                    webview.label(),
-                    payload.event(),
-                    webview.url().map(|u| u.to_string()).unwrap_or_else(|_| "(error)".into())
-                ),
-            );
-        })
         // Must be registered first so a second launch is forwarded to the
         // existing process before any hooks or workers are started.
         .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
@@ -400,40 +355,6 @@ pub fn run() {
         .manage(macro_state)
         .setup(move |app| {
             let handle = app.handle().clone();
-
-            // WORKAROUND: Build the main window manually here instead of letting
-            // Tauri auto-create it from `tauri.conf.json`. This lets us pass
-            // `additional_browser_args` that work around wry's race between
-            // WebView2 init and the `tauri://` scheme registration, which
-            // otherwise leaves the window stuck on `about:blank` with
-            // PageLoadEvent::Started fired but Finished never arriving.
-            if app.get_webview_window("main").is_none() {
-                if let Err(e) = tauri::WebviewWindowBuilder::new(
-                    app,
-                    "main",
-                    tauri::WebviewUrl::App("index.html".into()),
-                )
-                .title("NanoClick")
-                .inner_size(900.0, 590.0)
-                .min_inner_size(860.0, 540.0)
-                .resizable(true)
-                .decorations(true)
-                .transparent(false)
-                .center()
-                .additional_browser_args(
-                    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
-                     --disable-web-security \
-                     --allow-file-access-from-files \
-                     --disable-site-isolation-trials",
-                )
-                .build()
-                {
-                    debug_log_internal(
-                        "error",
-                        &format!("[Startup] failed to build main window: {e}"),
-                    );
-                }
-            }
 
             // Log WebView2 startup state for diagnostics: which data folder
             // the WebView chose, which window labels are registered, and
