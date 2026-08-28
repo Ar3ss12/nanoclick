@@ -18,20 +18,31 @@ function setDebugMode(enabled) {
   getRawInvoke()?.("set_debug_mode", { enabled: DEBUG_UI })?.catch(() => {});
 }
 
+// ── LOGGING INFRASTRUCTURE ──────────────────────────────────────
+const origLog = console.log;
+const origError = console.error;
+const origWarn = console.warn;
+let inLogPipe = false;
+
 function dbg(...args) {
-  if (DEBUG_UI) console.log("[UI-DBG]", ...args);
+  if (DEBUG_UI) {
+    origLog.call(console, "[UI-DBG]", ...args);
+    sendToBackend("info", ["[UI-DBG]", ...args]);
+  }
 }
 
-// ── LOGGING INFRASTRUCTURE ──────────────────────────────────────
-// Per-call wrappers for `invoke` and `listen` so every IPC round-trip
-// shows up in the dev log with timing + success/failure status.
 function ts() {
   const d = new Date();
   return d.toTimeString().slice(0, 8) + "." + String(d.getMilliseconds()).padStart(3, "0");
 }
+
 function logCall(direction, label, extra) {
-  if (!DEBUG_UI) return;
-  try { console.log(`[${ts()}] [${direction}] ${label}`, extra ?? ""); } catch (_) { /* never throw out of a logger */ }
+  if (!DEBUG_UI || inLogPipe) return;
+  if (typeof label === "string" && label.startsWith("debug_log")) return;
+  try {
+    origLog.call(console, `[${ts()}] [${direction}] ${label}`, extra ?? "");
+    sendToBackend("info", [`[${ts()}] [${direction}] ${label}`, extra ?? ""]);
+  } catch (_) {}
 }
 
 function getRawInvoke() {
@@ -46,12 +57,7 @@ function getRawListen() {
 }
 
 // ── CONSOLE → TAURI BACKEND PIPE (TOP-LEVEL INITIALIZATION) ────
-const origLog = console.log;
-const origError = console.error;
-const origWarn = console.warn;
-let inLogPipe = false;
-
-const sendToBackend = async (level, args) => {
+const sendToBackend = (level, args) => {
   if (inLogPipe) return;
   inLogPipe = true;
   try {
@@ -61,7 +67,7 @@ const sendToBackend = async (level, args) => {
     }).join(' ');
     const inv = getRawInvoke();
     if (inv) {
-      await inv("debug_log", { level, message: msg });
+      inv("debug_log", { level, message: msg }).catch(() => {});
     }
   } catch (_) {
   } finally {
