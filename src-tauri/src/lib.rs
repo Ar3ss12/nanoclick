@@ -149,6 +149,42 @@ struct LogItem {
     message: String,
 }
 
+fn write_log_bytes_internal(bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    let path = std::env::temp_dir().join("nanoclick_web.log");
+    let should_rotate = DEBUG_LOG_BYTES.fetch_add(bytes.len() as u64, Ordering::Relaxed)
+        + bytes.len() as u64
+        > DEBUG_LOG_MAX_BYTES;
+    if should_rotate {
+        if let Some(lock) = DEBUG_LOG_FILE.get() {
+            if let Ok(mut guard) = lock.lock() {
+                *guard = None;
+            }
+        }
+        let backup = path.with_extension("log.1");
+        let _ = std::fs::remove_file(&backup);
+        let _ = std::fs::rename(&path, &backup);
+        DEBUG_LOG_BYTES.store(bytes.len() as u64, Ordering::Relaxed);
+    }
+    if let Ok(mut guard) = DEBUG_LOG_FILE
+        .get_or_init(|| {
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .map(|file| Mutex::new(Some(file)))
+                .unwrap_or_else(|_| Mutex::new(None))
+        })
+        .lock()
+    {
+        if let Some(file) = guard.as_mut() {
+            let _ = file.write_all(bytes);
+        }
+    }
+}
+
 #[tauri::command]
 fn debug_log(level: String, message: String) {
     debug_log_internal(&level, &message);
@@ -156,9 +192,27 @@ fn debug_log(level: String, message: String) {
 
 #[tauri::command]
 fn debug_log_batch(logs: Vec<LogItem>) {
-    for item in logs {
-        debug_log_internal(&item.level, &item.message);
+    if !is_debug_mode() {
+        return;
     }
+    let mut batch_text = String::with_capacity(logs.len() * 128);
+    for item in logs {
+        if item.level != "error" && item.level != "warn" && !is_debug_mode() {
+            continue;
+        }
+        let prefix = match item.level.as_str() {
+            "error" => "[RUST ERROR]",
+            "warn" => "[RUST WARN]",
+            "stage-ok" => "[RUST STAGE✓]",
+            "stage-fail" => "[RUST STAGE✗]",
+            _ => "[RUST INFO]",
+        };
+        batch_text.push_str(prefix);
+        batch_text.push(' ');
+        batch_text.push_str(&item.message);
+        batch_text.push('\n');
+    }
+    write_log_bytes_internal(batch_text.as_bytes());
 }
 
 #[tauri::command]
@@ -178,7 +232,6 @@ fn relaunch_app(app: AppHandle) {
 
 #[tauri::command]
 fn toggle_hud_window(app: AppHandle, show: bool) -> Result<(), String> {
-    use tauri::LogicalPosition;
     use tauri::WebviewWindowBuilder;
     if let Some(win) = app.get_webview_window("hud") {
         if !show {
@@ -248,37 +301,7 @@ pub(crate) fn debug_log_internal(level: &str, message: &str) {
         _ => "[RUST INFO]",
     };
     let line = format!("{} {}\n", prefix, message);
-    let path = std::env::temp_dir().join("nanoclick_web.log");
-    let should_rotate = DEBUG_LOG_BYTES.fetch_add(line.len() as u64, Ordering::Relaxed)
-        + line.len() as u64
-        > DEBUG_LOG_MAX_BYTES;
-    if should_rotate {
-        if let Some(lock) = DEBUG_LOG_FILE.get() {
-            if let Ok(mut guard) = lock.lock() {
-                *guard = None;
-            }
-        }
-        let backup = path.with_extension("log.1");
-        let _ = std::fs::remove_file(&backup);
-        let _ = std::fs::rename(&path, &backup);
-        DEBUG_LOG_BYTES.store(line.len() as u64, Ordering::Relaxed);
-    }
-    if let Ok(mut guard) = DEBUG_LOG_FILE
-        .get_or_init(|| {
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)
-                .map(|file| Mutex::new(Some(file)))
-                .unwrap_or_else(|_| Mutex::new(None))
-        })
-        .lock()
-    {
-        if let Some(file) = guard.as_mut() {
-            let _ = file.write_all(line.as_bytes());
-        }
-    }
-    eprint!("{}", line);
+    write_log_bytes_internal(line.as_bytes());
 }
 
 /// Stage-based macro for Rust-side multi-step operations.
@@ -332,6 +355,34 @@ pub fn run() {
         .setup(move |app| {
             let handle = app.handle().clone();
 
+            // Log WebView2 startup state for diagnostics: which data folder
+            // the WebView chose, which window labels are registered, and
+            // whether the main window is actually visible right after init.
+            {
+                if let Some(win) = app.get_webview_window("main") {
+                    let url = win.url().map(|u| u.to_string()).unwrap_or_else(|_| "(error)".into());
+                    let title = win.title().unwrap_or_default();
+                    let pos = win.outer_position().unwrap_or_default();
+                    let size = win.outer_size().unwrap_or_default();
+                    debug_log_internal(
+                        "info",
+                        &format!(
+                            "[Startup] main window registered url={} title={} pos=({},{}) size=({},{})",
+                            url, title, pos.x, pos.y, size.width, size.height
+                        ),
+                    );
+                    // Force the main window into the foreground at startup.
+                    // Without this, the OS sometimes leaves it behind other
+                    // apps that were active when we launched (especially
+                    // single-instance scenarios where we are the second proc).
+                    let _ = win.unminimize();
+                    let _ = win.show();
+                    let _ = win.set_focus();
+                } else {
+                    debug_log_internal("error", "[Startup] main window MISSING from registry");
+                }
+            }
+
             // ── App-profile auto-switch thread ────────────────────────
             // Every 500 ms: read the foreground window title; when it matches
             // an enabled app_profile rule whose preset differs from the last
@@ -342,7 +393,7 @@ pub fn run() {
                 std::thread::spawn(move || {
                     let mut last_preset: Option<String> = None;
                     loop {
-                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        std::thread::sleep(std::time::Duration::from_millis(1500));
                         let profiles = {
                             let cfg = cm.load();
                             if cfg.app_profiles.is_empty() {
@@ -431,4 +482,34 @@ pub fn run() {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_debug_mode_toggle() {
+        set_debug_mode(true);
+        assert!(get_debug_mode());
+        set_debug_mode(false);
+        assert!(!get_debug_mode());
+    }
+
+    #[test]
+    fn test_debug_log_batch_execution() {
+        set_debug_mode(true);
+        let batch = vec![
+            LogItem {
+                level: "info".into(),
+                message: "Test log batch item 1".into(),
+            },
+            LogItem {
+                level: "error".into(),
+                message: "Test log batch item 2".into(),
+            },
+        ];
+        debug_log_batch(batch);
+        assert!(get_debug_mode());
+    }
 }

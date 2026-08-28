@@ -41,7 +41,7 @@ function enqueueLog(level, args) {
 function flushLogBuffer() {
   if (isFlushingLogs || logBuffer.length === 0) return;
   isFlushingLogs = true;
-  const batch = logBuffer.splice(0, 100);
+  const batch = logBuffer.splice(0, 40);
   try {
     const inv = getRawInvoke();
     if (inv) {
@@ -53,7 +53,7 @@ function flushLogBuffer() {
   }
 }
 
-setInterval(flushLogBuffer, 300);
+setInterval(flushLogBuffer, 1000);
 
 function dbg(...args) {
   if (DEBUG_UI) {
@@ -2483,31 +2483,63 @@ function setRunningState(active, statusText = "") {
 let _lastStatusLogAt = 0;
 let _lastStatusLogActive = null;
 let _lastStatusLogClicks = -1;
+let _lastStatsRenderAt = 0;
 
 listenSilent("status-update", (event) => {
-  const { active, mode, clicks_done, cps, status_text } = event.payload;
+  try {
+    const payload = event?.payload || {};
+    const { active, mode, clicks_done, cps, status_text } = payload;
 
-  // Always update UI on every tick — no throttling here.
-  if (mode) setModeDisplay(mode);
-  setRunningState(active, status_text);
-  if (clickCounter) {
-    const n = clicks_done || 0;
-    clickCounter.textContent = n.toLocaleString().padStart(11, "0").replace(/,/g, ",");
-  }
+    // 1. Core UI state update (lightweight, mandatory)
+    if (mode) setModeDisplay(mode);
+    setRunningState(active, status_text);
+    if (clickCounter) {
+      const n = clicks_done || 0;
+      clickCounter.textContent = n.toLocaleString().padStart(11, "0").replace(/,/g, ",");
+    }
 
-  // Throttled log: skip unless (a) state changed, (b) click count crossed a
-  // 50 boundary, or (c) ≥500ms since last log.
-  const now = performance.now();
-  const stateChanged = active !== _lastStatusLogActive;
-  const milestoneCrossed = Math.floor((clicks_done || 0) / 50) !==
-                           Math.floor(_lastStatusLogClicks / 50);
-  const intervalElapsed = now - _lastStatusLogAt >= 500;
-  if (stateChanged || milestoneCrossed || intervalElapsed) {
-    logCall("←EVT•",
-      `status-update [active=${active} mode=${mode} clicks=${clicks_done} cps=${cps?.toFixed?.(1) ?? cps} text="${status_text}"]`, "");
-    _lastStatusLogAt = now;
-    _lastStatusLogActive = active;
-    _lastStatusLogClicks = clicks_done || 0;
+    // 2. Statistics calculation & disk save batching
+    const nowMs = Date.now();
+    if (_stats.lastUpdate && _stats.activeNow && active) {
+      _stats.activeMs += nowMs - _stats.lastUpdate;
+    }
+    _stats.activeNow = !!active;
+    _stats.lastUpdate = nowMs;
+    const clicks = Number(clicks_done) || 0;
+    if (active && clicks >= _stats.sessionClicks) {
+      _stats.sessionClicks = clicks;
+    }
+
+    // All-time counter: persist in ~200-click batches to limit disk writes
+    const st = ensureStatsConfig();
+    const lastSaved = Number(st._last_saved_clicks || 0);
+    if (clicks > 0 && clicks - lastSaved >= 200) {
+      st.total_clicks = Number(st.total_clicks || 0) + (clicks - lastSaved);
+      st._last_saved_clicks = clicks;
+      saveConfigThrottled();
+    }
+
+    // Throttled stats rendering (max 4 Hz / every 250ms) to eliminate V8 heap pressure
+    const nowPerf = performance.now();
+    if (nowPerf - _lastStatsRenderAt >= 250) {
+      _lastStatsRenderAt = nowPerf;
+      renderStats();
+    }
+
+    // 3. Diagnostic logging: skip unless (a) state changed, (b) 50 clicks boundary, or (c) >= 1000ms
+    const stateChanged = active !== _lastStatusLogActive;
+    const milestoneCrossed = Math.floor((clicks_done || 0) / 50) !== Math.floor(_lastStatusLogClicks / 50);
+    const intervalElapsed = nowPerf - _lastStatusLogAt >= 1000;
+    if (stateChanged || milestoneCrossed || intervalElapsed) {
+      logCall("←EVT•",
+        `status-update [active=${active} mode=${mode} clicks=${clicks_done} cps=${cps?.toFixed?.(1) ?? cps} text="${status_text}"]`, "");
+      _lastStatusLogAt = nowPerf;
+      _lastStatusLogActive = active;
+      _lastStatusLogClicks = clicks_done || 0;
+    }
+  } catch (err) {
+    origError.call(console, "[status-update error]", err);
+    dbg("STATUS UPDATE ERROR:", err?.message || String(err));
   }
 });
 
@@ -3269,7 +3301,9 @@ function makeAction(type) {
 
 // ── INIT ────────────────────────────────────────────────────
 onDomReady(() => {
-  dbg("onDomReady fired — initializing app state");
+  DEBUG_UI = true;
+  setDebugMode(true);
+  dbg("onDomReady fired — initializing app state [DEBUG MODE ACTIVE]");
   invoke("get_debug_mode").then(d => { DEBUG_UI = !!d; }).catch(() => {});
   dbg("loadConfig() called");
   loadConfig();
@@ -3374,26 +3408,7 @@ function renderStats() {
   if (pa) pa.textContent = Number(st.presets_applied || 0).toLocaleString();
 }
 
-listen("status-update", async (event) => {
-  const d = event.payload || {};
-  const now = Date.now();
-  if (_stats.lastUpdate && _stats.activeNow && d.active) {
-    _stats.activeMs += now - _stats.lastUpdate;
-  }
-  _stats.activeNow = !!d.active;
-  _stats.lastUpdate = now;
-  const clicks = Number(d.clicks_done) || 0;
-  if (d.active && clicks >= _stats.sessionClicks) _stats.sessionClicks = clicks;
-  // All-time counter: persist in ~200-click batches to limit disk writes.
-  const st = ensureStatsConfig();
-  const lastSaved = Number(st._last_saved_clicks || 0);
-  if (clicks > 0 && clicks - lastSaved >= 200) {
-    st.total_clicks = Number(st.total_clicks || 0) + (clicks - lastSaved);
-    st._last_saved_clicks = clicks;
-    saveConfigThrottled();
-  }
-  renderStats();
-});
+// Session stats come from live status-update events integrated into the main listener above. All-time stats are
 
 // Count preset switches (manual + hotkey) by wrapping applyPreset.
 const _origApplyPresetForStats = applyPreset;

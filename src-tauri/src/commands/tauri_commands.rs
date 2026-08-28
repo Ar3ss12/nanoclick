@@ -409,4 +409,45 @@ mod tests {
         };
         let _ = serde_json::to_string(&m).unwrap();
     }
+
+    #[test]
+    fn get_app_version_returns_valid_string() {
+        let ver = get_app_version();
+        assert!(!ver.is_empty(), "app version must not be empty");
+        assert!(ver.contains('.'), "app version should be semver format");
+    }
+
+    #[test]
+    fn get_platform_capabilities_has_required_keys() {
+        let caps = get_platform_capabilities();
+        assert!(caps.get("global_hotkeys").is_some());
+        assert!(caps.get("mouse_injection").is_some());
+        assert!(caps.get("keyboard_injection").is_some());
+        assert!(caps.get("can_play_macros").is_some());
+    }
+
+    #[test]
+    fn full_backup_structure_validation() {
+        let dummy_cfg = crate::config_manager::AppConfig::default();
+        let dummy_macro = Macro {
+            id: "m_test_backup".into(),
+            name: "Test Macro".into(),
+            icon: "⚙️".into(),
+            actions: vec![crate::core::Action::Wait { ms: 100 }],
+            repeat: RepeatMode::Once,
+            enabled: None,
+            created_at: 1000,
+            updated_at: 1000,
+        };
+        let backup = serde_json::json!({
+            "backup_version": 1,
+            "exported_at": 1234567890,
+            "app_version": "1.2.0",
+            "config": dummy_cfg,
+            "macros": vec![dummy_macro],
+        });
+        let backup_str = serde_json::to_string(&backup).unwrap();
+        assert!(backup_str.contains("backup_version"));
+        assert!(backup_str.contains("m_test_backup"));
+    }
 }

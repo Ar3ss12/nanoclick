@@ -528,7 +528,6 @@ impl ClickScheduler {
             // Spawned ONLY when an image trigger is set; exits as soon as
             // the click loop is no longer active.
             let poller_should_stop = Arc::new(AtomicBool::new(false));
-            let poller_stop_flag = Arc::clone(&poller_should_stop);
             {
                 let image_trigger_for_poller = Arc::clone(&image_trigger_arc);
                 let should_stop_flag = Arc::clone(&image_trigger_should_stop);
