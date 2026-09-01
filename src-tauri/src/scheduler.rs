@@ -422,26 +422,39 @@ impl ClickScheduler {
         next
     }
 
-    /// Emit the HUD click counter at most every 100 ms (10 Hz) so the
-    /// tiny always-on-top window never becomes an IPC bottleneck.
-    fn hud_maybe_emit(app: &AppHandle, total: u32) {
+    /// Emit the HUD and status updates at most every 40 ms (25 FPS) so high-frequency
+    /// CPS clicking loops (e.g. 100 CPS) never saturate the Tauri IPC bridge or cause UI lag.
+    fn status_and_hud_maybe_emit(
+        app: &AppHandle,
+        total: u32,
+        mode: &str,
+        cps: f64,
+        status_text: &str,
+        active: bool,
+        force: bool,
+    ) {
         use std::sync::atomic::AtomicU64;
-        use std::time::{Duration, Instant};
-        static LAST_HUD_EMIT: AtomicU64 = AtomicU64::new(0);
-        static LAST_HUD_INST: std::sync::OnceLock<std::sync::Mutex<Instant>> =
-            std::sync::OnceLock::new();
+        static LAST_EMIT: AtomicU64 = AtomicU64::new(0);
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let last = LAST_HUD_EMIT.load(Ordering::Relaxed);
-        if now_ms.saturating_sub(last) < 100 {
+        let last = LAST_EMIT.load(Ordering::Relaxed);
+        if !force && now_ms.saturating_sub(last) < 40 {
             return;
         }
-        LAST_HUD_EMIT.store(now_ms, Ordering::Relaxed);
+        LAST_EMIT.store(now_ms, Ordering::Relaxed);
         let _ = app.emit("hud-clicks", total);
-        let _ = Duration::from_millis(0); // keep import used
-        let _ = LAST_HUD_INST.get_or_init(|| std::sync::Mutex::new(Instant::now()));
+        let _ = app.emit(
+            "status-update",
+            StatusUpdate {
+                active,
+                mode: mode.into(),
+                clicks_done: total,
+                cps,
+                status_text: status_text.into(),
+            },
+        );
     }
     fn spawn_worker(&self, app_handle: Option<AppHandle>) {
         let active = Arc::clone(&self.active);
@@ -684,25 +697,14 @@ impl ClickScheduler {
                         }
                     } else if platform_backend.click_mouse(&cur_click_spec) {
                         let total = clicks_done.fetch_add(1, Ordering::Relaxed) + 1;
-                        if let Some(ref app) = app_handle {
-                            Self::hud_maybe_emit(app, total);
-                        }
                         batch_click_count += 1;
                         if let Some(ref app) = app_handle {
-                            let _ = app.emit(
-                                "status-update",
-                                StatusUpdate {
-                                    active: true,
-                                    mode: if mode_autoclicker.load(Ordering::Relaxed) {
-                                        "autoclicker".into()
-                                    } else {
-                                        "work".into()
-                                    },
-                                    clicks_done: total,
-                                    cps: 0.0,
-                                    status_text: "HOLDING".into(),
-                                },
-                            );
+                            let mode_str = if mode_autoclicker.load(Ordering::Relaxed) {
+                                "autoclicker"
+                            } else {
+                                "work"
+                            };
+                            Self::status_and_hud_maybe_emit(app, total, mode_str, 0.0, "HOLDING", true, false);
                         }
                     }
 
@@ -772,10 +774,15 @@ impl ClickScheduler {
                     seq_spec.point_index = 0;
                     if platform_backend.click_mouse(&seq_spec) {
                         let total = clicks_done.fetch_add(1, Ordering::Relaxed) + 1;
-                        if let Some(ref app) = app_handle {
-                            Self::hud_maybe_emit(app, total);
-                        }
                         batch_click_count += 1;
+                        if let Some(ref app) = app_handle {
+                            let mode_str = if mode_autoclicker.load(Ordering::Relaxed) {
+                                "autoclicker"
+                            } else {
+                                "work"
+                            };
+                            Self::status_and_hud_maybe_emit(app, total, mode_str, cps, "RUNNING", true, false);
+                        }
                         if p.delay_ms > 0 {
                             let event_handle =
                                 stop_event_lock.lock().unwrap().clone().expect("stop_event");
@@ -791,25 +798,14 @@ impl ClickScheduler {
                 }
                 if platform_backend.click_mouse(&cur_click_spec) {
                     let total = clicks_done.fetch_add(1, Ordering::Relaxed) + 1;
-                    if let Some(ref app) = app_handle {
-                        Self::hud_maybe_emit(app, total);
-                    }
                     batch_click_count += 1;
                     if let Some(ref app) = app_handle {
-                        let _ = app.emit(
-                            "status-update",
-                            StatusUpdate {
-                                active: true,
-                                mode: if mode_autoclicker.load(Ordering::Relaxed) {
-                                    "autoclicker".into()
-                                } else {
-                                    "work".into()
-                                },
-                                clicks_done: total,
-                                cps,
-                                status_text: "RUNNING".into(),
-                            },
-                        );
+                        let mode_str = if mode_autoclicker.load(Ordering::Relaxed) {
+                            "autoclicker"
+                        } else {
+                            "work"
+                        };
+                        Self::status_and_hud_maybe_emit(app, total, mode_str, cps, "RUNNING", true, false);
                     }
                 }
 
@@ -838,20 +834,14 @@ impl ClickScheduler {
             }
 
             if let Some(ref app) = app_handle {
-                let _ = app.emit(
-                    "status-update",
-                    StatusUpdate {
-                        active: false,
-                        mode: if mode_autoclicker.load(Ordering::Relaxed) {
-                            "autoclicker".into()
-                        } else {
-                            "work".into()
-                        },
-                        clicks_done: clicks_done.load(Ordering::Relaxed),
-                        cps: f64::from_bits(cps_raw.load(Ordering::Relaxed)),
-                        status_text: "IDLE".into(),
-                    },
-                );
+                let total = clicks_done.load(Ordering::Relaxed);
+                let mode_str = if mode_autoclicker.load(Ordering::Relaxed) {
+                    "autoclicker"
+                } else {
+                    "work"
+                };
+                let final_cps = f64::from_bits(cps_raw.load(Ordering::Relaxed));
+                Self::status_and_hud_maybe_emit(app, total, mode_str, final_cps, "IDLE", false, true);
             }
         });
     }

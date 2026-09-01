@@ -318,6 +318,21 @@ macro_rules! stage {
 }
 
 pub fn run() {
+    // Set Chromium WebView2 flags for minimum memory footprint (~120MB) and low CPU consumption.
+    // Limits V8 JS heap to 64MB, forces aggressive GC, runs GPU in-process, restricts process spawning,
+    // and disables unused background Chromium components.
+    if std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").is_err() {
+        std::env::set_var(
+            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+            "--js-flags=\"--max-old-space-size=64\" \
+             --in-process-gpu \
+             --renderer-process-limit=1 \
+             --disable-features=Translate,MediaRouter,OptimizationHints,ProcessPriorityPolicy \
+             --disable-background-networking \
+             --disable-component-update",
+        );
+    }
+
     let config_manager = Arc::new(ConfigManager::new());
     let initial_app_cfg = config_manager.load();
 

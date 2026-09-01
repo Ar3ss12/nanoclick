@@ -3474,13 +3474,23 @@ onDomReady(() => {
     }
   };
 
+  // Phased startup sequence to prevent CPU spikes and IPC queue congestion
+  // Phase 1 (Immediate): Core UI & app config loading
   safeStep("loadConfig", () => loadConfig());
-  safeStep("syncVersionDisplay", () => { void syncVersionDisplay(); });
-  safeStep("checkPlatformCapabilities", () => { void checkPlatformCapabilities(); });
   safeStep("initAutomationTab", () => { void initAutomationTab(); });
-  safeStep("startUpdateChecker", () => startUpdateChecker());
 
-  try { console.log("[NanoClick] init complete"); } catch (_) { /* ignore */ }
+  // Phase 2 (Deferred 150ms): Non-critical diagnostic & version checks
+  setTimeout(() => {
+    safeStep("syncVersionDisplay", () => { void syncVersionDisplay(); });
+    safeStep("checkPlatformCapabilities", () => { void checkPlatformCapabilities(); });
+  }, 150);
+
+  // Phase 3 (Background 3000ms): Auto-updater check
+  setTimeout(() => {
+    safeStep("startUpdateChecker", () => startUpdateChecker());
+  }, 3000);
+
+  try { console.log("[NanoClick] init complete (phased)"); } catch (_) { /* ignore */ }
 });
 
 // ── Toggle Response Time (debounce) ──────────────────────────
