@@ -421,6 +421,47 @@ fn default_presets() -> Vec<PresetItem> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatHistoryPoint {
+    #[serde(default)]
+    pub timestamp: u64,
+    #[serde(default)]
+    pub clicks: u64,
+    #[serde(default)]
+    pub active_ms: u64,
+    #[serde(default)]
+    pub avg_cps: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatsConfig {
+    #[serde(default)]
+    pub total_clicks: u64,
+    #[serde(default)]
+    pub total_active_ms: u64,
+    #[serde(default)]
+    pub total_sessions: u64,
+    #[serde(default)]
+    pub presets_applied: u64,
+    #[serde(default)]
+    pub max_cps: f64,
+    #[serde(default)]
+    pub history: Vec<StatHistoryPoint>,
+}
+
+impl Default for StatsConfig {
+    fn default() -> Self {
+        StatsConfig {
+            total_clicks: 0,
+            total_active_ms: 0,
+            total_sessions: 0,
+            presets_applied: 0,
+            max_cps: 0.0,
+            history: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
     pub schema_version: u32,
@@ -439,6 +480,9 @@ pub struct AppConfig {
     /// be added later if needed.
     #[serde(default)]
     pub image_trigger: Option<ImageTrigger>,
+    /// Persistent statistics tracking session and all-time metrics.
+    #[serde(default)]
+    pub stats: StatsConfig,
 }
 
 impl Default for AppConfig {
@@ -453,6 +497,7 @@ impl Default for AppConfig {
             presets: default_presets(),
             app_profiles: Vec::new(),
             image_trigger: None,
+            stats: StatsConfig::default(),
         }
     }
 }

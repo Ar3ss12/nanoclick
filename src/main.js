@@ -2610,24 +2610,63 @@ listenSilent("status-update", (event) => {
 
     // 2. Statistics calculation & disk save batching
     const nowMs = Date.now();
-    if (_stats.lastUpdate && _stats.activeNow && active) {
-      _stats.activeMs += nowMs - _stats.lastUpdate;
-    }
-    _stats.activeNow = !!active;
-    _stats.lastUpdate = nowMs;
-    const clicks = Number(clicks_done) || 0;
-    if (active && clicks >= _stats.sessionClicks) {
-      _stats.sessionClicks = clicks;
+    const clicks = Math.max(0, Number(clicks_done) || 0);
+    const st = ensureStatsConfig();
+    const curCps = Math.max(0, Number(cps) || 0);
+
+    if (active) {
+      if (!_stats.activeNow) {
+        _stats.activeNow = true;
+        _stats.lastClicksDone = clicks;
+        _stats.lastUpdate = nowMs;
+        st.total_sessions = (Number(st.total_sessions) || 0) + 1;
+        saveConfigThrottled();
+      } else {
+        const deltaClicks = clicks > _stats.lastClicksDone ? (clicks - _stats.lastClicksDone) : 0;
+        _stats.lastClicksDone = clicks;
+        if (deltaClicks > 0) {
+          _stats.sessionClicks += deltaClicks;
+          st.total_clicks = (Number(st.total_clicks) || 0) + deltaClicks;
+        }
+
+        if (_stats.lastUpdate) {
+          const deltaMs = nowMs - _stats.lastUpdate;
+          if (deltaMs > 0 && deltaMs < 5000) {
+            _stats.sessionActiveMs += deltaMs;
+            st.total_active_ms = (Number(st.total_active_ms) || 0) + deltaMs;
+          }
+        }
+        _stats.lastUpdate = nowMs;
+      }
+
+      if (curCps > (Number(st.max_cps) || 0)) {
+        st.max_cps = Number(curCps.toFixed(1));
+      }
+
+      if (nowMs - (_stats.lastDiskSave || 0) > 10000) {
+        _stats.lastDiskSave = nowMs;
+        saveConfigThrottled();
+      }
+    } else {
+      if (_stats.activeNow) {
+        _stats.activeNow = false;
+        _stats.lastUpdate = null;
+        if (_stats.sessionClicks > 0 || _stats.sessionActiveMs > 1000) {
+          const avgVal = _stats.sessionActiveMs > 0 ? (_stats.sessionClicks / (_stats.sessionActiveMs / 1000)) : 0;
+          if (!Array.isArray(st.history)) st.history = [];
+          st.history.push({
+            timestamp: nowMs,
+            clicks: _stats.sessionClicks,
+            active_ms: _stats.sessionActiveMs,
+            avg_cps: Number(avgVal.toFixed(1))
+          });
+          if (st.history.length > 50) st.history.shift();
+        }
+        saveConfigThrottled();
+      }
     }
 
-    // All-time counter: persist in ~200-click batches to limit disk writes
-    const st = ensureStatsConfig();
-    const lastSaved = Number(st._last_saved_clicks || 0);
-    if (clicks > 0 && clicks - lastSaved >= 200) {
-      st.total_clicks = Number(st.total_clicks || 0) + (clicks - lastSaved);
-      st._last_saved_clicks = clicks;
-      saveConfigThrottled();
-    }
+    recordCpsHistoryPoint(curCps, active);
 
     // Throttled stats rendering (max 4 Hz / every 250ms) to eliminate V8 heap pressure
     const nowPerf = performance.now();
@@ -3496,20 +3535,42 @@ onDomReady(() => {
   });
 });
 
-// ── STATISTICS VIEW ──────────────────────────────────────────
-// Session stats come from live status-update events. All-time stats are
-// persisted in currentConfig.stats (survive restarts, saved atomically).
+// ── STATISTICS VIEW & ANALYTICS ENGINE ─────────────────────────
 const _stats = {
   sessionClicks: 0,
-  activeMs: 0,
+  sessionActiveMs: 0,
   lastUpdate: null,
   activeNow: false,
+  lastClicksDone: 0,
+  lastDiskSave: 0,
+  liveCpsHistory: [], // Max 60 rolling points
 };
+
+function recordCpsHistoryPoint(cps, active) {
+  const now = Date.now();
+  _stats.liveCpsHistory.push({ time: now, cps: active ? (cps || 0) : 0 });
+  if (_stats.liveCpsHistory.length > 60) {
+    _stats.liveCpsHistory.shift();
+  }
+}
 
 function ensureStatsConfig() {
   if (!currentConfig.stats || typeof currentConfig.stats !== "object") {
-    currentConfig.stats = { total_clicks: 0, presets_applied: 0 };
+    currentConfig.stats = {
+      total_clicks: 0,
+      total_active_ms: 0,
+      total_sessions: 0,
+      presets_applied: 0,
+      max_cps: 0.0,
+      history: []
+    };
   }
+  if (typeof currentConfig.stats.total_clicks !== "number") currentConfig.stats.total_clicks = 0;
+  if (typeof currentConfig.stats.total_active_ms !== "number") currentConfig.stats.total_active_ms = 0;
+  if (typeof currentConfig.stats.total_sessions !== "number") currentConfig.stats.total_sessions = 0;
+  if (typeof currentConfig.stats.presets_applied !== "number") currentConfig.stats.presets_applied = 0;
+  if (typeof currentConfig.stats.max_cps !== "number") currentConfig.stats.max_cps = 0;
+  if (!Array.isArray(currentConfig.stats.history)) currentConfig.stats.history = [];
   return currentConfig.stats;
 }
 
@@ -3527,25 +3588,152 @@ function renderStats() {
   const at = document.getElementById("statActiveTime");
   const ac = document.getElementById("statAvgCps");
   const tc = document.getElementById("statTotalClicks");
+  const ta = document.getElementById("statTotalActiveTime");
+  const mc = document.getElementById("statMaxCps");
+  const ts = document.getElementById("statTotalSessions");
   const pa = document.getElementById("statPresetsApplied");
+
   if (sc) sc.textContent = _stats.sessionClicks.toLocaleString();
-  if (at) at.textContent = fmtDuration(_stats.activeMs);
-  if (ac) ac.textContent = _stats.activeMs > 500 ? (_stats.sessionClicks / (_stats.activeMs / 1000)).toFixed(1) : "—";
+  if (at) at.textContent = fmtDuration(_stats.sessionActiveMs);
+  if (ac) ac.textContent = _stats.sessionActiveMs > 500 ? (_stats.sessionClicks / (_stats.sessionActiveMs / 1000)).toFixed(1) : "—";
+
   const st = ensureStatsConfig();
   if (tc) tc.textContent = Number(st.total_clicks || 0).toLocaleString();
+  if (ta) ta.textContent = fmtDuration(Number(st.total_active_ms || 0));
+  if (mc) mc.textContent = (Number(st.max_cps || 0)).toFixed(1);
+  if (ts) ts.textContent = Number(st.total_sessions || 0).toLocaleString();
   if (pa) pa.textContent = Number(st.presets_applied || 0).toLocaleString();
+
+  drawStatsChart();
 }
 
-// Session stats come from live status-update events integrated into the main listener above. All-time stats are
+function drawStatsChart() {
+  const canvas = document.getElementById("statsChart");
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+
+  const rect = canvas.getBoundingClientRect();
+  if (rect.width === 0 || rect.height === 0) return;
+
+  const dpr = window.devicePixelRatio || 1;
+  const targetW = Math.floor(rect.width * dpr);
+  const targetH = Math.floor(rect.height * dpr);
+  if (canvas.width !== targetW || canvas.height !== targetH) {
+    canvas.width = targetW;
+    canvas.height = targetH;
+  }
+
+  ctx.save();
+  ctx.scale(dpr, dpr);
+  const displayW = rect.width;
+  const displayH = rect.height;
+
+  ctx.clearRect(0, 0, displayW, displayH);
+
+  // Background Grid Lines
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.06)";
+  ctx.lineWidth = 1;
+  for (let y = 20; y < displayH; y += 35) {
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(displayW, y);
+    ctx.stroke();
+  }
+
+  const history = _stats.liveCpsHistory;
+  if (!history || history.length < 2) {
+    ctx.fillStyle = "rgba(255, 255, 255, 0.35)";
+    ctx.font = "12px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("Start autoclicker to record & plot real-time CPS timeline", displayW / 2, displayH / 2);
+    ctx.restore();
+    return;
+  }
+
+  let maxCps = 20;
+  for (const p of history) {
+    if (p.cps > maxCps) maxCps = p.cps;
+  }
+  maxCps *= 1.15;
+
+  const paddingBottom = 20;
+  const paddingTop = 15;
+  const chartH = displayH - paddingTop - paddingBottom;
+  const stepX = displayW / (Math.max(60, history.length) - 1);
+  const startX = (60 - history.length) * stepX;
+
+  // Gradient Area Fill
+  const gradient = ctx.createLinearGradient(0, paddingTop, 0, displayH - paddingBottom);
+  gradient.addColorStop(0, "rgba(6, 182, 212, 0.35)");
+  gradient.addColorStop(1, "rgba(6, 182, 212, 0.0)");
+
+  ctx.beginPath();
+  ctx.moveTo(startX, displayH - paddingBottom);
+
+  for (let i = 0; i < history.length; i++) {
+    const x = startX + i * stepX;
+    const y = displayH - paddingBottom - (history[i].cps / maxCps) * chartH;
+    ctx.lineTo(x, y);
+  }
+
+  ctx.lineTo(startX + (history.length - 1) * stepX, displayH - paddingBottom);
+  ctx.closePath();
+  ctx.fillStyle = gradient;
+  ctx.fill();
+
+  // Glowing Line Path
+  ctx.shadowColor = "#06b6d4";
+  ctx.shadowBlur = 8;
+  ctx.strokeStyle = "#06b6d4";
+  ctx.lineWidth = 2.5;
+
+  ctx.beginPath();
+  for (let i = 0; i < history.length; i++) {
+    const x = startX + i * stepX;
+    const y = displayH - paddingBottom - (history[i].cps / maxCps) * chartH;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  ctx.shadowBlur = 0;
+
+  // Current CPS Dot & Label
+  const lastPoint = history[history.length - 1];
+  const lastX = startX + (history.length - 1) * stepX;
+  const lastY = displayH - paddingBottom - (lastPoint.cps / maxCps) * chartH;
+
+  ctx.fillStyle = "#22d3ee";
+  ctx.beginPath();
+  ctx.arc(lastX, lastY, 4, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 11px 'Fira Code', monospace";
+  ctx.textAlign = "right";
+  ctx.fillText(`${lastPoint.cps.toFixed(1)} CPS`, displayW - 10, paddingTop + 10);
+
+  ctx.restore();
+}
 
 onDomReady(() => {
   const resetBtn = document.getElementById("statsResetBtn");
   if (resetBtn) resetBtn.addEventListener("click", () => {
-    currentConfig.stats = { total_clicks: 0, presets_applied: 0 };
-    _stats.sessionClicks = 0;
-    _stats.activeMs = 0;
-    saveConfig();
-    renderStats();
+    if (confirm("Are you sure you want to reset all saved statistics?")) {
+      currentConfig.stats = {
+        total_clicks: 0,
+        total_active_ms: 0,
+        total_sessions: 0,
+        presets_applied: 0,
+        max_cps: 0.0,
+        history: []
+      };
+      _stats.sessionClicks = 0;
+      _stats.sessionActiveMs = 0;
+      saveConfig();
+      renderStats();
+    }
   });
   setInterval(renderStats, 1000);
 });
