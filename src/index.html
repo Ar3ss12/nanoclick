@@ -551,6 +551,18 @@
                 </button>
               </div>
 
+              <div class="settings-row" style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--border);">
+                <label class="checkbox-row">
+                  <input type="checkbox" id="smartRecordCheckbox" checked class="custom-checkbox">
+                  <span class="checkbox-box"></span>
+                  <span class="settings-label">Smart Key Memory (Hold released keys during combo recording)</span>
+                </label>
+              </div>
+              <div class="settings-row">
+                <span class="settings-label">Keypress Memory TTL (ms)</span>
+                <input type="number" id="keyTtlInput" class="num-input-right" min="100" max="3000" step="50" value="500" placeholder="500">
+              </div>
+
               <div class="settings-row settings-row-stack">
                 <div class="settings-row-top">
                   <span class="settings-label">

@@ -11,11 +11,27 @@ const TAURI = (typeof window !== "undefined" && window.__TAURI__) || null;
 // ── DEBUG MODE INFRASTRUCTURE ────────────────────────────────────
 // Verbose UI & IPC logs are generated ONLY when DEBUG_UI is true.
 // Toggled via config or setDebugMode().
-let DEBUG_UI = true;
+//
+// **Disabled by default** for v1.2.x release builds — the global console
+// interceptor combined with `setInterval(flushLogBuffer, 1000)` was the
+// root cause of the "Out of Memory" WebView2 crash on startup: every
+// console.error during the brittle `init()` flow fed enqueueLog →
+// logBuffer → batch IPC → backend → response, and the WebView2 child
+// processes ballooned past the per-process limit before the page ever
+// finished loading. Users can re-enable it from Settings → Debug.
+let DEBUG_UI = false;
 
 function setDebugMode(enabled) {
   DEBUG_UI = !!enabled;
   getRawInvoke()?.("set_debug_mode", { enabled: DEBUG_UI })?.catch(() => {});
+  if (DEBUG_UI && _logFlushTimer === null) {
+    _logFlushTimer = setInterval(flushLogBuffer, 1000);
+  } else if (!DEBUG_UI && _logFlushTimer !== null) {
+    clearInterval(_logFlushTimer);
+    _logFlushTimer = null;
+    // Drain whatever is still buffered so it doesn't leak.
+    if (logBuffer.length > 0) flushLogBuffer();
+  }
 }
 
 // ── LOGGING INFRASTRUCTURE ──────────────────────────────────────
@@ -53,7 +69,9 @@ function flushLogBuffer() {
   }
 }
 
-setInterval(flushLogBuffer, 1000);
+// Log flushing timer — started lazily by setDebugMode(true) instead of at
+// module load, so the disabled-by-default path has zero overhead.
+let _logFlushTimer = null;
 
 function dbg(...args) {
   if (DEBUG_UI) {
@@ -101,12 +119,6 @@ window.addEventListener("unhandledrejection", (e) => {
   origError.call(console, "[unhandled-rejection]", reasonStr);
   dbg("FATAL UNHANDLED PROMISE REJECTION:", reasonStr);
 });
-
-function logCall(direction, label, extra) {
-  if (!DEBUG_UI || inLogPipe) return;
-  if (typeof label === "string" && label.startsWith("debug_log")) return;
-  try { console.log(`[${ts()}] [${direction}] ${label}`, extra ?? ""); } catch (_) { /* never throw out of a logger */ }
-}
 
 const invoke = async function(cmd, args) {
   if (cmd === "debug_log") {
@@ -664,11 +676,22 @@ function updateUiFromConfig(config) {
     const pickPosLabel = document.getElementById("pickPosRecordLabel");
     if (pickPosLabel) pickPosLabel.textContent = config.hotkeys.capture_pos || "Ctrl+P";
     if (recordMacroHotkeyLabel) recordMacroHotkeyLabel.textContent = config.hotkeys.record_hotkey || "Ctrl+Shift+R";
+    const smartRecordCb = document.getElementById("smartRecordCheckbox");
+    if (smartRecordCb) smartRecordCb.checked = config.hotkeys.smart_record !== false;
+    const keyTtlInp = document.getElementById("keyTtlInput");
+    if (keyTtlInp) keyTtlInp.value = config.hotkeys.key_ttl_ms ?? 500;
   }
 
   if (jitterRadiusInput) jitterRadiusInput.value = config.engine.jitter_radius_px;
   if (rippleCheckbox) rippleCheckbox.checked = config.ui.visual_ripple;
-if (hudCheckbox) hudCheckbox.checked = !!config.ui.show_hud;
+  if (hudCheckbox) {
+    hudCheckbox.checked = !!config.ui.show_hud;
+    if (config.ui?.show_hud && typeof invoke === "function") {
+      invoke("toggle_hud_window", { show: true }).catch((e) =>
+        console.error("hud restore failed:", e)
+      );
+    }
+  }
 
   if (startMinimizedCheckbox) startMinimizedCheckbox.checked = !!config.ui.start_minimized;
   if (autostartCheckbox) autostartCheckbox.checked = !!config.ui.autostart;
@@ -862,8 +885,12 @@ async function saveConfig() {
       if (repeatIntervalInput) currentConfig.engine.repeat_interval_ms = Math.max(0, safeInt(repeatIntervalInput.value, 0));
 
       if (!currentConfig.hotkeys) {
-        currentConfig.hotkeys = { toggle: "R / K", mode_switch: "Ctrl+Alt+M", emergency_stop: "Escape", speed_up: "Ctrl+=", slow_down: "Ctrl+-", capture_pos: "Ctrl+P", record_hotkey: "Ctrl+Shift+R" };
+        currentConfig.hotkeys = { toggle: "R / K", mode_switch: "Ctrl+Alt+M", emergency_stop: "Escape", speed_up: "Ctrl+=", slow_down: "Ctrl+-", capture_pos: "Ctrl+P", record_hotkey: "Ctrl+Shift+R", key_ttl_ms: 500, smart_record: true };
       }
+      const smartRecordCb = document.getElementById("smartRecordCheckbox");
+      if (smartRecordCb) currentConfig.hotkeys.smart_record = smartRecordCb.checked;
+      const keyTtlInp = document.getElementById("keyTtlInput");
+      if (keyTtlInp) currentConfig.hotkeys.key_ttl_ms = Math.max(100, Math.min(5000, safeInt(keyTtlInp.value, 500)));
       if (rippleCheckbox) currentConfig.ui.visual_ripple = rippleCheckbox.checked;
 if (hudCheckbox) currentConfig.ui.show_hud = hudCheckbox.checked;
 
@@ -961,6 +988,10 @@ if (holdDurationInput) holdDurationInput.addEventListener("change", saveConfig);
 if (holdIntervalInput) holdIntervalInput.addEventListener("change", saveConfig);
 if (repeatIntervalInput) repeatIntervalInput.addEventListener("change", saveConfig);
 if (guiLockDelayInput) guiLockDelayInput.addEventListener("change", saveConfig);
+const smartRecordCbEl = document.getElementById("smartRecordCheckbox");
+if (smartRecordCbEl) smartRecordCbEl.addEventListener("change", saveConfig);
+const keyTtlInpEl = document.getElementById("keyTtlInput");
+if (keyTtlInpEl) keyTtlInpEl.addEventListener("change", saveConfig);
 if (jitterRadiusInput) jitterRadiusInput.addEventListener("change", saveConfig);
 if (rippleCheckbox) rippleCheckbox.addEventListener("change", saveConfig);
 if (hudCheckbox) hudCheckbox.addEventListener("change", async () => {
@@ -1086,31 +1117,57 @@ function setupHotkeyRecorder(btn, targetKey) {
     const labelEl = btn.querySelector("span:last-child");
     labelEl.textContent = "Press key...";
 
-    const pressedKeys = [];
+    // Array of { key: string, pressedAt: number, releasedAt: number | null }
+    const keyEvents = [];
     let finishTimeout = null;
 
-    const handleKeyDown = (e) => {
-      e.preventDefault();
-      e.stopPropagation();
+    const ttlMs = Math.max(100, Math.min(5000, Number(currentConfig.hotkeys?.key_ttl_ms) || 500));
+    const isSmartRecord = currentConfig.hotkeys?.smart_record !== false;
 
-      const physicalName = codeToPhysicalKey(e.code, e.key);
-      if (!pressedKeys.includes(physicalName)) {
-        pressedKeys.push(physicalName);
+    const cleanExpiredKeys = (now) => {
+      for (let i = keyEvents.length - 1; i >= 0; i--) {
+        const item = keyEvents[i];
+        if (item.releasedAt !== null) {
+          if (!isSmartRecord || (now - item.releasedAt > ttlMs)) {
+            keyEvents.splice(i, 1);
+          }
+        }
       }
+    };
 
+    const getBindingString = () => {
       const modifiers = [];
       const regularKeys = [];
-      for (const k of pressedKeys) {
+      for (const item of keyEvents) {
+        const k = item.key;
         if (["Ctrl", "Alt", "Shift"].includes(k)) {
           if (!modifiers.includes(k)) modifiers.push(k);
         } else {
           if (!regularKeys.includes(k)) regularKeys.push(k);
         }
       }
+      return [...modifiers, ...regularKeys].join("+");
+    };
 
-      const bindingStr = [...modifiers, ...regularKeys].join("+");
+    const handleKeyDown = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      const physicalName = codeToPhysicalKey(e.code, e.key);
+      const now = Date.now();
+
+      cleanExpiredKeys(now);
+
+      let existing = keyEvents.find(k => k.key === physicalName);
+      if (!existing) {
+        keyEvents.push({ key: physicalName, pressedAt: now, releasedAt: null });
+      } else {
+        existing.releasedAt = null;
+      }
+
+      const bindingStr = getBindingString();
       labelEl.textContent = bindingStr || "Press key...";
-      dbg("Hotkey keydown:", physicalName, "current sequence:", bindingStr);
+      dbg("Hotkey keydown:", physicalName, "current sequence:", bindingStr, "smart_ttl:", ttlMs);
 
       if (finishTimeout) clearTimeout(finishTimeout);
       finishTimeout = setTimeout(() => {
@@ -1119,27 +1176,36 @@ function setupHotkeyRecorder(btn, targetKey) {
       }, 400);
     };
 
-    const handleKeyUp = () => {
-      if (pressedKeys.length > 0) {
+    const handleKeyUp = (e) => {
+      const physicalName = codeToPhysicalKey(e.code, e.key);
+      const now = Date.now();
+
+      let existing = keyEvents.find(k => k.key === physicalName);
+      if (existing) {
+        existing.releasedAt = now;
+      }
+
+      cleanExpiredKeys(now);
+
+      if (keyEvents.length > 0) {
         if (finishTimeout) clearTimeout(finishTimeout);
         finishTimeout = setTimeout(() => {
-          const modifiers = [];
-          const regularKeys = [];
-          for (const k of pressedKeys) {
-            if (["Ctrl", "Alt", "Shift"].includes(k)) {
-              if (!modifiers.includes(k)) modifiers.push(k);
-            } else {
-              if (!regularKeys.includes(k)) regularKeys.push(k);
-            }
-          }
-          const bindingStr = [...modifiers, ...regularKeys].join("+");
+          cleanExpiredKeys(Date.now());
+          const bindingStr = getBindingString();
           finalizeRecording(bindingStr);
-        }, 150);
+        }, isSmartRecord ? 200 : 100);
       }
     };
 
     function finalizeRecording(bindingStr) {
-      if (!bindingStr) return;
+      if (!bindingStr) {
+        labelEl.textContent = currentConfig.hotkeys?.[targetKey] || "R / K";
+        btn.classList.remove("recording");
+        activeRecordingBtn = null;
+        window.removeEventListener("keydown", handleKeyDown, true);
+        window.removeEventListener("keyup", handleKeyUp, true);
+        return;
+      }
       if (targetKey === "toggle") {
         currentConfig.hotkeys.toggle = bindingStr;
       } else if (targetKey === "mode_switch") {
@@ -1529,7 +1595,10 @@ function closeEditor(backdrop) {
 }
 
 function showRowContextMenu(targetBtn, idx, macro, refresh, closeEditorFn) {
-  // Remove any existing context menu.
+  // Remove any existing context menu and unbind its listeners.
+  if (window._activeContextMenuClose) {
+    window._activeContextMenuClose();
+  }
   document.querySelectorAll(".ve-context-menu").forEach(m => m.remove());
 
   const rect = targetBtn.getBoundingClientRect();
@@ -1540,6 +1609,22 @@ function showRowContextMenu(targetBtn, idx, macro, refresh, closeEditorFn) {
     background:var(--bg-elev);border:1px solid var(--border);border-radius:6px;
     box-shadow:0 8px 24px rgba(0,0,0,0.5);min-width:180px;padding:4px 0;
   `;
+
+  let onDoc = null;
+  const closeMenu = () => {
+    if (menu.parentNode) {
+      menu.remove();
+    }
+    if (onDoc) {
+      document.removeEventListener("click", onDoc, true);
+      onDoc = null;
+    }
+    if (window._activeContextMenuClose === closeMenu) {
+      window._activeContextMenuClose = null;
+    }
+  };
+  window._activeContextMenuClose = closeMenu;
+
   const items = [
     { icon: "▶️", label: "Run from here",
       action: async () => {
@@ -1573,16 +1658,18 @@ function showRowContextMenu(targetBtn, idx, macro, refresh, closeEditorFn) {
     a.style.cssText = "display:block;width:100%;padding:6px 12px;background:none;border:none;text-align:left;cursor:pointer;color:var(--text-bright);font-size:13px;";
     a.addEventListener("mouseover", () => { a.style.background = "var(--accent)"; a.style.color = "white"; });
     a.addEventListener("mouseout", () => { a.style.background = "none"; a.style.color = "var(--text-bright)"; });
-    a.addEventListener("click", () => { menu.remove(); it.action(); });
+    a.addEventListener("click", () => {
+      closeMenu();
+      it.action();
+    });
     menu.appendChild(a);
   }
   document.body.appendChild(menu);
   // Close on click-away.
   setTimeout(() => {
-    const onDoc = (ev) => {
+    onDoc = (ev) => {
       if (!menu.contains(ev.target)) {
-        menu.remove();
-        document.removeEventListener("click", onDoc, true);
+        closeMenu();
       }
     };
     document.addEventListener("click", onDoc, true);
@@ -1620,6 +1707,9 @@ async function applyPreset(presetId) {
     if (!p) { op.fail("apply-aborted"); return false; }
 
     await op.run("copy-fields", () => {
+      const st = ensureStatsConfig();
+      st.presets_applied = Number(st.presets_applied || 0) + 1;
+      saveConfigThrottled();
       currentConfig.engine.target_cps = p.target_cps;
       currentConfig.engine.jitter_percent = p.jitter_percent;
       currentConfig.engine.click_limit = p.click_limit || 0;
@@ -1638,7 +1728,9 @@ async function applyPreset(presetId) {
       currentConfig.engine.stop_duration_min = Number(p.stop_duration_min) || 0;
       currentConfig.engine.stop_time_str = p.stop_time_str || "";
       // Multi-point sequence: copy onto engine so the scheduler picks it up.
-      currentConfig.engine.sequence_points = Array.isArray(p.points) ? p.points : [];
+      currentConfig.engine.sequence_points = Array.isArray(p.points)
+        ? JSON.parse(JSON.stringify(p.points))
+        : [];
       return "engine fields copied";
     });
 
@@ -1777,6 +1869,22 @@ function renderPresetHotkeySlots() {
     btn.classList.add("recording");
     labelEl.textContent = "Press key...";
     const pressed = [];
+    let finishTimer = null;
+
+    const cleanup = () => {
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("keyup", onKeyUp, true);
+      window.removeEventListener("click", onClickAway, true);
+      btn.classList.remove("recording");
+    };
+
+    const onClickAway = (ev) => {
+      if (!btn.contains(ev.target)) {
+        cleanup();
+        labelEl.textContent = slots[slotIdx] || "Not set";
+      }
+    };
+
     const onKey = (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -1786,23 +1894,24 @@ function renderPresetHotkeySlots() {
       const keys = pressed.filter(k => !["Ctrl", "Alt", "Shift"].includes(k));
       labelEl.textContent = [...mods, ...keys].join("+") || "Press key...";
     };
-    const finish = () => {
-      window.removeEventListener("keydown", onKey, true);
-      window.removeEventListener("keyup", done, true);
-      window.removeEventListener("click", done, true);
-      btn.classList.remove("recording");
-      const mods = pressed.filter(k => ["Ctrl", "Alt", "Shift"].includes(k));
-      const keys = pressed.filter(k => !["Ctrl", "Alt", "Shift"].includes(k));
-      const binding = [...mods, ...keys].join("+");
-      // clear any other slot that already used this binding
-      if (binding) slots.forEach((v, i2) => { if (v === binding && i2 !== slotIdx) slots[i2] = ""; });
-      slots[slotIdx] = binding;
-      labelEl.textContent = binding || "Not set";
-      saveConfig();
+
+    const onKeyUp = () => {
+      if (finishTimer) clearTimeout(finishTimer);
+      finishTimer = setTimeout(() => {
+        cleanup();
+        const mods = pressed.filter(k => ["Ctrl", "Alt", "Shift"].includes(k));
+        const keys = pressed.filter(k => !["Ctrl", "Alt", "Shift"].includes(k));
+        const binding = [...mods, ...keys].join("+");
+        if (binding) slots.forEach((v, i2) => { if (v === binding && i2 !== slotIdx) slots[i2] = ""; });
+        slots[slotIdx] = binding;
+        labelEl.textContent = binding || "Not set";
+        saveConfig();
+      }, 150);
     };
-    const done = () => setTimeout(finish, 150);
+
     window.addEventListener("keydown", onKey, true);
-    window.addEventListener("keyup", done, true);
+    window.addEventListener("keyup", onKeyUp, true);
+    setTimeout(() => window.addEventListener("click", onClickAway, true), 0);
   };
 
   grid.innerHTML = slots.map((binding, idx) => `
@@ -2046,7 +2155,8 @@ function setupPresetListeners() {
       repeat_interval_ms: currentConfig.engine.repeat_interval_ms,
       start_delay_ms: currentConfig.engine.start_delay_ms,
       stop_duration_min: currentConfig.engine.stop_duration_min,
-      stop_time_str: currentConfig.engine.stop_time_str
+      stop_time_str: currentConfig.engine.stop_time_str,
+      points: Array.isArray(currentConfig.engine.sequence_points) ? JSON.parse(JSON.stringify(currentConfig.engine.sequence_points)) : []
     });
   });
   on("presetSaveBtn", "click", () => void savePresetFromModal());
@@ -2853,8 +2963,7 @@ function humanizeActionList(actions, jitterPercent = 20) {
     if (a.type !== "wait") return a;
     const original = Number(a.ms);
     if (!Number.isFinite(original) || original < 1) return a;
-    const seed = Math.abs(((a.ms * 1103515245 + 12345) & 0x7fffffff) ^ Date.now()) % 1000;
-    const rnd = (seed / 1000) * 2 - 1; // -1..+1 deterministic-ish
+    const rnd = Math.random() * 2 - 1;
     const jittered = original * (1 + (pct / 100) * rnd);
     const clamped = Math.max(1, Math.min(30000, Math.round(jittered)));
     return { ...a, ms: clamped, _humanized: true };
@@ -3209,16 +3318,15 @@ async function openVisualEditor(macro, onChange) {
 function renderEditorRow(a, idx, enabled) {
   const safeType = String(a?.type || "unknown").replace(/[^a-z0-9_-]/gi, "-");
   const actionMeta = {
-    mouse_move: ["🖱", "MOVE", "Position cursor"],
-    mouse_click: ["◉", "CLICK", "Mouse action"],
-    mouse_down: ["▼", "MOUSE DOWN", "Hold button"],
-    mouse_up: ["▲", "MOUSE UP", "Release button"],
-    key_press: ["⌨", "KEY PRESS", "Keyboard action"],
-    key_down: ["⌨", "KEY DOWN", "Hold key"],
-    key_up: ["⌨", "KEY UP", "Release key"],
-    scroll: ["↕", "SCROLL", "Wheel action"],
-    wait: ["◷", "WAIT", "Pause sequence"],
-    mouse_click: ["◉", "CLICK", "Mouse action"],
+    mouse_move:  ["🖱", "MOVE",       "Position cursor"],
+    mouse_click: ["◉", "CLICK",      "Mouse action"],
+    mouse_down:  ["▼", "MOUSE DOWN", "Hold button"],
+    mouse_up:    ["▲", "MOUSE UP",   "Release button"],
+    key_press:   ["⌨", "KEY PRESS",  "Keyboard action"],
+    key_down:    ["⌨", "KEY DOWN",   "Hold key"],
+    key_up:      ["⌨", "KEY UP",     "Release key"],
+    scroll:      ["↕", "SCROLL",     "Wheel action"],
+    wait:        ["◷", "WAIT",       "Pause sequence"],
   }[a?.type] || ["◆", String(a?.type || "ACTION").toUpperCase(), "Action block"];
   const dimStyle = enabled ? "" : "opacity:0.45;filter:saturate(0.35);";
   const headerRow = `
@@ -3300,20 +3408,40 @@ function makeAction(type) {
 }
 
 // ── INIT ────────────────────────────────────────────────────
+//
+// **Defensive wrap**: the init() flow used to throw uncaught exceptions
+// when `window.__TAURI__.core.invoke` was briefly unavailable during
+// WebView2 startup, which (combined with the global console interceptor)
+// flooded the logBuffer and triggered "Out of Memory" in the WebView2
+// child processes. Now each step is independently guarded so a single
+// failed step cannot take down the whole UI.
 onDomReady(() => {
-  DEBUG_UI = true;
-  setDebugMode(true);
-  dbg("onDomReady fired — initializing app state [DEBUG MODE ACTIVE]");
-  invoke("get_debug_mode").then(d => { DEBUG_UI = !!d; }).catch(() => {});
-  dbg("loadConfig() called");
-  loadConfig();
-  syncVersionDisplay();
-  checkPlatformCapabilities();
-  initAutomationTab();
-  startUpdateChecker();
+  // Honour the persisted debug flag instead of forcing it on every launch.
+  invoke("get_debug_mode")
+    .then((d) => {
+      DEBUG_UI = !!d;
+      setDebugMode(DEBUG_UI);
+    })
+    .catch(() => {
+      // Backend not ready yet — keep DEBUG_UI at its module-load default
+      // (false for release builds) instead of forcing it on.
+    });
 
-  console.log("[NanoClick] window.__TAURI__:", typeof window.__TAURI__, window.__TAURI__ ? Object.keys(window.__TAURI__) : "");
-  console.log("[NanoClick] TAURI.core.invoke type:", typeof TAURI?.core?.invoke);
+  const safeStep = (name, fn) => {
+    try {
+      fn();
+    } catch (e) {
+      try { console.error(`[init] step '${name}' failed:`, e); } catch (_) { /* never throw from a logger */ }
+    }
+  };
+
+  safeStep("loadConfig", () => loadConfig());
+  safeStep("syncVersionDisplay", () => { void syncVersionDisplay(); });
+  safeStep("checkPlatformCapabilities", () => { void checkPlatformCapabilities(); });
+  safeStep("initAutomationTab", () => { void initAutomationTab(); });
+  safeStep("startUpdateChecker", () => startUpdateChecker());
+
+  try { console.log("[NanoClick] init complete"); } catch (_) { /* ignore */ }
 });
 
 // ── Toggle Response Time (debounce) ──────────────────────────
@@ -3410,15 +3538,6 @@ function renderStats() {
 
 // Session stats come from live status-update events integrated into the main listener above. All-time stats are
 
-// Count preset switches (manual + hotkey) by wrapping applyPreset.
-const _origApplyPresetForStats = applyPreset;
-applyPreset = async function (presetId) {
-  const st = ensureStatsConfig();
-  st.presets_applied = Number(st.presets_applied || 0) + 1;
-  saveConfigThrottled();
-  return _origApplyPresetForStats(presetId);
-};
-
 onDomReady(() => {
   const resetBtn = document.getElementById("statsResetBtn");
   if (resetBtn) resetBtn.addEventListener("click", () => {
@@ -3429,12 +3548,6 @@ onDomReady(() => {
     renderStats();
   });
   setInterval(renderStats, 1000);
-  // Restore HUD on startup if enabled.
-  if (currentConfig?.ui?.show_hud && typeof invoke === "function") {
-    invoke("toggle_hud_window", { show: true }).catch((e) =>
-      console.error("hud restore failed:", e)
-    );
-  }
 });
 
 

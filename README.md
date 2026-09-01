@@ -22,13 +22,16 @@ Built with **Tauri 2 + Rust + vanilla JS**. No Electron, no bundler, no bloat: t
 - **⚡ Optimize** — one-click cleanup at three aggressiveness levels (Subtle / Balanced / Aggressive)
 - **Visual editor** — inline edit, rename, drag-to-reorder, context menu (Run from here / Step / Disable / Duplicate)
 
-### 🧠 Control Flow (v4.0)
+### 🧠 Control Flow & Smart Hotkeys (v1.2.0)
+- **Smart Key Memory** — TTL-based keypress memory (configurable 100–3000ms) for effortless recording of complex hotkeys and modifier combinations (Ctrl, Alt, Shift)
+- **Multi-point Sequence Editor** — high-performance Canvas editor with O(1) transform caching and snap-to-grid
 - `Repeat`, `If/Else` with pixel-color conditions, variables (`SetVar`/`GetVar`), and nested macro calls
 - Presets: save, import/export, and migrate your full engine configuration
 
 ### 🛡️ Safety & Convenience
 - **Work Mode** — suspends global hotkeys while you're using other apps
 - **Auto-pause on navigation**, emergency stop (`Escape`), start-delay & auto-stop timers
+- **Floating HUD** overlay for real-time click tracking
 - **Windows autostart + system tray**
 - 🎨 **6 themes**: Dark Cyberpunk, Neon Grass, Dark Slate, Midnight Blue, Dracula Crimson, Amethyst Purple
 
@@ -52,10 +55,10 @@ All hotkeys are handled by an event-driven `WH_KEYBOARD_LL` listener in Rust —
 
 ## 📦 Install
 
-Download the latest installer from [Releases](../../releases):
+Download the latest installer from [Releases](../../releases/tag/v1.2.0):
 
 ```
-NanoClick_1.1.0_x64-setup.exe   (~3.4 MB)
+NanoClick_1.2.0_x64-setup.exe   (~3.4 MB)
 ```
 
 - Installs per-user (no admin rights needed)

@@ -87,19 +87,42 @@ const SE = (window.SequenceEditor = (() => {
     ctx.lineWidth = 1;
     ctx.strokeRect(0.5, 0.5, W - 1, H - 1);
 
+    // ── Cache transform coefficients once per frame ──────────────────────────
+    // mapCanvasToScreen() is a pure function of (canvas.width, canvas.height,
+    // lastPrimaryW, lastPrimaryH) — all constant within a single draw() call.
+    // Calling it for every grid line and every point is unnecessary work.
+    const innerW = W - 2 * GUTTER;
+    const innerH = H - 2 * GUTTER;
+    const screenRatio = lastPrimaryW / lastPrimaryH;
+    const canvasRatio = innerW / innerH;
+    let scale, offsetX = GUTTER, offsetY = GUTTER;
+    if (screenRatio > canvasRatio) {
+      scale = innerH / lastPrimaryH;
+      const w = lastPrimaryW * scale;
+      offsetX = GUTTER + (innerW - w) / 2;
+    } else {
+      scale = innerW / lastPrimaryW;
+      const h = lastPrimaryH * scale;
+      offsetY = GUTTER + (innerH - h) / 2;
+    }
+
+    // Inline converter: screen → canvas using the cached coefficients.
+    const toCanvas = (sx, sy) => ({
+      cx: offsetX + sx * scale,
+      cy: offsetY + sy * scale,
+    });
+
     // Grid every 50 screen px.
-    const sample = screenToCanvas(50, 0);
-    const dx = sample.cx - GUTTER;
-    const sampleY = screenToCanvas(0, 50);
-    const dy = sampleY.cy - GUTTER;
+    const dx = 50 * scale;          // was: screenToCanvas(50,0).cx - GUTTER
+    const dy = 50 * scale;          // was: screenToCanvas(0,50).cy - GUTTER
     if (dx > 8) {
       ctx.strokeStyle = "#1c2128";
       ctx.beginPath();
-      for (let x = GUTTER; x < W - GUTTER; x += dx) {
+      for (let x = offsetX; x < W - GUTTER; x += dx) {
         ctx.moveTo(x, GUTTER);
         ctx.lineTo(x, H - GUTTER);
       }
-      for (let y = GUTTER; y < H - GUTTER; y += dy) {
+      for (let y = offsetY; y < H - GUTTER; y += dy) {
         ctx.moveTo(GUTTER, y);
         ctx.lineTo(W - GUTTER, y);
       }
@@ -107,13 +130,13 @@ const SE = (window.SequenceEditor = (() => {
     }
 
     // Origin marker.
-    const origin = screenToCanvas(0, 0);
-    if (origin.cx > GUTTER && origin.cy > GUTTER) {
+    // screenToCanvas(0,0) with cached values: cx = offsetX, cy = offsetY.
+    if (offsetX > GUTTER && offsetY > GUTTER) {
       ctx.fillStyle = "#58a6ff";
       ctx.font = "10px monospace";
       ctx.textAlign = "left";
       ctx.textBaseline = "bottom";
-      ctx.fillText("(0,0)", origin.cx + 2, origin.cy - 2);
+      ctx.fillText("(0,0)", offsetX + 2, offsetY - 2);
     }
 
     // Path lines between points.
@@ -122,7 +145,7 @@ const SE = (window.SequenceEditor = (() => {
       ctx.lineWidth = 2;
       ctx.beginPath();
       for (let i = 0; i < points.length; i++) {
-        const p = screenToCanvas(points[i].x, points[i].y);
+        const p = toCanvas(points[i].x, points[i].y);
         if (i === 0) ctx.moveTo(p.cx, p.cy);
         else ctx.lineTo(p.cx, p.cy);
       }
@@ -133,7 +156,7 @@ const SE = (window.SequenceEditor = (() => {
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     points.forEach((p, i) => {
-      const cp = screenToCanvas(p.x, p.y);
+      const cp = toCanvas(p.x, p.y);
       const isFirst = i === 0;
       ctx.fillStyle = isFirst ? "#3fb950" : "#f78166";
       ctx.beginPath();
@@ -257,21 +280,29 @@ const SE = (window.SequenceEditor = (() => {
   async function init() {
     canvas = document.getElementById("prPointsCanvas");
     if (!canvas) return;
-    ctx = canvas.getContext("2d");
+    try {
+      ctx = canvas.getContext("2d");
+      if (!ctx) return;
+    } catch (e) {
+      try { console.error("[sequence_editor] getContext('2d') failed:", e); } catch (_) {}
+      return;
+    }
     countEl = document.getElementById("prPointsCount");
     jsonEl = document.getElementById("prPoints");
     await refreshScreenSize();
-    bindCanvas();
-    bindToolbar();
-    draw();
-    window.addEventListener("resize", () => draw());
+    try { bindCanvas(); } catch (e) { try { console.error("[sequence_editor] bindCanvas failed:", e); } catch (_) {} }
+    try { bindToolbar(); } catch (e) { try { console.error("[sequence_editor] bindToolbar failed:", e); } catch (_) {} }
+    try { draw(); } catch (e) { try { console.error("[sequence_editor] draw failed:", e); } catch (_) {} }
+    window.addEventListener("resize", () => { try { draw(); } catch (_) {} });
   }
 
   return { init, setPoints, getPoints, draw };
 })());
 
 if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", () => SE.init());
+  document.addEventListener("DOMContentLoaded", () => {
+    try { SE.init(); } catch (e) { try { console.error("[sequence_editor] init failed:", e); } catch (_) {} }
+  });
 } else {
-  SE.init();
+  try { SE.init(); } catch (e) { try { console.error("[sequence_editor] init failed:", e); } catch (_) {} }
 }

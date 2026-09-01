@@ -367,6 +367,15 @@ pub fn run() {
         .setup(move |app| {
             let handle = app.handle().clone();
 
+            // **v1.2.0 memory-pressure workaround**: the auto-created window
+            // from `tauri.conf.json` spawned 5 WebView2 child processes that
+            // collectively consumed ~250 MB and tripped an "Out of Memory"
+            // Chromium error page before `index.html` could finish loading.
+            // The actual fix is in `src/main.js` (disable verbose debug
+            // logging and wrap each init step in try/catch), so the window
+            // is built here by Tauri itself using the conf entry above.
+            //
+
             // Log WebView2 startup state for diagnostics: which data folder
             // the WebView chose, which window labels are registered, and
             // whether the main window is actually visible right after init.
