@@ -668,6 +668,54 @@ mod tests {
         let (_, migrated) = migrate_config(value).expect("current config should parse");
         assert!(!migrated);
     }
+
+    #[test]
+    fn stats_config_default_initialization() {
+        let stats = StatsConfig::default();
+        assert_eq!(stats.total_clicks, 0);
+        assert_eq!(stats.total_sessions, 0);
+        assert_eq!(stats.total_active_ms, 0);
+        assert!(stats.history.is_empty());
+    }
+
+    #[test]
+    fn stats_config_serialization_roundtrip() {
+        let mut stats = StatsConfig::default();
+        stats.total_clicks = 12345;
+        stats.total_sessions = 42;
+        stats.total_active_ms = 3600000;
+        stats.max_cps = 55.5;
+        stats.history.push(StatHistoryPoint {
+            timestamp: 100000,
+            clicks: 250,
+            active_ms: 10000,
+            avg_cps: 25.0,
+        });
+        let json = serde_json::to_string(&stats).unwrap();
+        let restored: StatsConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.total_clicks, 12345);
+        assert_eq!(restored.total_sessions, 42);
+        assert_eq!(restored.max_cps, 55.5);
+        assert_eq!(restored.history.len(), 1);
+        assert_eq!(restored.history[0].clicks, 250);
+    }
+
+    #[test]
+    fn stats_config_preserves_values_across_config_save() {
+        let mut config = AppConfig::default();
+        config.stats.total_clicks = 9999;
+        let json = serde_json::to_string(&config).unwrap();
+        let restored: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.stats.total_clicks, 9999);
+    }
+
+    #[test]
+    fn legacy_config_migration_retains_stats_defaults() {
+        let mut value = serde_json::to_value(AppConfig::default()).unwrap();
+        value.as_object_mut().unwrap().remove("stats");
+        let (config, _) = migrate_config(value).unwrap();
+        assert_eq!(config.stats.total_clicks, 0);
+    }
 }
 
 fn default_hotkey_debounce_ms() -> u32 {

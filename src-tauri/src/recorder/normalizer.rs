@@ -400,4 +400,66 @@ mod tests {
         assert!(has_click, "expected a click action, got: {:?}", actions);
         assert!(has_wait, "expected a ~740ms wait, got: {:?}", actions);
     }
+
+    #[test]
+    fn normalizer_handles_empty_events_without_panic() {
+        let actions = normalize(vec![]);
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn scroll_event_normalizes_to_action_scroll() {
+        let events = vec![RawEvent::Scroll {
+            delta_x: 0,
+            delta_y: -120,
+            t_ms: 100,
+        }];
+        let actions = normalize(events);
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], Action::Scroll { delta_y: -120, .. }));
+    }
+
+    #[test]
+    fn x1_x2_mouse_buttons_normalize_properly() {
+        let events = vec![
+            ev_mouse_down(MouseButton::X1, 10),
+            ev_mouse_up(MouseButton::X1, 40),
+            ev_mouse_down(MouseButton::X2, 100),
+            ev_mouse_up(MouseButton::X2, 130),
+        ];
+        let actions = normalize(events);
+        assert!(actions.iter().any(|a| matches!(a, Action::MouseDown { button: MouseButton::X1 })));
+        assert!(actions.iter().any(|a| matches!(a, Action::MouseDown { button: MouseButton::X2 })));
+    }
+
+    #[test]
+    fn keyboard_complex_modifiers_preserves_mod_state() {
+        let mods = Modifiers {
+            ctrl: true,
+            shift: true,
+            alt: false,
+            win: false,
+        };
+        let events = vec![
+            ev_key(KeyCode(0x41), mods, 10),
+            RawEvent::KeyUp {
+                key: KeyCode(0x41),
+                mods,
+                t_ms: 30,
+            },
+        ];
+        let actions = normalize(events);
+        assert!(actions.iter().any(|a| matches!(a, Action::KeyDown { mods: m, .. } if m.ctrl && m.shift)));
+    }
+
+    #[test]
+    fn precise_mode_preserves_raw_events() {
+        let events = vec![
+            ev_mouse_move(10, 10, 0),
+            ev_mouse_move(11, 10, 5),
+            ev_mouse_move(12, 10, 10),
+        ];
+        let actions: Vec<Action> = events.into_iter().map(|e| e.to_action()).collect();
+        assert_eq!(actions.len(), 3, "precise mode should keep all raw move events");
+    }
 }

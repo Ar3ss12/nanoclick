@@ -273,15 +273,31 @@ struct RecorderContext {
     ignored_hotkey: Option<IgnoredHotkey>,
 }
 
-fn current_context() -> Option<Arc<RecorderContext>> {
-    RECORDER_CONTEXT
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .ok()
-        .and_then(|context| context.as_ref().cloned())
+thread_local! {
+    static LOCAL_CONTEXT: std::cell::RefCell<Option<Arc<RecorderContext>>> = const { std::cell::RefCell::new(None) };
+    static LAST_MOUSE_MOVE: std::cell::Cell<(i32, i32, u64)> = const { std::cell::Cell::new((-99999, -99999, 0)) };
+}
+
+fn with_context<F, R>(f: F) -> Option<R>
+where
+    F: FnOnce(&RecorderContext) -> R,
+{
+    LOCAL_CONTEXT.with(|cell| {
+        let guard = cell.borrow();
+        if let Some(ctx) = guard.as_ref() {
+            Some(f(ctx))
+        } else {
+            RECORDER_CONTEXT
+                .get_or_init(|| Mutex::new(None))
+                .lock()
+                .ok()
+                .and_then(|lock| lock.as_ref().map(|arc| f(arc.as_ref())))
+        }
+    })
 }
 
 fn clear_recorder_context() {
+    LOCAL_CONTEXT.with(|cell| *cell.borrow_mut() = None);
     if let Some(lock) = RECORDER_CONTEXT.get() {
         if let Ok(mut context) = lock.lock() {
             *context = None;
@@ -301,36 +317,36 @@ unsafe extern "system" fn keyboard_proc(n_code: i32, w_param: WPARAM, l_param: L
             return CallNextHookEx(None, n_code, w_param, l_param);
         }
         let msg = w_param.0;
-        let Some(context) = current_context() else {
-            return CallNextHookEx(None, n_code, w_param, l_param);
-        };
-        let t_ms = now_ms_since(context.start);
-        let mods = read_modifiers();
-        let ev = if msg == 0x0100 || msg == 0x0104 {
-            Some(RawEvent::KeyDown {
-                key: KeyCode(vk),
-                mods,
-                t_ms,
-            })
-        } else if msg == 0x0101 || msg == 0x0105 {
-            Some(RawEvent::KeyUp {
-                key: KeyCode(vk),
-                mods,
-                t_ms,
-            })
-        } else {
-            None
-        };
-        if let Some(e) = ev {
-            if let Some(ignore) = context.ignored_hotkey.as_ref() {
-                if ignore.matches(vk, mods) {
-                    return CallNextHookEx(None, n_code, w_param, l_param);
+        let res = with_context(|context| {
+            let t_ms = now_ms_since(context.start);
+            let mods = read_modifiers();
+            let ev = if msg == 0x0100 || msg == 0x0104 {
+                Some(RawEvent::KeyDown {
+                    key: KeyCode(vk),
+                    mods,
+                    t_ms,
+                })
+            } else if msg == 0x0101 || msg == 0x0105 {
+                Some(RawEvent::KeyUp {
+                    key: KeyCode(vk),
+                    mods,
+                    t_ms,
+                })
+            } else {
+                None
+            };
+            if let Some(e) = ev {
+                if let Some(ignore) = context.ignored_hotkey.as_ref() {
+                    if ignore.matches(vk, mods) {
+                        return true; // ignored
+                    }
                 }
+                let _ = context.tx.send(e);
             }
-            // Use try_send — if the channel is full or dropped, silently drop.
-            if context.tx.send(e).is_err() {
-                // Drop silently — recorder likely stopped.
-            }
+            false
+        });
+        if res == Some(true) {
+            return CallNextHookEx(None, n_code, w_param, l_param);
         }
     }
     CallNextHookEx(None, n_code, w_param, l_param)
@@ -339,89 +355,87 @@ unsafe extern "system" fn keyboard_proc(n_code: i32, w_param: WPARAM, l_param: L
 unsafe extern "system" fn mouse_proc(n_code: i32, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
     if n_code == 0 && !STOP_FLAG.load(Ordering::Acquire) {
         let m_struct = &*(l_param.0 as *const MSLLHOOKSTRUCT);
-        let Some(context) = current_context() else {
-            return CallNextHookEx(None, n_code, w_param, l_param);
-        };
-        let t_ms = now_ms_since(context.start);
         let msg = w_param.0;
-        // WM_MOUSEMOVE = 0x0200, WM_LBUTTONDOWN = 0x0201, WM_LBUTTONUP = 0x0202,
-        // WM_RBUTTONDOWN = 0x0204, WM_RBUTTONUP = 0x0205,
-        // WM_MBUTTONDOWN = 0x0207, WM_MBUTTONUP = 0x0208,
-        // WM_MOUSEWHEEL = 0x020A, WM_MOUSEHWHEEL = 0x020E,
-        // WM_XBUTTONDOWN = 0x020B, WM_XBUTTONUP = 0x020C.
         let pt = POINT {
             x: m_struct.pt.x,
             y: m_struct.pt.y,
         };
-        let ev = match msg {
-            0x0200 => Some(RawEvent::MouseMove {
-                x: pt.x,
-                y: pt.y,
-                t_ms,
-            }),
-            0x0201 => Some(RawEvent::MouseDown {
-                button: MouseButton::Left,
-                t_ms,
-            }),
-            0x0202 => Some(RawEvent::MouseUp {
-                button: MouseButton::Left,
-                t_ms,
-            }),
-            0x0204 => Some(RawEvent::MouseDown {
-                button: MouseButton::Right,
-                t_ms,
-            }),
-            0x0205 => Some(RawEvent::MouseUp {
-                button: MouseButton::Right,
-                t_ms,
-            }),
-            0x0207 => Some(RawEvent::MouseDown {
-                button: MouseButton::Middle,
-                t_ms,
-            }),
-            0x0208 => Some(RawEvent::MouseUp {
-                button: MouseButton::Middle,
-                t_ms,
-            }),
-            0x020A | 0x020E => {
-                // Wheel: hi-word of mouseData is delta in notches * WHEEL_DELTA (120).
-                let delta = (m_struct.mouseData >> 16) as i16 as i32;
-                Some(RawEvent::Scroll {
-                    delta_x: 0,
-                    delta_y: delta,
-                    t_ms,
-                })
-            }
-            0x020B | 0x020C => {
-                let button = match (m_struct.mouseData >> 16) as u16 {
-                    1 => MouseButton::X1,
-                    2 => MouseButton::X2,
-                    _ => return CallNextHookEx(None, n_code, w_param, l_param),
-                };
-                if msg == 0x020B {
-                    Some(RawEvent::MouseDown { button, t_ms })
-                } else {
-                    Some(RawEvent::MouseUp { button, t_ms })
+        with_context(|context| {
+            let t_ms = now_ms_since(context.start);
+            let ev = match msg {
+                0x0200 => {
+                    let should_send = LAST_MOUSE_MOVE.with(|cell| {
+                        let (lx, ly, lt) = cell.get();
+                        let dx = (pt.x - lx).abs();
+                        let dy = (pt.y - ly).abs();
+                        let dt = t_ms.saturating_sub(lt);
+                        if dx >= 4 || dy >= 4 || dt >= 30 {
+                            cell.set((pt.x, pt.y, t_ms));
+                            true
+                        } else {
+                            false
+                        }
+                    });
+                    if should_send {
+                        Some(RawEvent::MouseMove {
+                            x: pt.x,
+                            y: pt.y,
+                            t_ms,
+                        })
+                    } else {
+                        None
+                    }
                 }
+                0x0201 => Some(RawEvent::MouseDown {
+                    button: MouseButton::Left,
+                    t_ms,
+                }),
+                0x0202 => Some(RawEvent::MouseUp {
+                    button: MouseButton::Left,
+                    t_ms,
+                }),
+                0x0204 => Some(RawEvent::MouseDown {
+                    button: MouseButton::Right,
+                    t_ms,
+                }),
+                0x0205 => Some(RawEvent::MouseUp {
+                    button: MouseButton::Right,
+                    t_ms,
+                }),
+                0x0207 => Some(RawEvent::MouseDown {
+                    button: MouseButton::Middle,
+                    t_ms,
+                }),
+                0x0208 => Some(RawEvent::MouseUp {
+                    button: MouseButton::Middle,
+                    t_ms,
+                }),
+                0x020A | 0x020E => {
+                    let delta = (m_struct.mouseData >> 16) as i16 as i32;
+                    Some(RawEvent::Scroll {
+                        delta_x: 0,
+                        delta_y: delta,
+                        t_ms,
+                    })
+                }
+                0x020B | 0x020C => {
+                    let button = match (m_struct.mouseData >> 16) as u16 {
+                        1 => MouseButton::X1,
+                        2 => MouseButton::X2,
+                        _ => return,
+                    };
+                    if msg == 0x020B {
+                        Some(RawEvent::MouseDown { button, t_ms })
+                    } else {
+                        Some(RawEvent::MouseUp { button, t_ms })
+                    }
+                }
+                _ => None,
+            };
+            if let Some(e) = ev {
+                let _ = context.tx.send(e);
             }
-            _ => None,
-        };
-        // Capture cursor position alongside button events for accurate replay.
-        if matches!(msg, 0x0201 | 0x0204 | 0x0207) {
-            let mut cp = POINT::default();
-            unsafe {
-                let _ = GetCursorPos(&mut cp);
-            }
-            // Note: we don't actually emit a separate MouseMove; the cursor
-            // coord is already in `m_struct.pt`, and the executor re-queries
-            // it when needed. This block kept as a hook for future use.
-            let _ = cp;
-        }
-        if let Some(e) = ev {
-            if context.tx.send(e).is_err() {
-                // channel closed.
-            }
-        }
+        });
     }
     CallNextHookEx(None, n_code, w_param, l_param)
 }
@@ -429,14 +443,16 @@ unsafe extern "system" fn mouse_proc(n_code: i32, w_param: WPARAM, l_param: LPAR
 fn run_hooks(tx: Sender<RawEvent>, ignored_hotkey: Option<IgnoredHotkey>) {
     RECORDER_RUNNING.store(true, Ordering::Release);
     let start = Instant::now();
-    *RECORDER_CONTEXT
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .unwrap() = Some(Arc::new(RecorderContext {
+    let ctx = Arc::new(RecorderContext {
         tx,
         start,
         ignored_hotkey,
-    }));
+    });
+    LOCAL_CONTEXT.with(|cell| *cell.borrow_mut() = Some(ctx.clone()));
+    *RECORDER_CONTEXT
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap() = Some(ctx);
 
     unsafe {
         let kb_hook = match SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), None, 0) {

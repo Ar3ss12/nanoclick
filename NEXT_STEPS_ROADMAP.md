@@ -13,6 +13,7 @@ Windows-версія вже має основний функціональний
 
 ## Що вже зроблено
 
+- **v1.2.1 Release & Installer Bundle:** усунуто подвійне виклимання `stop()` у записі макросів, впроваджено zero-lock access у системних хуках Windows (`thread_local!`), додано дроселювання мікро-рухів миші (<4px / <30мс), додано 14 нових unit-тестів та зібрано оновлений інсталятор `NanoClick_1.2.1_x64-setup.exe`;
 - **v1.2.0 Release & Installer Bundle:** реалізовано персистентний рушій статистики (`StatsConfig` у Rust backend), інтегровано Canvas CPS Timeline графік у реальному часі, впроваджено Smart Keypress Memory (TTL), оптимізовано Sequence Editor Canvas, усунуто витік пам'яті та згенеровано підписаний інсталятор + маніфест оновлень `latest.json` для GitHub Release v1.2.0;
 - click engine з режимами single, double, hold та jitter;
 - global hotkeys на Windows через `WH_KEYBOARD_LL`;
@@ -25,7 +26,7 @@ Windows-версія вже має основний функціональний
 - presets з основними налаштуваннями engine;
 - release build без DevTools у production;
 - Rust unit tests для core, recorder, persistence та hotkey parser.
-- 57 passing Rust tests, включно з legacy-config migration, corrupted macro
+- 95 passing Rust tests, включно з legacy-config migration, corrupted macro
   JSON, 2,000-action macro roundtrip та physical SendInput hotkey integration.
 
 ## Поточний scope: Windows-first

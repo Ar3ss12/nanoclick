@@ -152,7 +152,6 @@ pub fn record_stop(state: State<'_, MacroState>) -> Result<Vec<Macro>, String> {
     let session = slot.take().ok_or("recorder was not running")?;
     // v4.2 — stop through the contract (stateless global stop).
     platform::recorder_backend_stop();
-    session.handle.stop();
     let actions = session.handle.stop();
     let m = Macro {
         id: uuid_like_id(),
@@ -449,5 +448,74 @@ mod tests {
         let backup_str = serde_json::to_string(&backup).unwrap();
         assert!(backup_str.contains("backup_version"));
         assert!(backup_str.contains("m_test_backup"));
+    }
+
+    #[test]
+    fn recorder_handle_single_stop_returns_captured_actions() {
+        let (handle, tx) = RecorderHandle::start_with_external_sender(RecordingMode::Smart);
+        tx.send(RawEvent::MouseDown {
+            button: MouseButton::Left,
+            t_ms: 0,
+        })
+        .unwrap();
+        tx.send(RawEvent::MouseUp {
+            button: MouseButton::Left,
+            t_ms: 50,
+        })
+        .unwrap();
+        drop(tx);
+        let actions = handle.stop();
+        assert!(!actions.is_empty(), "stop() must return captured actions on first call");
+    }
+
+    #[test]
+    fn recorder_handle_subsequent_stop_is_idempotent() {
+        let (handle, tx) = RecorderHandle::start_with_external_sender(RecordingMode::Smart);
+        tx.send(RawEvent::MouseDown {
+            button: MouseButton::Right,
+            t_ms: 0,
+        })
+        .unwrap();
+        tx.send(RawEvent::MouseUp {
+            button: MouseButton::Right,
+            t_ms: 40,
+        })
+        .unwrap();
+        drop(tx);
+        let first_actions = handle.stop();
+        let second_actions = handle.stop();
+        assert!(!first_actions.is_empty());
+        assert!(second_actions.is_empty(), "second stop() call returns empty vec without panicking");
+    }
+
+    #[test]
+    fn uuid_like_id_generates_unique_prefixed_ids() {
+        let id1 = uuid_like_id();
+        let id2 = uuid_like_id();
+        assert!(id1.starts_with("m_"));
+        assert!(id2.starts_with("m_"));
+        assert_ne!(id1, id2, "generated macro IDs must be unique");
+    }
+
+    #[test]
+    fn recorder_handle_cancel_stops_session_cleanly() {
+        let (handle, tx) = RecorderHandle::start_with_external_sender(RecordingMode::Smart);
+        assert!(handle.is_running());
+        handle.cancel();
+        assert!(!handle.is_running());
+        drop(tx);
+    }
+
+    #[test]
+    fn macro_state_recorder_slot_locking_and_take() {
+        let s = MacroState::default();
+        let mut slot = s.recorder.lock().unwrap();
+        assert!(slot.is_none());
+        let (handle, _tx) = RecorderHandle::start_with_external_sender(RecordingMode::Smart);
+        *slot = Some(RecorderSession { handle });
+        assert!(slot.is_some());
+        let taken = slot.take();
+        assert!(taken.is_some());
+        assert!(slot.is_none());
     }
 }
