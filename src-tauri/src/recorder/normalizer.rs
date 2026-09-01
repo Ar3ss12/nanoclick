@@ -20,9 +20,6 @@ const DOUBLE_CLICK_THRESHOLD_MS: u64 = 100;
 /// Threshold (ms) for Down+Up on the same key for KEY_PRESS detection.
 const KEY_PRESS_THRESHOLD_MS: u64 = 50;
 
-/// Mouse movement threshold (px) to record a Move (otherwise dropped / merged).
-const MOUSE_DELTA_THRESHOLD_PX: i32 = 20;
-
 /// Minimum Wait duration to record (below = noise, dropped).
 const MIN_WAIT_MS: u64 = 25;
 
@@ -134,45 +131,100 @@ fn detect_double_clicks(events: Vec<RawEvent>) -> Vec<RawEvent> {
     out
 }
 
-/// Phase 3: coalesce consecutive MouseMove events using a delta threshold.
-/// Only keeps the *latest* position before a significant event (Click/Key).
+/// Ramer-Douglas-Peucker (RDP) polyline simplification for mouse movement sequences.
+/// Reduces a 2D trajectory of `MouseMove` events to essential control/turn points.
+fn rdp_simplify_moves(moves: &[RawEvent], epsilon: f64) -> Vec<RawEvent> {
+    if moves.len() <= 2 {
+        return moves.to_vec();
+    }
+
+    let extract_pt = |ev: &RawEvent| -> (f64, f64) {
+        match ev {
+            RawEvent::MouseMove { x, y, .. } => (*x as f64, *y as f64),
+            _ => (0.0, 0.0),
+        }
+    };
+
+    let p_start = extract_pt(&moves[0]);
+    let p_end = extract_pt(&moves[moves.len() - 1]);
+
+    let mut max_dist = 0.0;
+    let mut index = 0;
+
+    let dx = p_end.0 - p_start.0;
+    let dy = p_end.1 - p_start.1;
+    let line_len_sq = dx * dx + dy * dy;
+
+    for i in 1..moves.len() - 1 {
+        let p = extract_pt(&moves[i]);
+        let dist = if line_len_sq == 0.0 {
+            ((p.0 - p_start.0).powi(2) + (p.1 - p_start.1).powi(2)).sqrt()
+        } else {
+            let num = ((p_end.1 - p_start.1) * p.0 - (p_end.0 - p_start.0) * p.1 + p_end.0 * p_start.1 - p_end.1 * p_start.0).abs();
+            num / line_len_sq.sqrt()
+        };
+
+        if dist > max_dist {
+            max_dist = dist;
+            index = i;
+        }
+    }
+
+    if max_dist > epsilon {
+        let mut rec1 = rdp_simplify_moves(&moves[0..=index], epsilon);
+        let rec2 = rdp_simplify_moves(&moves[index..], epsilon);
+        rec1.pop(); // remove duplicate split point
+        rec1.extend(rec2);
+        rec1
+    } else {
+        vec![moves[0].clone(), moves[moves.len() - 1].clone()]
+    }
+}
+
+/// Phase 3: Smart Mouse Trajectory Coalescing.
+/// - Hover movements (Mouse Up): Strips intermediate hover steps, keeping ONLY
+///   the final destination `MouseMove` before a click/key action.
+/// - Drag movements (Mouse Down): Applies Ramer-Douglas-Peucker (RDP) trajectory
+///   simplification to maintain smooth curves with minimal control points.
 fn coalesce_mouse_moves(events: Vec<RawEvent>) -> Vec<RawEvent> {
     use RawEvent::*;
-    let mut out: Vec<RawEvent> = Vec::new();
-    let mut last_kept_pos: Option<(i32, i32)> = None;
+    let mut out: Vec<RawEvent> = Vec::with_capacity(events.len());
+    let mut i = 0;
+    let mut is_mouse_down = false;
 
-    for ev in events {
-        match &ev {
-            MouseMove { x, y, .. } => {
-                let should_emit = match last_kept_pos {
-                    None => true,
-                    Some((px, py)) => {
-                        (x - px).abs() >= MOUSE_DELTA_THRESHOLD_PX
-                            || (y - py).abs() >= MOUSE_DELTA_THRESHOLD_PX
+    while i < events.len() {
+        match &events[i] {
+            MouseDown { .. } => {
+                is_mouse_down = true;
+                out.push(events[i].clone());
+                i += 1;
+            }
+            MouseUp { .. } => {
+                is_mouse_down = false;
+                out.push(events[i].clone());
+                i += 1;
+            }
+            MouseMove { .. } => {
+                let start_idx = i;
+                while i < events.len() && matches!(events[i], MouseMove { .. }) {
+                    i += 1;
+                }
+                let move_block = &events[start_idx..i];
+
+                if is_mouse_down {
+                    // Dragging: simplify path using RDP curve simplification
+                    let simplified = rdp_simplify_moves(move_block, 4.0);
+                    out.extend(simplified);
+                } else {
+                    // Hovering: keep only the final destination point before action/click
+                    if let Some(last_move) = move_block.last() {
+                        out.push(last_move.clone());
                     }
-                };
-                if should_emit {
-                    out.push(ev.clone());
-                    last_kept_pos = Some((*x, *y));
                 }
             }
             _ => {
-                // Significant event → before it, also keep the most recent mouse position
-                // (so a Move that doesn't cross threshold but is right before a click still matters).
-                if let Some((px, py)) = last_kept_pos {
-                    if !out
-                        .iter()
-                        .any(|e| matches!(e, MouseMove { x, y, .. } if *x == px && *y == py))
-                    {
-                        // Don't push — last_kept_pos already represents the most-recent retained.
-                        // (We assume the kept pos was already pushed as part of coalescing loop.)
-                        let _ = py;
-                    }
-                }
-                out.push(ev.clone());
-                // Don't reset last_kept_pos — it tracks *cursor position* not "since last emit".
-                // Reset means: forget that we ever kept one, since next Move uses latest position.
-                last_kept_pos = None;
+                out.push(events[i].clone());
+                i += 1;
             }
         }
     }
@@ -335,15 +387,14 @@ mod tests {
     }
 
     #[test]
-    fn coalesce_mouse_moves_threshold() {
+    fn coalesce_hover_mouse_moves_keeps_destination_only() {
         let events = vec![
             ev_mouse_move(100, 100, 0),
             ev_mouse_move(102, 100, 16),
             ev_mouse_move(105, 100, 32),
-            ev_mouse_move(150, 100, 48), // crosses threshold
+            ev_mouse_move(150, 100, 48), // final destination
         ];
         let out = coalesce_mouse_moves(events);
-        // Should keep first (100,100) and (150,100), drop in-between.
         let moves: Vec<_> = out
             .iter()
             .filter_map(|e| match e {
@@ -351,9 +402,36 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(moves.len(), 2);
+        // Hover mode strips intermediate steps, keeping only final destination (150, 100).
+        assert_eq!(moves.len(), 1);
+        assert_eq!(moves[0], (150, 100));
+    }
+
+    #[test]
+    fn coalesce_drag_mouse_moves_applies_rdp_simplification() {
+        let events = vec![
+            ev_mouse_down(MouseButton::Left, 0),
+            ev_mouse_move(100, 100, 10),
+            ev_mouse_move(200, 100, 20), // straight line point (dropped by RDP)
+            ev_mouse_move(300, 100, 30), // straight line point (dropped by RDP)
+            ev_mouse_move(400, 300, 40), // corner apex (kept by RDP)
+            ev_mouse_move(500, 300, 50), // end point (kept by RDP)
+            ev_mouse_up(MouseButton::Left, 60),
+        ];
+        let out = coalesce_mouse_moves(events);
+        let moves: Vec<_> = out
+            .iter()
+            .filter_map(|e| match e {
+                RawEvent::MouseMove { x, y, .. } => Some((*x, *y)),
+                _ => None,
+            })
+            .collect();
+        // RDP reduces straight line points while keeping corner apexes (100,100), (300,100), (400,300), (500,300).
+        assert_eq!(moves.len(), 4);
         assert_eq!(moves[0], (100, 100));
-        assert_eq!(moves[1], (150, 100));
+        assert_eq!(moves[1], (300, 100));
+        assert_eq!(moves[2], (400, 300));
+        assert_eq!(moves[3], (500, 300));
     }
 
     #[test]
