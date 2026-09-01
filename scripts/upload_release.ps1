@@ -32,14 +32,28 @@ $headers = @{
     "X-GitHub-Api-Version" = "2022-11-28"
 }
 
-# ── 1. Отримати release_id по тегу ────────────────────────────────────────
+# ── 1. Отримати або створити release_id по тегу ───────────────────────────
 Write-Host "`n[1/4] Шукаємо реліз $TAG ..." -ForegroundColor Cyan
+$release = $null
 try {
     $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$OWNER/$REPO/releases/tags/$TAG" `
                -Headers $headers -Method Get
 } catch {
-    Write-Host "[ERROR] Реліз $TAG не знайдено або токен без прав: $_" -ForegroundColor Red
-    exit 1
+    Write-Host "  → Реліз $TAG ще не створений. Створюємо..." -ForegroundColor Yellow
+    $createBody = @{
+        tag_name   = $TAG
+        name       = "NanoClick $TAG"
+        body       = "Release $TAG - Macro recording fixes, Win32 zero-lock hook optimization, mouse move throttling & 14 new Rust unit tests."
+        draft      = $false
+        prerelease = $false
+    } | ConvertTo-Json
+    try {
+        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$OWNER/$REPO/releases" `
+                   -Headers $headers -Method Post -Body $createBody
+    } catch {
+        Write-Host "[ERROR] Не вдалося створити реліз ${TAG}: $($_.Exception.Message)" -ForegroundColor Red
+        exit 1
+    }
 }
 
 $releaseId = $release.id
