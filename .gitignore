@@ -9,6 +9,7 @@ node_modules/
 
 # ── Documentation (не публікуємо) ───────────────
 docs/
+NEXT_STEPS_ROADMAP.md
 *.md
 !README.md
 

@@ -2,9 +2,9 @@
 
 **A fast, modern Windows desktop automation tool** — autoclicker, macro recorder, and visual macro editor in one lightweight app.
 
-Built with **Tauri 2 + Rust + vanilla JS**. No Electron, no bundler, no bloat: the production installer is **~3.4 MB**.
+Built with **Tauri 2 + Rust + vanilla JS**. No Electron, no bundler, no bloat: the production installer is **~3.5 MB**.
 
-![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue) ![Tests](https://img.shields.io/badge/tests-66%2F66-brightgreen) ![Tauri](https://img.shields.io/badge/Tauri-2.x-FFC131) ![Rust](https://img.shields.io/badge/rust-stable--msvc-DEA584)
+![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue) ![Tests](https://img.shields.io/badge/tests-96%2F96-brightgreen) ![Tauri](https://img.shields.io/badge/Tauri-2.x-FFC131) ![Rust](https://img.shields.io/badge/rust-stable--msvc-DEA584)
 
 ---
 
@@ -14,26 +14,28 @@ Built with **Tauri 2 + Rust + vanilla JS**. No Electron, no bundler, no bloat: t
 - **Single / Double / Hold** click modes with configurable press & pause durations
 - **Human jitter** — randomize timing (±0–30%) *and* cursor position (±0–30 px) so clicks look natural
 - **Position picker** — bind clicks to a fixed screen point or follow the cursor
-- **Precise CPS control** (0.1–100+) with live hotkey speed adjustment
+- **Precise CPS control** (0.1–100+) with live hotkey speed adjustment and real-time performance telemetry
 
-### 🎬 Macro Recorder & Visual Editor
-- **Two ways to create a macro:** 🔴 record real input, or ＋ build it from blocks manually
-- **Smart Normalizer** (default-on) — collapses thousands of raw mouse-move events into clean actions
-- **⚡ Optimize** — one-click cleanup at three aggressiveness levels (Subtle / Balanced / Aggressive)
+### 🎬 Smart Macro Recorder & Visual Editor
+- **Two ways to create a macro:** 🔴 record real input in real-time, or ＋ build it from blocks manually
+- **Ramer-Douglas-Peucker (RDP) Trajectory Simplification** — advanced curve reduction algorithm that compresses recorded drag mouse paths by 80–95% while keeping exact curvature
+- **Smart Hover Path Elimination** — strips redundant intermediate hover movements, keeping only the precise target position before clicks/key actions
+- **⚡ Optimize** — one-click macro cleanup at three aggressiveness levels (Subtle / Balanced / Aggressive)
 - **Visual editor** — inline edit, rename, drag-to-reorder, context menu (Run from here / Step / Disable / Duplicate)
 
-### 🧠 Control Flow & Smart Hotkeys (v1.2.0)
-- **Smart Key Memory** — TTL-based keypress memory (configurable 100–3000ms) for effortless recording of complex hotkeys and modifier combinations (Ctrl, Alt, Shift)
+### 🧠 Control Flow & Smart Hotkeys
+- **Zero-Lock Win32 Hooks** — thread-local event listeners for sub-millisecond hotkey response with zero interface stuttering
+- **Smart Key Memory** — TTL-based keypress memory (configurable 100–3000ms) for effortless recording of complex hotkeys and modifier combinations (Ctrl, Alt, Shift, Win)
 - **Multi-point Sequence Editor** — high-performance Canvas editor with O(1) transform caching and snap-to-grid
-- `Repeat`, `If/Else` with pixel-color conditions, variables (`SetVar`/`GetVar`), and nested macro calls
-- Presets: save, import/export, and migrate your full engine configuration
+- **Advanced Automation Primitives** — `Repeat`, `If/Else` with pixel-color conditions, variables (`SetVar`/`GetVar`), and nested macro calls
+- **Presets & Statistics** — save, import/export full engine presets and persist total click analytics across application updates
 
 ### 🛡️ Safety & Convenience
-- **Work Mode** — suspends global hotkeys while you're using other apps
-- **Auto-pause on navigation**, emergency stop (`Escape`), start-delay & auto-stop timers
+- **Work Mode** — suspends global hotkeys while you're using other applications
+- **Auto-pause on navigation**, emergency stop (<kbd>Escape</kbd>), start-delay & auto-stop timers
 - **Floating HUD** overlay for real-time click tracking
-- **Windows autostart + system tray**
-- 🎨 **6 themes**: Dark Cyberpunk, Neon Grass, Dark Slate, Midnight Blue, Dracula Crimson, Amethyst Purple
+- **Windows autostart + system tray** integration
+- 🎨 **6 Themes**: Dark Cyberpunk, Neon Grass, Dark Slate, Midnight Blue, Dracula Crimson, Amethyst Purple
 
 ---
 
@@ -55,15 +57,17 @@ All hotkeys are handled by an event-driven `WH_KEYBOARD_LL` listener in Rust —
 
 ## 📦 Install
 
-Download the latest installer from [Releases](../../releases/tag/v1.2.0):
+Download the latest release installer from [Releases](../../releases/tag/v1.2.1):
 
 ```
-NanoClick_1.2.0_x64-setup.exe   (~3.4 MB)
+NanoClick_1.2.1_x64-setup.exe   (~3.5 MB)
 ```
 
 - Installs per-user (no admin rights needed)
 - Uses the system WebView2 runtime; downloads it automatically if missing
 - Updates are delivered through the built-in updater (signed artifacts)
+
+---
 
 ## 🛠️ Build from Source
 
@@ -86,11 +90,17 @@ cargo tauri build --bundles nsis
 
 ```bash
 cd src-tauri
-cargo test --release
-# → 66 passed; 0 failed
+cargo test --lib
+# → 96 passed; 0 failed
 ```
 
-The suite includes physical integration tests that inject real keyboard events via `SendInput` and verify them against a low-level hook.
+The test suite covers:
+- **Win32 Hook routing** & physical input matching (`SendInput`, Numpad, Mouse X-Buttons)
+- **Normalizer 5-phase pipeline** & RDP mouse trajectory simplification
+- **Recorder handle idempotency** & thread safety
+- **Hotkey debouncing** & config persistence
+
+---
 
 ## 🏗️ Architecture
 
@@ -112,7 +122,10 @@ The suite includes physical integration tests that inject real keyboard events v
 
 - **All timing runs on a Rust worker thread** — UI never drives the click loop
 - **Global hotkeys** use an event-driven channel (hook → mpsc → matcher), not polling
+- **Zero-Lock Hooks** — `thread_local!` state avoids mutex contention on high-frequency input
 - **Updater**: artifacts signed with a minisign keypair; verification is mandatory and built into Tauri's updater plugin
+
+---
 
 ## 📁 Project Structure
 
@@ -122,15 +135,17 @@ nanoclick/
 ├── src-tauri/
 │   ├── src/
 │   │   ├── core/         # Action engine, executor, conditions
-│   │   ├── recorder/     # Raw event capture, Smart Normalizer, optimizer
+│   │   ├── recorder/     # Raw event capture, Smart Normalizer (RDP), optimizer
 │   │   ├── scheduler.rs  # Click loop, CPS, timers, stop events
-│   │   ├── persistence/  # Config, macros, presets (+ migrations)
+│   │   ├── persistence/  # Config, macros, presets (+ migrations, stats)
 │   │   ├── platform/     # windows/ (hooks, input) + backend traits
 │   │   └── lib.rs        # Tauri commands, setup, logging
 │   ├── capabilities/     # Tauri 2 permission manifests
 │   └── tauri.conf.json
-└── scripts/              # sign-windows.ps1 (code signing, cert required)
+└── scripts/              # upload_release.ps1 (automated release publishing)
 ```
+
+---
 
 ## 🔒 Signing & Updates
 
@@ -149,6 +164,8 @@ cargo tauri build --bundles nsis
 ```
 
 > ⚠️ Never lose the private updater key — installations already shipped trust updates only for the key they were built with.
+
+---
 
 ## 📄 License
 
