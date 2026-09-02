@@ -1,13 +1,13 @@
 # ── Build artifacts ─────────────────────────────
 target/
 
-# ── Node (не використовується, але на всяк випадок) ──
+# ── Node dependencies (unused, fallback) ────────
 node_modules/
 
 # ── Logs ────────────────────────────────────────
 *.log
 
-# ── Documentation (не публікуємо) ───────────────
+# ── Internal documentation (do not publish) ─────
 docs/
 NEXT_STEPS_ROADMAP.md
 *.md
@@ -16,7 +16,7 @@ NEXT_STEPS_ROADMAP.md
 # ── Misc assets ─────────────────────────────────
 /1.png
 
-# ── Secrets / keys / scripts (ніколи не комітити!) ────────
+# ── Secrets / keys / scripts (never commit!) ────
 *.key
 *.key.pub
 .env
