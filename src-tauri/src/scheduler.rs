@@ -396,7 +396,7 @@ impl ClickScheduler {
 
     pub fn adjust_cps(&self, delta: f64, app_handle: Option<&AppHandle>) -> f64 {
         let cur = f64::from_bits(self.cps_raw.load(Ordering::Relaxed));
-        let next = (cur + delta).clamp(1.0, 100.0);
+        let next = (cur + delta).clamp(1.0, 160.0);
         self.cps_raw.store(next.to_bits(), Ordering::Relaxed);
         if let Some(app) = app_handle {
             let _ = app.emit("global-cps-change", next);
@@ -737,7 +737,11 @@ impl ClickScheduler {
                 }
 
                 // ── REGULAR / DOUBLE CLICK LOGIC ─────────────────────────
-                let cps = f64::from_bits(cps_raw.load(Ordering::Relaxed)).max(0.1);
+                // clamp(1, 100): the UI enforces this range, but if an
+                // out-of-range value was persisted (e.g. 1000.0 from a
+                // previous bug), the loop would spin at OS-sleep granularity
+                // (~150 CPS effective) instead of the requested rate.
+                let cps = f64::from_bits(cps_raw.load(Ordering::Relaxed)).clamp(1.0, 160.0);
                 let random_pct = f64::from_bits(random_pct_raw.load(Ordering::Relaxed)).max(0.0);
 
                 let base_ns = (1_000_000_000.0 / cps) as i64;

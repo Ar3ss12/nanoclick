@@ -45,7 +45,7 @@ pub fn mouse_up(button: MouseButton) {
 /// Single click (press + release) of a button.
 pub fn mouse_click(button: MouseButton) {
     mouse_down(button);
-    std::thread::sleep(std::time::Duration::from_millis(5));
+    std::thread::sleep(std::time::Duration::from_millis(1));
     mouse_up(button);
 }
 

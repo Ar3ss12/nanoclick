@@ -869,7 +869,7 @@ async function saveConfig() {
   const op = stage("SaveConfig");
   try {
     await op.run("collect-input", () => {
-      currentConfig.engine.target_cps = parseFloat(cpsInput?.value) || 29.0;
+      currentConfig.engine.target_cps = Math.max(1, Math.min(160, parseFloat(cpsInput?.value) || 29.0));
       currentConfig.engine.jitter_percent = parseFloat(randomInput?.value) || 0.0;
       currentConfig.engine.click_limit = safeInt(limitInput?.value, 0);
       currentConfig.engine.gui_lock_ms = safeInt(guiLockDelayInput?.value, 1500) || 1500;
@@ -940,7 +940,7 @@ if (limitRange) limitRange.addEventListener("input", (e) => {
 // live counter, then persists via saveConfig(). Mirrors limitRange pattern.
 if (cpsRange) cpsRange.addEventListener("input", (e) => {
   const val = parseFloat(e.target.value);
-  const safeVal = isNaN(val) ? 29 : Math.max(1, Math.min(100, val));
+  const safeVal = isNaN(val) ? 29 : Math.max(1, Math.min(160, val));
   if (cpsInput) cpsInput.value = safeVal;
   if (displayCps) displayCps.textContent = safeVal.toFixed(1);
   if (currentConfig?.engine) currentConfig.engine.target_cps = safeVal;
@@ -948,10 +948,10 @@ if (cpsRange) cpsRange.addEventListener("input", (e) => {
 });
 if (cpsInput) cpsInput.addEventListener("input", (e) => {
   const val = parseFloat(e.target.value);
-  const safeVal = isNaN(val) ? 29 : Math.max(1, Math.min(100, val));
+  const safeVal = isNaN(val) ? 29 : Math.max(1, Math.min(160, val));
   if (cpsRange) {
     // expand slider max if user types a value above current max
-    const currentMax = parseFloat(cpsRange.max) || 100;
+    const currentMax = parseFloat(cpsRange.max) || 160;
     if (safeVal > currentMax) cpsRange.max = safeVal;
     cpsRange.value = safeVal;
   }
@@ -2219,7 +2219,7 @@ function setupPresetListeners() {
             name: String(p.name).trim(),
             description: String(p.description || `${p.target_cps} CPS`),
             icon: p.icon || "🎯",
-            target_cps: Math.max(1, Math.min(100, Number(p.target_cps))),
+            target_cps: Math.max(1, Math.min(160, Number(p.target_cps))),
             jitter_percent: Math.max(0, Math.min(30, Number(p.jitter_percent) || 0)),
             click_limit: Math.max(0, parseInt(p.click_limit, 10) || 0),
             button: p.button || "left",
