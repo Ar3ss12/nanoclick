@@ -517,6 +517,7 @@ document.querySelectorAll(".nav-item").forEach(navBtn => {
     const target = document.getElementById(viewId);
     if (target) {
       target.classList.add("active");
+      if (viewId === "viewStatistics") renderStats();
       dbg("Nav success — view activated:", viewId);
     } else {
       dbg("Nav ERROR — target view element not found:", viewId);
@@ -3557,8 +3558,11 @@ const _stats = {
   liveCpsHistory: [], // Max 60 rolling points
 };
 
+let _lastCpsRecordMs = 0;
 function recordCpsHistoryPoint(cps, active) {
   const now = Date.now();
+  if (now - _lastCpsRecordMs < 1000 && _stats.liveCpsHistory.length > 0) return;
+  _lastCpsRecordMs = now;
   _stats.liveCpsHistory.push({ time: now, cps: active ? (cps || 0) : 0 });
   if (_stats.liveCpsHistory.length > 60) {
     _stats.liveCpsHistory.shift();
@@ -3595,6 +3599,14 @@ function fmtDuration(ms) {
 }
 
 function renderStats() {
+  const viewStats = document.getElementById("viewStatistics");
+  if (!viewStats || !viewStats.classList.contains("active")) return;
+
+  const fmtNum = (n) => {
+    const v = Number(n) || 0;
+    return v > 999 ? v.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",") : String(v);
+  };
+
   const sc = document.getElementById("statSessionClicks");
   const at = document.getElementById("statActiveTime");
   const ac = document.getElementById("statAvgCps");
@@ -3604,16 +3616,16 @@ function renderStats() {
   const ts = document.getElementById("statTotalSessions");
   const pa = document.getElementById("statPresetsApplied");
 
-  if (sc) sc.textContent = _stats.sessionClicks.toLocaleString();
+  if (sc) sc.textContent = fmtNum(_stats.sessionClicks);
   if (at) at.textContent = fmtDuration(_stats.sessionActiveMs);
   if (ac) ac.textContent = _stats.sessionActiveMs > 500 ? (_stats.sessionClicks / (_stats.sessionActiveMs / 1000)).toFixed(1) : "—";
 
   const st = ensureStatsConfig();
-  if (tc) tc.textContent = Number(st.total_clicks || 0).toLocaleString();
-  if (ta) ta.textContent = fmtDuration(Number(st.total_active_ms || 0));
+  if (tc) tc.textContent = fmtNum(st.total_clicks);
+  if (ta) ta.textContent = fmtDuration(st.total_active_ms);
   if (mc) mc.textContent = (Number(st.max_cps || 0)).toFixed(1);
-  if (ts) ts.textContent = Number(st.total_sessions || 0).toLocaleString();
-  if (pa) pa.textContent = Number(st.presets_applied || 0).toLocaleString();
+  if (ts) ts.textContent = fmtNum(st.total_sessions);
+  if (pa) pa.textContent = fmtNum(st.presets_applied);
 
   drawStatsChart();
 }
