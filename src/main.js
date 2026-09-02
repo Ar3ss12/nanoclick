@@ -43,6 +43,7 @@ const logBuffer = [];
 let isFlushingLogs = false;
 
 function enqueueLog(level, args) {
+  if (!DEBUG_UI) return;
   if (logBuffer.length > 1000) logBuffer.shift();
   try {
     const msg = args.map(a => {
@@ -55,7 +56,7 @@ function enqueueLog(level, args) {
 }
 
 function flushLogBuffer() {
-  if (isFlushingLogs || logBuffer.length === 0) return;
+  if (!DEBUG_UI || isFlushingLogs || logBuffer.length === 0) return;
   isFlushingLogs = true;
   const batch = logBuffer.splice(0, 40);
   try {
@@ -105,9 +106,9 @@ function getRawListen() {
       || null;
 }
 
-console.log = (...args) => { origLog.apply(console, args); enqueueLog("info", args); };
-console.error = (...args) => { origError.apply(console, args); enqueueLog("error", args); };
-console.warn = (...args) => { origWarn.apply(console, args); enqueueLog("warn", args); };
+console.log = (...args) => { origLog.apply(console, args); if (DEBUG_UI) enqueueLog("info", args); };
+console.error = (...args) => { origError.apply(console, args); if (DEBUG_UI) enqueueLog("error", args); };
+console.warn = (...args) => { origWarn.apply(console, args); if (DEBUG_UI) enqueueLog("warn", args); };
 
 window.addEventListener("error", (e) => {
   const msg = `[uncaught-error] ${e.message || "Unknown error"} at ${(e.filename || "main.js")}:${(e.lineno || 0)}:${(e.colno || 0)}`;
@@ -2605,7 +2606,7 @@ listenSilent("status-update", (event) => {
     setRunningState(active, status_text);
     if (clickCounter) {
       const n = clicks_done || 0;
-      clickCounter.textContent = n.toLocaleString().padStart(11, "0").replace(/,/g, ",");
+      clickCounter.textContent = n > 999 ? n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",") : String(n);
     }
 
     // 2. Statistics calculation & disk save batching

@@ -14,7 +14,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   listen("hud-clicks", (event) => {
     const n = Number(event.payload) || 0;
-    if (el) el.textContent = n.toLocaleString();
+    if (el) el.textContent = n > 999 ? n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",") : String(n);
   });
 
   listen("hud-hide", () => {

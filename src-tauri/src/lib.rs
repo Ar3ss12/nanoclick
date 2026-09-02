@@ -324,7 +324,7 @@ pub fn run() {
     if std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").is_err() {
         std::env::set_var(
             "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-            "--js-flags=\"--max-old-space-size=64\" \
+            "--js-flags=\"--max-old-space-size=64 --gc-global --optimize-for-size\" \
              --in-process-gpu \
              --renderer-process-limit=1 \
              --disable-features=Translate,MediaRouter,OptimizationHints,ProcessPriorityPolicy \
