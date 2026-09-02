@@ -908,7 +908,7 @@ if (hudCheckbox) currentConfig.ui.show_hud = hudCheckbox.checked;
 
       if (!currentConfig.ui) currentConfig.ui = {};
       if (startMinimizedCheckbox) currentConfig.ui.start_minimized = startMinimizedCheckbox.checked;
-      if (autostartCheckbox) currentConfig.ui.autostart = autostartCheckbox.checked;
+      if (autostartCheckbox) currentConfig.ui.autostaк1rt = autostartCheckbox.checked;
       if (minimizeToTrayCheckbox) currentConfig.ui.minimize_to_tray = minimizeToTrayCheckbox.checked;
       if (notificationsCheckbox) currentConfig.ui.show_notifications = notificationsCheckbox.checked;
       if (pauseFocusLossCheckbox) currentConfig.ui.pause_on_focus_loss = pauseFocusLossCheckbox.checked;
@@ -940,25 +940,35 @@ if (limitRange) limitRange.addEventListener("input", (e) => {
 // live counter, then persists via saveConfig(). Mirrors limitRange pattern.
 if (cpsRange) cpsRange.addEventListener("input", (e) => {
   const val = parseFloat(e.target.value);
-  const safeVal = isNaN(val) ? 29 : Math.max(1, Math.min(160, val));
+  const safeVal = isNaN(val) ? 29 : Math.max(0.1, Math.min(160, val));
   if (cpsInput) cpsInput.value = safeVal;
   if (displayCps) displayCps.textContent = safeVal.toFixed(1);
   if (currentConfig?.engine) currentConfig.engine.target_cps = safeVal;
   saveConfigThrottled();
 });
-if (cpsInput) cpsInput.addEventListener("input", (e) => {
-  const val = parseFloat(e.target.value);
-  const safeVal = isNaN(val) ? 29 : Math.max(1, Math.min(160, val));
-  if (cpsRange) {
-    // expand slider max if user types a value above current max
-    const currentMax = parseFloat(cpsRange.max) || 160;
-    if (safeVal > currentMax) cpsRange.max = safeVal;
-    cpsRange.value = safeVal;
-  }
-  if (displayCps) displayCps.textContent = safeVal.toFixed(1);
-  if (currentConfig?.engine) currentConfig.engine.target_cps = safeVal;
-  saveConfigThrottled();
-});
+if (cpsInput) {
+  cpsInput.addEventListener("input", (e) => {
+    let val = parseFloat(e.target.value);
+    if (!isNaN(val) && val > 160) {
+      val = 160;
+      e.target.value = 160;
+    }
+    const safeVal = isNaN(val) ? 29 : Math.max(0.1, Math.min(160, val));
+    if (cpsRange) cpsRange.value = safeVal;
+    if (displayCps) displayCps.textContent = safeVal.toFixed(1);
+    if (currentConfig?.engine) currentConfig.engine.target_cps = safeVal;
+    saveConfigThrottled();
+  });
+  cpsInput.addEventListener("change", (e) => {
+    const val = parseFloat(e.target.value);
+    const safeVal = isNaN(val) ? 29 : Math.max(0.1, Math.min(160, val));
+    e.target.value = safeVal;
+    if (cpsRange) cpsRange.value = safeVal;
+    if (displayCps) displayCps.textContent = safeVal.toFixed(1);
+    if (currentConfig?.engine) currentConfig.engine.target_cps = safeVal;
+    saveConfig();
+  });
+}
 
 // ── Jitter slider + number input (Dashboard) ─────────────────
 if (randomRange) randomRange.addEventListener("input", (e) => {
