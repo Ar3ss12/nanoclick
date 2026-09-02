@@ -20,3 +20,5 @@ NEXT_STEPS_ROADMAP.md
 *.key
 *.key.pub
 .env
+*.env
+scripts/.env

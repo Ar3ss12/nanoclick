@@ -18,7 +18,20 @@ $FILES   = @(
     "$BUNDLE\latest.json"
 )
 
-# ── Запит токена якщо не переданий ────────────────────────────────────────
+# ── Запит токена або зчитування з .env якщо не переданий ───────────────────
+if (-not $Token) {
+    foreach ($envPath in @("$PSScriptRoot\.env", "$PSScriptRoot\..\.env")) {
+        if (Test-Path $envPath) {
+            Get-Content $envPath | ForEach-Object {
+                if ($_ -match '^\s*GITHUB_TOKEN\s*=\s*(.+)$') {
+                    $Token = $matches[1].Trim()
+                }
+            }
+            if ($Token) { break }
+        }
+    }
+}
+
 if (-not $Token) {
     $secureToken = Read-Host -Prompt "GitHub Personal Access Token (repo scope)" -AsSecureString
     $bstr  = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureToken)
