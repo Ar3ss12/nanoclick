@@ -126,87 +126,94 @@ const invoke = async function(cmd, args) {
     const rawInvoke = getRawInvoke();
     return rawInvoke ? rawInvoke("debug_log", args) : Promise.resolve();
   }
-  const start = performance.now();
-  const argSummary = args
-    ? Object.keys(args).reduce((acc, k) => {
-        const v = args[k];
-        acc[k] = Array.isArray(v) ? `[Array:${v.length}]`
-                : typeof v === "object" && v !== null ? `{${Object.keys(v).length} keys}`
-                : (typeof v === "string" && v.length > 30) ? `"${v.slice(0, 30)}..."` : v;
-        return acc;
-      }, {})
-    : {};
-  logCall("→IPC", `${cmd}`, argSummary);
-  try {
-    const rawInvoke = getRawInvoke();
-    if (!rawInvoke) {
-      throw new Error("Tauri invoke not available (window.__TAURI__ missing)");
-    }
-    const result = await rawInvoke(cmd, args);
-    const ms = (performance.now() - start).toFixed(1);
-    const resultSummary = Array.isArray(result) ? `[Array:${result.length}]`
-                        : typeof result === "object" && result !== null ? `{${Object.keys(result).length} keys}`
-                        : String(result).slice(0, 60);
-    logCall("←IPC", `${cmd} ✓ ${ms}ms`, resultSummary);
-    return result;
-  } catch (err) {
-    const ms = (performance.now() - start).toFixed(1);
-    logCall("✗IPC", `${cmd} FAILED after ${ms}ms — ${err?.message ?? err}`);
-    throw err;
+  const rawInvoke = getRawInvoke();
+  if (!rawInvoke) {
+    throw new Error("Tauri invoke not available (window.__TAURI__ missing)");
   }
+
+  if (DEBUG_UI) {
+    const start = performance.now();
+    const argSummary = args
+      ? Object.keys(args).reduce((acc, k) => {
+          const v = args[k];
+          acc[k] = Array.isArray(v) ? `[Array:${v.length}]`
+                  : typeof v === "object" && v !== null ? `{${Object.keys(v).length} keys}`
+                  : (typeof v === "string" && v.length > 30) ? `"${v.slice(0, 30)}..."` : v;
+          return acc;
+        }, {})
+      : {};
+    logCall("→IPC", `${cmd}`, argSummary);
+    try {
+      const result = await rawInvoke(cmd, args);
+      const ms = (performance.now() - start).toFixed(1);
+      const resultSummary = Array.isArray(result) ? `[Array:${result.length}]`
+                          : typeof result === "object" && result !== null ? `{${Object.keys(result).length} keys}`
+                          : String(result).slice(0, 60);
+      logCall("←IPC", `${cmd} ✓ ${ms}ms`, resultSummary);
+      return result;
+    } catch (err) {
+      const ms = (performance.now() - start).toFixed(1);
+      logCall("✗IPC", `${cmd} FAILED after ${ms}ms — ${err?.message ?? err}`);
+      throw err;
+    }
+  }
+
+  return rawInvoke(cmd, args);
 };
 window.invoke = invoke;
 
 // ── listen wrapper ──────────────────────────────────────
 const listen = async function(eventName, handler) {
-  logCall("→SUB", `event="${eventName}"`);
+  if (DEBUG_UI) logCall("→SUB", `event="${eventName}"`);
   try {
     const rawListen = getRawListen();
     if (!rawListen) {
-      logCall("✗SUB", `event="${eventName}" subscribe skipped — window.__TAURI__.event missing`);
+      if (DEBUG_UI) logCall("✗SUB", `event="${eventName}" subscribe skipped — window.__TAURI__.event missing`);
       return () => {};
     }
     const unlisten = await rawListen(eventName, (event) => {
-      const payloadKeys = event?.payload && typeof event.payload === "object"
-        ? Object.keys(event.payload).join(",") : typeof event?.payload;
-      logCall("←EVT", `event="${eventName}"`, payloadKeys);
+      if (DEBUG_UI) {
+        const payloadKeys = event?.payload && typeof event.payload === "object"
+          ? Object.keys(event.payload).join(",") : typeof event?.payload;
+        logCall("←EVT", `event="${eventName}"`, payloadKeys);
+      }
       try {
         return handler(event);
       } catch (err) {
-        logCall("✗EVT", `event="${eventName}" handler threw — ${err?.message ?? err}`);
+        if (DEBUG_UI) logCall("✗EVT", `event="${eventName}" handler threw — ${err?.message ?? err}`);
         throw err;
       }
     });
-    logCall("✓SUB", `event="${eventName}" registered (unlisten fn: ${typeof unlisten})`);
+    if (DEBUG_UI) logCall("✓SUB", `event="${eventName}" registered (unlisten fn: ${typeof unlisten})`);
     return unlisten;
   } catch (err) {
-    logCall("✗SUB", `event="${eventName}" subscribe failed — ${err?.message ?? err}`);
-    return () => {}; // never throw — silent noop is the original behavior
+    if (DEBUG_UI) logCall("✗SUB", `event="${eventName}" subscribe failed — ${err?.message ?? err}`);
+    return () => {};
   }
 };
 window.listen = listen;
 
 // Silent variant — no per-event payload log, only sub start/result.
 const listenSilent = async function(eventName, handler) {
-  logCall("→SUB•", `event="${eventName}" (silent — handler will log)`);
+  if (DEBUG_UI) logCall("→SUB•", `event="${eventName}" (silent — handler will log)`);
   try {
     const rawListen = getRawListen();
     if (!rawListen) {
-      logCall("✗SUB", `event="${eventName}" subscribe skipped — window.__TAURI__.event missing`);
+      if (DEBUG_UI) logCall("✗SUB", `event="${eventName}" subscribe skipped — window.__TAURI__.event missing`);
       return () => {};
     }
     const unlisten = await rawListen(eventName, (event) => {
       try {
         return handler(event);
       } catch (err) {
-        logCall("✗EVT", `event="${eventName}" handler threw — ${err?.message ?? err}`);
+        if (DEBUG_UI) logCall("✗EVT", `event="${eventName}" handler threw — ${err?.message ?? err}`);
         throw err;
       }
     });
-    logCall("✓SUB", `event="${eventName}" registered (silent, unlisten fn: ${typeof unlisten})`);
+    if (DEBUG_UI) logCall("✓SUB", `event="${eventName}" registered (silent, unlisten fn: ${typeof unlisten})`);
     return unlisten;
   } catch (err) {
-    logCall("✗SUB", `event="${eventName}" subscribe failed — ${err?.message ?? err}`);
+    if (DEBUG_UI) logCall("✗SUB", `event="${eventName}" subscribe failed — ${err?.message ?? err}`);
     return () => {};
   }
 };
@@ -526,8 +533,11 @@ document.querySelectorAll(".nav-item").forEach(navBtn => {
 });
 
 // ── MODE DISPLAY ────────────────────────────────────────────
+let _lastSetMode = null;
 function setModeDisplay(mode) {
   currentConfig.active_mode = mode;
+  if (mode === _lastSetMode) return;
+  _lastSetMode = mode;
   const switchKey = currentConfig.hotkeys ? currentConfig.hotkeys.mode_switch : "Ctrl+Alt+M";
 
   if (modeToggleBtn) {
@@ -2532,8 +2542,19 @@ if (onboardingBtn) {
 }
 
 // ── STATE DISPLAY ───────────────────────────────────────────
+let _lastRunningStateActive = null;
+let _lastRunningStateStatusText = null;
+let _lastRunningStateLocked = null;
+
 function setRunningState(active, statusText = "") {
   isRunning = active;
+  if (active === _lastRunningStateActive && statusText === _lastRunningStateStatusText && isButtonLocked === _lastRunningStateLocked) {
+    return;
+  }
+  _lastRunningStateActive = active;
+  _lastRunningStateStatusText = statusText;
+  _lastRunningStateLocked = isButtonLocked;
+
   if (!active) {
     clearAutoTimers();
   }
