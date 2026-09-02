@@ -16,9 +16,9 @@ NEXT_STEPS_ROADMAP.md
 # ── Misc assets ─────────────────────────────────
 /1.png
 
-# ── Secrets / keys (ніколи не комітити!) ────────
+# ── Secrets / keys / scripts (ніколи не комітити!) ────────
 *.key
 *.key.pub
 .env
 *.env
-scripts/.env
+scripts/
