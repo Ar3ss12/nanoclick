@@ -391,7 +391,7 @@ let currentConfig = {
     target_cps: 29.0,
     jitter_percent: 7.5,
     click_limit: 0,
-    jitter_radius_px: 3,
+    jitter_radius_px: 0,
     button: "left",
     click_type: "single",
     position_mode: "cursor",
@@ -874,7 +874,7 @@ async function saveConfig() {
       currentConfig.engine.click_limit = safeInt(limitInput?.value, 0);
       currentConfig.engine.gui_lock_ms = safeInt(guiLockDelayInput?.value, 1500) || 1500;
       currentConfig.engine.hotkey_debounce_ms = safeInt(document.getElementById("debounceSlider")?.value, 80);
-      currentConfig.engine.jitter_radius_px = safeInt(jitterRadiusInput?.value, 3) || 3;
+      currentConfig.engine.jitter_radius_px = safeInt(jitterRadiusInput?.value, 0);
 
       const startDelayInput = document.getElementById("startDelayInput");
       const stopDurationInput = document.getElementById("stopDurationInput");
@@ -1742,7 +1742,7 @@ async function applyPreset(presetId) {
       if (p.fixed_y !== undefined) currentConfig.engine.fixed_y = p.fixed_y;
       currentConfig.engine.hold_duration_ms = Number(p.hold_duration_ms) || 500;
       currentConfig.engine.hold_interval_ms = Number(p.hold_interval_ms) || 1000;
-      currentConfig.engine.jitter_radius_px = Number(p.jitter_radius_px) || 3;
+      currentConfig.engine.jitter_radius_px = Number(p.jitter_radius_px) || 0;
       currentConfig.engine.repeat_mode = p.repeat_mode || "unlimited";
       currentConfig.engine.repeat_count = Number(p.repeat_count) || 0;
       currentConfig.engine.repeat_interval_ms = p.repeat_interval_ms == null ? 1000 : Number(p.repeat_interval_ms);
@@ -2114,7 +2114,7 @@ function savePresetFromModal() {
       icon,
       target_cps: cps,
       jitter_percent: jitter,
-      jitter_radius_px: 3,
+      jitter_radius_px: 0,
       click_limit: clickLimit,
       button,
       click_type: clickType,

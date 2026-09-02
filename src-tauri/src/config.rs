@@ -54,7 +54,7 @@ impl Default for Config {
             hold_duration_ms: 500,
             hold_interval_ms: 1000,
             repeat_interval_ms: 1000,
-            jitter_radius_px: 3,
+            jitter_radius_px: 0,
             hotkey_toggle: "R / K".into(),
             hotkey_mode_switch: "Ctrl+Alt+M".into(),
             hotkey_emergency_stop: "Escape".into(),

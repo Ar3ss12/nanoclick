@@ -133,9 +133,10 @@ impl crate::platform::backend::InputBackend for WindowsBackend {
     }
 
     fn click_mouse(&self, spec: &crate::platform::backend::ClickSpec) -> bool {
+        let (orig_x, orig_y) = self.cursor_position();
         let (mut target_x, mut target_y) = match spec.position_mode {
             crate::platform::backend::PositionMode::Fixed => (spec.fixed_x, spec.fixed_y),
-            crate::platform::backend::PositionMode::Cursor => self.cursor_position(),
+            crate::platform::backend::PositionMode::Cursor => (orig_x, orig_y),
         };
 
         if spec.jitter_radius > 0 {
@@ -158,6 +159,14 @@ impl crate::platform::backend::InputBackend for WindowsBackend {
             }
             _ => mouse_click(spec.button),
         }
+
+        // Restore original cursor position in Cursor mode to prevent accumulative Brownian drift
+        if spec.jitter_radius > 0 && spec.position_mode == crate::platform::backend::PositionMode::Cursor {
+            unsafe {
+                let _ = SetCursorPos(orig_x, orig_y);
+            }
+        }
+
         true
     }
 
