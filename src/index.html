@@ -286,7 +286,7 @@
         </div>
 
         <!-- TRANSLUCENT RECORDING OVERLAY -->
-<div id="recordingOverlay" style="display:none;position:fixed;top:18px;left:50%;transform:translateX(-50%);z-index:10000;background:rgba(220,38,38,0.95);color:white;padding:10px 22px;border-radius:999px;font-weight:600;font-size:13px;box-shadow:0 4px 24px rgba(0,0,0,0.4);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,0.2);">
+<div id="recordingOverlay" style="display:none;position:fixed;top:18px;left:50%;transform:translateX(-50%);z-index:10000;pointer-events:none;background:rgba(220,38,38,0.95);color:white;padding:10px 22px;border-radius:999px;font-weight:600;font-size:13px;box-shadow:0 4px 24px rgba(0,0,0,0.4);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,0.2);">
   <span style="display:inline-block;width:10px;height:10px;background:white;border-radius:50%;margin-right:8px;animation:pulse 1.2s ease-in-out infinite;"></span>
   <span id="recordingOverlayLabel">Recording…</span>
   <span id="recordingOverlayCount" style="opacity:0.85;margin-left:10px;font-weight:400;">0 actions</span>
@@ -704,6 +704,7 @@
       <div class="modal-header">
         <img src="NanoClick.png" alt="NanoClick Logo" class="modal-logo">
         <h2>Welcome to NanoClick! ⚡</h2>
+        <button id="onboardingCloseBtn" style="margin-left:auto;background:none;border:none;color:var(--text-dim);font-size:18px;cursor:pointer;" title="Close">✕</button>
       </div>
       <div class="modal-body">
         <p>Thanks for choosing <strong>NanoClick</strong>.</p>
@@ -813,7 +814,7 @@
             </select>
           </div>
 
-          <div class="preset-form-group">
+          <div class="preset-form-group full-width">
             <label>Multi-point sequence</label>
             <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;flex-wrap:wrap;">
               <button type="button" id="prPointsAdd" class="preset-modal-btn save" style="padding:4px 10px;font-size:11px;">+ Add</button>

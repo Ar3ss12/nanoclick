@@ -2189,6 +2189,34 @@ function setupPresetListeners() {
     document.getElementById("presetInspectModal")?.classList.add("hidden");
   });
 
+  // --- Escape key: close any open preset modal ---
+  // Use a named handler so it is idempotent (won't stack on hot-reload).
+  if (!window._presetEscapeHandlerBound) {
+    window._presetEscapeHandlerBound = true;
+    document.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape") return;
+      const editModal    = document.getElementById("presetEditModal");
+      const inspectModal = document.getElementById("presetInspectModal");
+      const onbModal     = document.getElementById("onboardingModal");
+      if (editModal    && !editModal.classList.contains("hidden"))    editModal.classList.add("hidden");
+      if (inspectModal && !inspectModal.classList.contains("hidden")) inspectModal.classList.add("hidden");
+      if (onbModal     && !onbModal.classList.contains("hidden"))     onbModal.classList.add("hidden");
+    });
+  }
+
+  // --- Backdrop click: click on the overlay dim area (not the card) to close ---
+  const bindBackdropClose = (modalId) => {
+    const overlay = document.getElementById(modalId);
+    if (!overlay || overlay.dataset.backdropBound === "1") return;
+    overlay.dataset.backdropBound = "1";
+    overlay.addEventListener("click", (e) => {
+      // Only close when clicking on the overlay itself, not on children (the card)
+      if (e.target === overlay) overlay.classList.add("hidden");
+    });
+  };
+  bindBackdropClose("presetEditModal");
+  bindBackdropClose("presetInspectModal");
+
   on("exportPresetsBtn", "click", () => {
     try {
       ensurePresetsExist();
@@ -2535,19 +2563,31 @@ if (toggleBtn) {
 }
 
 // ── ONBOARDING ──────────────────────────────────────────────
+const dismissOnboarding = async () => {
+  dbg("dismissOnboarding called");
+  try {
+    const config = await invoke("complete_onboarding");
+    if (config) updateUiFromConfig(config);
+  } catch (err) {
+    console.warn("complete_onboarding error or already completed:", err);
+  } finally {
+    onboardingModal?.classList.add("hidden");
+  }
+};
+
 if (onboardingBtn) {
   dbg("onboardingBtn found — wiring click listener");
-  onboardingBtn.addEventListener("click", async () => {
-    dbg("onboardingBtn CLICKED — completing onboarding");
-    try {
-      const config = await invoke("complete_onboarding");
-      dbg("onboarding completed successfully — hiding modal");
-      onboardingModal.classList.add("hidden");
-      updateUiFromConfig(config);
-    } catch (err) {
-      console.error("Failed to complete onboarding:", err);
-      dbg("onboarding ERROR:", err);
-    }
+  onboardingBtn.addEventListener("click", dismissOnboarding);
+}
+
+const onboardingCloseBtn = document.getElementById("onboardingCloseBtn");
+if (onboardingCloseBtn) {
+  onboardingCloseBtn.addEventListener("click", dismissOnboarding);
+}
+
+if (onboardingModal) {
+  onboardingModal.addEventListener("click", (e) => {
+    if (e.target === onboardingModal) dismissOnboarding();
   });
 }
 
@@ -3353,9 +3393,22 @@ async function openVisualEditor(macro, onChange) {
 
   refresh();
 
-  const close = () => document.getElementById("visualEditorBackdrop")?.remove();
-  document.getElementById("veCloseBtn").addEventListener("click", close);
-  document.getElementById("veCancelBtn").addEventListener("click", close);
+  const close = () => {
+    document.removeEventListener("keydown", onVeKeydown);
+    document.getElementById("visualEditorBackdrop")?.remove();
+  };
+  const onVeKeydown = (e) => {
+    if (e.key === "Escape") close();
+  };
+  document.addEventListener("keydown", onVeKeydown);
+  document.getElementById("veCloseBtn")?.addEventListener("click", close);
+  document.getElementById("veCancelBtn")?.addEventListener("click", close);
+  const veBackdrop = document.getElementById("visualEditorBackdrop");
+  if (veBackdrop) {
+    veBackdrop.addEventListener("click", (e) => {
+      if (e.target === veBackdrop) close();
+    });
+  }
   const reRec = document.getElementById("veReRecordBtn");
   if (reRec) reRec.addEventListener("click", () => {
     reRecordMacro(macro, onChange);
