@@ -31,7 +31,7 @@ Built with **Tauri 2 + Rust + vanilla JS**. No Electron, no bundler, no bloat: t
 - **Presets & Statistics** — save, import/export full engine presets and persist total click analytics across application updates
 
 ### 🌍 100% Tri-Lingual Internationalization (i18n)
-- **Comprehensive coverage** across 🇺🇦 Ukrainian, 🇷🇺 Russian, and 🇬🇧 English (286 symmetric keys).
+- **Comprehensive coverage** across 🇺🇦 Ukrainian, 🇷🇺 Russian, and 🇬🇧 English (337 symmetric keys).
 - **Zero-overhead memory footprint** — lazy loads only the chosen JSON locale on demand (~12 KB).
 - **Instant reactive updates** — all static UI and dynamic runtime strings adapt immediately without restart.
 
@@ -111,7 +111,7 @@ cargo test -- --skip physical_
 ```
 
 The test suite covers:
-- **i18n Key Symmetry & DOM Validation** — 100% 3-way synchronization across UA, RU, and EN (286 keys)
+- **i18n Key Symmetry & DOM Validation** — 100% 3-way synchronization across UA, RU, and EN (337 keys)
 - **Windows UIPI & Elevation Integration** — token privilege checks and app manifests
 - **Stats Triple-Redundancy** — `config.json` + `stats.json` + `localStorage` fallback
 - **Modal Scrollability & Trap Immunity** — Escape handlers and backdrop closes across all overlays
@@ -154,7 +154,7 @@ The test suite covers:
 ```
 nanoclick/
 ├── src/                  # Frontend (no bundler):
-│   ├── locales/          #   i18n JSON dictionaries: ua.json, ru.json, en.json (286 keys)
+│   ├── locales/          #   i18n JSON dictionaries: ua.json, ru.json, en.json (337 keys)
 │   ├── i18n.js           #   Zero-dependency lightweight lazy-loading i18n engine
 │   ├── stats.js          #   Modular analytics & live Canvas CPS chart engine
 │   ├── uipi_manager.js   #   Windows UIPI detection, audio chime & elevation UI
