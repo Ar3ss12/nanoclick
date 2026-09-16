@@ -78,7 +78,7 @@ impl Default for Config {
             gui_lock_ms: 1500,
             hotkey_debounce_ms: 80,
             active_mode: "autoclicker".into(),
-            typing_pause_ms: 0,
+            typing_pause_ms: 600,
             app_filter_mode: "everywhere".into(),
             app_filter_list: Vec::new(),
             sequence_points: Vec::new(),

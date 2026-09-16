@@ -25,6 +25,11 @@ const SmartGuard = {
   _suggestIndex: -1,
   _statusTimer: null,
   _statusBusy: false,
+  _isTypingGuardEnabled: true,
+  _canConfirmUncheck: false,
+  _uncheckTimer: null,
+  _uncheckInterval: null,
+  _uncheckExpireTimer: null,
 
   /* ── helpers ───────────────────────────────────────────────── */
 
@@ -93,10 +98,13 @@ const SmartGuard = {
   _wire() {
     const typingCb = this._el("typingGuardCheckbox");
     if (typingCb) {
-      typingCb.addEventListener("change", () => {
-        this._syncStatusPolling();
-        this._changed();
+      typingCb.addEventListener("click", (e) => {
+        this._handleTypingCbClick(e);
       });
+      const popover = this._el("typingGuardPopover");
+      if (popover) {
+        popover.addEventListener("click", (e) => e.stopPropagation());
+      }
     }
 
     const freezeInput = this._el("typingFreezeInput");
@@ -128,6 +136,125 @@ const SmartGuard = {
         this.removeEntry(Number(btn.dataset.idx));
       });
     }
+  },
+
+  _handleTypingCbClick(e) {
+    const typingCb = this._el("typingGuardCheckbox");
+    if (!typingCb) return;
+
+    // Case 1: Currently ENABLED -> User wants to DISABLE
+    if (this._isTypingGuardEnabled) {
+      if (this._canConfirmUncheck) {
+        // SECOND CLICK: Confirmed! Allow disabling guard now.
+        this._resetUncheckState();
+        this._isTypingGuardEnabled = false;
+        typingCb.checked = false;
+        this._syncStatusPolling();
+        this._changed();
+        return;
+      }
+
+      // FIRST CLICK (or clicking while 2-sec warning is active):
+      // Prevent unchecking, keep checkbox checked
+      e.preventDefault();
+      typingCb.checked = true;
+
+      // Show 2-second safety warning popover
+      this._showTypingGuardWarnPopover();
+      return;
+    }
+
+    // Case 2: Currently DISABLED -> User wants to ENABLE
+    this._resetUncheckState();
+    this._isTypingGuardEnabled = true;
+    typingCb.checked = true;
+    this._syncStatusPolling();
+    this._changed();
+  },
+
+  _showTypingGuardWarnPopover() {
+    const popover = this._el("typingGuardPopover");
+    const cdText = this._el("typingGuardCdText");
+    const progressBar = this._el("typingGuardProgressBar");
+    const row = this._el("typingGuardRow");
+    if (!popover) return;
+
+    // If already counting down, shake popover to highlight attention
+    if (popover.classList.contains("active-countdown")) {
+      popover.classList.remove("popover-shake");
+      void popover.offsetWidth; // trigger reflow
+      popover.classList.add("popover-shake");
+      return;
+    }
+
+    this._resetUncheckState();
+
+    popover.classList.remove("hidden");
+    popover.classList.add("active-countdown");
+    if (progressBar) {
+      progressBar.style.transition = "none";
+      progressBar.style.width = "0%";
+      void progressBar.offsetWidth;
+      progressBar.style.transition = "width 2s linear";
+      progressBar.style.width = "100%";
+    }
+
+    let secondsLeft = 2;
+    if (cdText) {
+      cdText.textContent = this._t("typing_guard_warn_wait", `Review requirements: ${secondsLeft}s...`, { s: secondsLeft });
+    }
+
+    this._uncheckInterval = setInterval(() => {
+      secondsLeft--;
+      if (secondsLeft > 0 && cdText) {
+        cdText.textContent = this._t("typing_guard_warn_wait", `Review requirements: ${secondsLeft}s...`, { s: secondsLeft });
+      }
+    }, 1000);
+
+    // 2-Second timer: disappears after 2s and unlocks confirmation
+    this._uncheckTimer = setTimeout(() => {
+      if (this._uncheckInterval) clearInterval(this._uncheckInterval);
+      popover.classList.remove("active-countdown");
+      popover.classList.add("hidden");
+
+      // Unlock second click confirmation
+      this._canConfirmUncheck = true;
+      if (row) row.classList.add("confirm-ready");
+
+      // Safety expiration: revert to protected state after 7 seconds of inactivity
+      this._uncheckExpireTimer = setTimeout(() => {
+        this._resetUncheckState();
+      }, 7000);
+    }, 2000);
+  },
+
+  _resetUncheckState() {
+    if (this._uncheckTimer) {
+      clearTimeout(this._uncheckTimer);
+      this._uncheckTimer = null;
+    }
+    if (this._uncheckInterval) {
+      clearInterval(this._uncheckInterval);
+      this._uncheckInterval = null;
+    }
+    if (this._uncheckExpireTimer) {
+      clearTimeout(this._uncheckExpireTimer);
+      this._uncheckExpireTimer = null;
+    }
+    this._canConfirmUncheck = false;
+
+    const popover = this._el("typingGuardPopover");
+    if (popover) {
+      popover.classList.remove("active-countdown", "popover-shake");
+      popover.classList.add("hidden");
+    }
+    const progressBar = this._el("typingGuardProgressBar");
+    if (progressBar) {
+      progressBar.style.transition = "none";
+      progressBar.style.width = "0%";
+    }
+    const row = this._el("typingGuardRow");
+    if (row) row.classList.remove("confirm-ready");
   },
 
   _changed() {
@@ -369,13 +496,16 @@ const SmartGuard = {
   hydrate(config) {
     const ui = config?.ui || {};
 
-    const delayMs = Number(ui.typing_pause_ms) || 0;
+    const delayMs = Number(ui.typing_pause_ms);
+    const enabled = Number.isFinite(delayMs) ? delayMs > 0 : true;
+    this._isTypingGuardEnabled = enabled;
     const typingCb = this._el("typingGuardCheckbox");
-    if (typingCb) typingCb.checked = delayMs > 0;
+    if (typingCb) typingCb.checked = enabled;
+    this._resetUncheckState();
 
     const freezeInput = this._el("typingFreezeInput");
     if (freezeInput) {
-      freezeInput.value = String(delayMs > 0 ? delayMs : this.typingFreezeMs);
+      freezeInput.value = String(enabled ? (delayMs > 0 ? delayMs : this.typingFreezeMs) : this.typingFreezeMs);
     }
     this._syncStatusPolling();
 

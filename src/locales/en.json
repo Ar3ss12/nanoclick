@@ -364,5 +364,11 @@
   "unit_cps_option": "CPS (Clicks/sec)",
   "unit_ms_option": "ms (Interval)",
   "unit_sec_option": "sec (Seconds)",
-  "unit_ms_short": "ms"
+  "unit_ms_short": "ms",
+  "typing_guard_warn_title": "Safety Notice: Disabling Typing Guard",
+  "typing_guard_warn_req1": "• Autoclicker will trigger and spam clicks while typing in chat or passwords",
+  "typing_guard_warn_req2": "• Hotkeys will not be guarded against accidental activation during text input",
+  "typing_guard_warn_wait": "Review requirements: {s}s...",
+  "typing_guard_warn_ready": "Requirements reviewed! Click checkbox again to confirm disabling.",
+  "typing_guard_disabled_notify": "Typing Guard disabled. Clicker will not stop during typing."
 }

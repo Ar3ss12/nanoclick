@@ -496,11 +496,33 @@
                   <span class="checkbox-box"></span>
                   <span data-i18n="settings_pause_focus_loss">Auto-Pause on Focus Loss</span>
                 </label>
-                <label class="checkbox-row">
-                  <input type="checkbox" id="typingGuardCheckbox" class="custom-checkbox">
-                  <span class="checkbox-box"></span>
-                  <span data-i18n="settings_typing_guard">Stop clicking while typing, never switch on (WASD ignored)</span>
-                </label>
+                <div class="typing-guard-control-wrapper">
+                  <label class="checkbox-row" id="typingGuardRow">
+                    <input type="checkbox" id="typingGuardCheckbox" checked class="custom-checkbox">
+                    <span class="checkbox-box"></span>
+                    <span data-i18n="settings_typing_guard">Stop clicking while typing, never switch on (WASD ignored)</span>
+                  </label>
+                  <!-- 2-Second Safety Popover -->
+                  <div id="typingGuardPopover" class="typing-guard-popover hidden" role="alert">
+                    <div class="typing-guard-popover-header">
+                      <span class="typing-guard-popover-icon">⚠️</span>
+                      <span class="typing-guard-popover-title" data-i18n="typing_guard_warn_title">Safety Notice: Disabling Typing Guard</span>
+                    </div>
+                    <div class="typing-guard-popover-body">
+                      <div class="typing-guard-popover-req" data-i18n="typing_guard_warn_req1">• Autoclicker will trigger and spam clicks while typing in chat or passwords</div>
+                      <div class="typing-guard-popover-req" data-i18n="typing_guard_warn_req2">• Hotkeys will not be guarded against accidental activation during text input</div>
+                    </div>
+                    <div class="typing-guard-popover-footer">
+                      <div class="typing-guard-countdown">
+                        <span class="typing-guard-cd-icon">⏳</span>
+                        <span id="typingGuardCdText" data-i18n="typing_guard_warn_wait">Review requirements: 2s...</span>
+                      </div>
+                      <div class="typing-guard-progress-track">
+                        <div id="typingGuardProgressBar" class="typing-guard-progress-fill"></div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
                 <label class="checkbox-row">
                   <input type="checkbox" id="startMinimizedCheckbox" class="custom-checkbox">
                   <span class="checkbox-box"></span>

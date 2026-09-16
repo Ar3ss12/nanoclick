@@ -16,6 +16,8 @@ NEXT_STEPS_ROADMAP.md
 
 # ── Misc assets ─────────────────────────────────
 /1.png
+/image*.png
+
 
 # ── Secrets / keys (never commit!) ────
 *.key

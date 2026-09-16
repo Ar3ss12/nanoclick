@@ -243,7 +243,7 @@ impl Default for UiSettings {
             minimize_to_tray: true,
             show_notifications: true,
             pause_on_focus_loss: false,
-            typing_pause_ms: 0,
+            typing_pause_ms: 600,
             app_filter_mode: default_app_filter_mode(),
             app_filter_list: Vec::new(),
             always_run_as_admin: false,
