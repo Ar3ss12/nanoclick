@@ -1,0 +1,49 @@
+/* nanoclick Visual Click Ripple Overlay Styles */
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100vw;
+  height: 100vh;
+  background: transparent !important;
+  overflow: hidden;
+  pointer-events: none;
+  user-select: none;
+}
+
+.ripple-container {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.ripple-dot {
+  position: fixed;
+  transform: translate(-50%, -50%) scale(0);
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: rgba(110, 190, 255, 0.55);
+  border: 2px solid rgba(110, 190, 255, 0.9);
+  pointer-events: none;
+  box-sizing: border-box;
+  will-change: transform, opacity;
+  animation: ripple-expand 0.65s cubic-bezier(0.1, 0.8, 0.3, 1) forwards;
+}
+
+@keyframes ripple-expand {
+  0% {
+    transform: translate(-50%, -50%) scale(0.2);
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.85;
+  }
+  100% {
+    transform: translate(-50%, -50%) scale(2.2);
+    opacity: 0;
+  }
+}

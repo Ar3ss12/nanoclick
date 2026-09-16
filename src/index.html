@@ -1,0 +1,1205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NanoClick</title>
+  <link rel="stylesheet" href="style.css">
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;600&family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="app-shell">
+
+    <!-- SIDEBAR NAV -->
+    <aside class="sidebar">
+      <div class="sidebar-logo">
+        <img src="NanoClick.png" alt="NanoClick" class="sidebar-icon">
+      </div>
+      <nav class="sidebar-nav">
+        <button id="navDashboard" class="nav-item active" data-view="viewDashboard">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+          <span data-i18n="nav_dashboard">Dashboard</span>
+        </button>
+        <button id="navPresets" class="nav-item" data-view="viewPresets">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg>
+          <span data-i18n="nav_presets">Presets</span>
+        </button>
+        <button id="navAutomation" class="nav-item" data-view="viewAutomation">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+          <span data-i18n="nav_automation">Automation</span>
+        </button>
+        <button id="navSettings" class="nav-item" data-view="viewSettings">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/></svg>
+          <span data-i18n="nav_settings">Settings</span>
+        </button>
+        <button id="navHotkeys" class="nav-item" data-view="viewHotkeys">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M6 12h.01M10 12h.01M14 12h.01M18 12h.01M6 16h12"/></svg>
+          <span data-i18n="nav_hotkeys">Hotkeys</span>
+        </button>
+        <button id="navStats" class="nav-item" data-view="viewStats">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+          <span data-i18n="nav_stats">Statistics</span>
+        </button>
+        <button id="navAbout" class="nav-item" data-view="viewAbout">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          <span data-i18n="nav_about">About</span>
+        </button>
+      </nav>
+    </aside>
+
+    <!-- MAIN CONTENT -->
+    <div class="main-content">
+
+      <!-- HEADER -->
+      <header class="app-header">
+        <div class="header-brand">
+          <img src="NanoClick.png" alt="NanoClick" class="header-icon">
+          <div class="header-titles">
+            <div class="header-name">NANOCLICK <span class="ver" id="headerVersion">v1.0-beta</span> <span class="badge-beta">BETA</span></div>
+          </div>
+        </div>
+        <div class="header-status">
+          <button id="adminStatusBadge" class="admin-status-badge standard" data-i18n-title="admin_badge_title_standard" title="Standard mode">
+            <span class="admin-badge-icon">🛡️</span>
+            <span id="adminBadgeText" data-i18n="admin_badge_standard">Standard</span>
+          </button>
+          <button id="modeToggleBtn" class="mode-badge autoclicker prominent-mode-btn" title="Click or press shortcut to switch mode">
+            <span class="mode-icon">⚡</span>
+            <span class="mode-text">AUTOCLICKER MODE</span>
+            <span class="mode-shortcut-hint">[ Ctrl + Alt + M ]</span>
+          </button>
+        </div>
+      </header>
+
+      <!-- VIEWS -->
+      <div class="views-container">
+
+        <!-- DASHBOARD -->
+        <div id="viewDashboard" class="view active">
+          <!-- Metrics Row -->
+          <div class="metrics-row">
+            <div class="metric-card" id="clickMetricCard">
+              <div class="metric-top">
+                <svg class="metric-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                <span class="metric-label" data-i18n="dash_run_clicks">THIS RUN</span>
+                <span id="clickMetricInfoBtn" style="margin-left:auto;font-size:12px;font-weight:700;color:var(--cyan,#06b6d4);cursor:pointer;padding:2px 7px;border-radius:6px;border:1px solid rgba(6,182,212,0.3);background:rgba(6,182,212,0.1);transition:all 0.2s;" title="Click stats">ⓘ</span>
+              </div>
+              <div id="clickCounter" class="metric-value font-mono">0</div>
+              <!-- Popup tooltip -->
+              <div id="clickStatsTooltip" style="display:none;">
+                <div style="font-weight:700;color:var(--accent,#06b6d4);margin-bottom:8px;" data-i18n="click_tooltip_header">📊 CLICK STATISTICS</div>
+                <div style="display:flex;justify-content:space-between;"><span style="color:var(--text-dim);" data-i18n="click_tooltip_this_run">This run:</span><span id="tooltipRunClicks" style="font-family:'Fira Code',monospace;color:var(--text);font-weight:600;">0</span></div>
+                <div style="display:flex;justify-content:space-between;"><span style="color:var(--text-dim);" data-i18n="click_tooltip_session">App session:</span><span id="tooltipSessionClicks" style="font-family:'Fira Code',monospace;color:var(--accent,#06b6d4);font-weight:600;">0</span></div>
+                <div style="border-top:1px solid rgba(255,255,255,0.08);margin:6px 0;"></div>
+                <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:3px;"><span style="color:var(--text-dim);flex:1;" data-i18n="click_tooltip_settings_clicks">Clicks (this config):</span><span id="tooltipSettingsClicks" style="font-family:'Fira Code',monospace;color:var(--cyan,#22d3ee);font-weight:600;white-space:nowrap;">0</span></div>
+                <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;"><span style="color:var(--text-dim);flex:1;" data-i18n="click_tooltip_settings_runs">Runs (this config):</span><span id="tooltipSettingsRuns" style="font-family:'Fira Code',monospace;color:var(--text);font-weight:600;white-space:nowrap;">0</span></div>
+              </div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-top">
+                <svg class="metric-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                <span class="metric-label" data-i18n="dash_speed_cps">SPEED (CPS)</span>
+              </div>
+              <div id="displayCps" class="metric-value font-mono">29.0</div>
+            </div>
+          </div>
+
+          <!-- Start Button -->
+          <button id="toggleBtn" class="start-btn">
+            <span class="start-btn-icon">▶</span>
+            <div class="start-btn-text">
+              <span id="toggleBtnText" data-i18n="dash_start_btn">START AUTOMATION</span>
+              <span class="start-btn-hint" id="toggleBtnHint">R / K</span>
+            </div>
+          </button>
+
+          <!-- Core Configuration -->
+          <div class="config-card">
+            <div class="config-card-header">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/></svg>
+              <span data-i18n="dash_core_config">CORE CONFIGURATION</span>
+            </div>
+            <div class="config-rows">
+              <div class="config-row">
+                <div class="config-label-group">
+                  <span class="config-label" data-i18n="dash_click_rate">Click Rate (CPS)</span>
+                  <div class="unit-toggle-wrapper" id="speedUnitWrapper">
+                    <button type="button" id="speedUnitBtn" class="unit-badge-btn" title="Click or hover to switch unit">
+                      <span id="speedUnitBadge">CPS</span> <span class="unit-arrow">▾</span>
+                    </button>
+                    <div id="speedUnitMenu" class="unit-popover hidden">
+                      <button type="button" class="unit-popover-item active" data-unit="cps" data-i18n="unit_cps_option">CPS (Clicks/sec)</button>
+                      <button type="button" class="unit-popover-item" data-unit="ms" data-i18n="unit_ms_option">ms (Interval)</button>
+                    </div>
+                  </div>
+                </div>
+                <input type="range" id="cpsRange" class="slider" min="0.1" max="160" step="0.5" value="29">
+                <input type="number" id="cpsInput" class="num-input" min="0.1" max="160" step="0.5" value="29">
+              </div>
+              <div class="config-row">
+                <span class="config-label" data-i18n="dash_human_jitter">Human Jitter (±%)</span>
+                <input type="range" id="randomRange" class="slider" min="0" max="30" step="0.5" value="7.5">
+                <input type="number" id="randomInput" class="num-input" min="0" max="30" step="0.5" value="7.5">
+              </div>
+              <div class="config-row">
+                <span class="config-label" data-i18n="dash_jitter_radius">Jitter Radius (px)</span>
+                <input type="range" id="jitterRadiusRange" class="slider" min="0" max="25" step="1" value="0">
+                <input type="number" id="jitterRadiusInput" class="num-input" min="0" max="50" step="1" value="0">
+              </div>
+              <div class="config-row">
+                <span class="config-label" data-i18n="dash_click_limit">Click Limit</span>
+                <input type="range" id="limitRange" class="slider" min="0" max="10000" step="1" value="0">
+                <input type="number" id="limitInput" class="num-input" min="0" max="1000000" step="100" value="0">
+                <span id="limitBadge" class="config-suffix limit-badge-infinity" data-i18n-title="dash_limit_infinity_hint" title="0 = Unlimited">∞</span>
+              </div>
+              <div class="config-row">
+                <div class="config-label-group">
+                  <span class="config-label" data-i18n="dash_start_delay">Start Delay (sec)</span>
+                  <div class="unit-toggle-wrapper" id="delayUnitWrapper">
+                    <button type="button" id="delayUnitBtn" class="unit-badge-btn" title="Click or hover to switch unit">
+                      <span id="delayUnitBadge">sec</span> <span class="unit-arrow">▾</span>
+                    </button>
+                    <div id="delayUnitMenu" class="unit-popover hidden">
+                      <button type="button" class="unit-popover-item active" data-unit="sec" data-i18n="unit_sec_option">sec (Seconds)</button>
+                      <button type="button" class="unit-popover-item" data-unit="ms" data-i18n="unit_ms_option">ms (Interval)</button>
+                    </div>
+                  </div>
+                </div>
+                <input type="number" id="startDelayInput" class="num-input" min="0" max="300" step="1" value="0" data-i18n-placeholder="dash_start_delay_placeholder" placeholder="0 = Immediate">
+                <span class="config-suffix" id="delayUnitSuffix" data-i18n="dash_unit_sec">sec</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Bottom Three Cards -->
+          <div class="bottom-cards">
+            <!-- Click Type -->
+            <div class="config-card small-card">
+              <div class="config-card-header">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 11V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v0"/><path d="M14 10V4a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v2"/><path d="M10 10.5V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2a8 8 0 0 1-7.4-4.95L2.4 13C2 12.1 2.4 11 3.3 10.6l.3-.1a2 2 0 0 1 2.3.8L7 13"/></svg>
+                <span data-i18n="dash_card_click_type">CLICK TYPE</span>
+              </div>
+              <select class="dropdown" id="clickTypeSelect">
+                <option value="left" data-i18n="dash_btn_left">Left Click</option>
+                <option value="right" data-i18n="dash_btn_right">Right Click</option>
+                <option value="middle" data-i18n="dash_btn_middle">Middle Click</option>
+                <option value="x1" data-i18n="dash_btn_x1">Side Button 1 (X1)</option>
+                <option value="x2" data-i18n="dash_btn_x2">Side Button 2 (X2)</option>
+              </select>
+              <div class="radio-group">
+                <label class="radio-item selected"><input type="radio" name="clickMode" value="single" checked> <span data-i18n="dash_type_single">Single Click</span></label>
+                <label class="radio-item"><input type="radio" name="clickMode" value="double"> <span data-i18n="dash_type_double">Double Click</span></label>
+                <label class="radio-item"><input type="radio" name="clickMode" value="hold"> <span data-i18n="dash_type_hold">Hold Click</span></label>
+              </div>
+              <div id="holdSubSettings" class="sub-setting-box hidden">
+                <div class="sub-setting-row">
+                  <span class="sub-label" data-i18n="dash_hold_duration">Hold Dur (ms)</span>
+                  <input type="number" id="holdDurationInput" class="num-input-sm" value="500" min="10" step="50">
+                </div>
+                <div class="sub-setting-row">
+                  <span class="sub-label" data-i18n="dash_hold_pause">Hold Pause (ms)</span>
+                  <input type="number" id="holdIntervalInput" class="num-input-sm" value="1000" min="10" step="50">
+                </div>
+              </div>
+            </div>
+
+            <!-- Position -->
+            <div class="config-card small-card">
+              <div class="config-card-header">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg>
+                <span data-i18n="dash_card_position">POSITION</span>
+              </div>
+              <div class="radio-group">
+                <label class="radio-item selected"><input type="radio" name="posMode" value="cursor" checked> <span data-i18n="dash_pos_cursor">Current Cursor Position</span></label>
+                <label class="radio-item"><input type="radio" name="posMode" value="fixed"> <span data-i18n="dash_pos_fixed">Fixed Position</span></label>
+              </div>
+              <div class="xy-row">
+                <span>X</span><input type="number" id="posXInput" class="num-input-sm" value="100">
+                <span>·</span>
+                <span>Y</span><input type="number" id="posYInput" class="num-input-sm" value="100">
+                <button id="pickPosBtn" class="pick-pos-btn" data-i18n-title="dash_pick_pos_title" title="Hover anywhere and press ENTER to capture position">🔍</button>
+              </div>
+              <div id="pickPosStatus" class="pick-pos-status hidden" data-i18n="dash_pick_pos_status">PRESS ENTER TO CAPTURE</div>
+            </div>
+
+            <!-- Repeat -->
+            <div class="config-card small-card">
+              <div class="config-card-header">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+                <span data-i18n="dash_card_repeat">REPEAT</span>
+              </div>
+              <div class="radio-group">
+                <label class="radio-item selected"><input type="radio" name="repeatMode" value="unlimited" checked> <span data-i18n="dash_repeat_unlimited">Unlimited</span></label>
+                <label class="radio-item"><input type="radio" name="repeatMode" value="repeat"> <span data-i18n="dash_repeat_fixed">Repeat</span></label>
+              </div>
+              <input type="number" id="repeatCountInput" class="num-input" value="0" min="0" style="margin-top:6px;" data-i18n-placeholder="dash_repeat_count_placeholder" placeholder="Click count">
+              <div id="repeatSubSettings" class="sub-setting-box hidden" style="margin-top:6px;">
+                <div class="sub-setting-row">
+                  <span class="sub-label" data-i18n="dash_repeat_delay">Repeat Delay (ms)</span>
+                  <input type="number" id="repeatIntervalInput" class="num-input-sm" value="1000" min="0" step="100">
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- AUTO-STOP TIMERS CARD -->
+          <div class="config-card timer-card">
+            <div class="config-card-header">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/><line x1="4.93" y1="4.93" x2="7.76" y2="7.76"/><line x1="19.07" y1="4.93" x2="16.24" y2="7.76"/></svg>
+              <span data-i18n="dash_card_timers">AUTO-STOP TIMERS</span>
+              <span id="timerActiveBadge" class="timer-active-badge hidden" data-i18n="dash_timer_active">ACTIVE</span>
+            </div>
+            <div class="timer-card-body">
+              <div class="timer-option">
+                <div class="timer-option-left">
+                  <div class="timer-option-icon">⏱️</div>
+                  <div class="timer-option-info">
+                    <div class="timer-option-title" data-i18n="dash_timer_stop_after_title">Stop after</div>
+                    <div class="timer-option-desc" data-i18n="dash_timer_stop_after_desc">Auto-stop after N minutes of running</div>
+                  </div>
+                </div>
+                <div class="timer-option-control">
+                  <input type="number" id="stopDurationInput" class="timer-input" min="0" max="1440" step="1" value="0" placeholder="0">
+                  <span class="timer-unit" data-i18n="dash_unit_min">min</span>
+                </div>
+              </div>
+              <div class="timer-divider"></div>
+              <div class="timer-option">
+                <div class="timer-option-left">
+                  <div class="timer-option-icon">🕐</div>
+                  <div class="timer-option-info">
+                    <div class="timer-option-title" data-i18n="dash_timer_stop_at_title">Stop at</div>
+                    <div class="timer-option-desc" data-i18n="dash_timer_stop_at_desc">Auto-stop when time is reached</div>
+                  </div>
+                </div>
+                <div class="timer-option-control">
+                  <input type="time" id="stopTimeInput" class="timer-input">
+                </div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- PRESETS -->
+        <div id="viewPresets" class="view">
+          <!-- Presets Header -->
+          <div class="presets-page-header">
+            <div class="presets-page-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+              <div>
+                <h2 data-i18n="presets_header_title">Presets</h2>
+                <p data-i18n="presets_header_subtitle">Saved autoclicker configurations</p>
+              </div>
+            </div>
+            <div class="presets-page-actions">
+              <button id="exportPresetsBtn" class="presets-tool-btn" data-i18n-title="presets_btn_export_title" title="Export presets to a JSON file">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                <span data-i18n="presets_btn_export">Export</span>
+              </button>
+              <button id="importPresetsBtn" class="presets-tool-btn" data-i18n-title="presets_btn_import_title" title="Import presets from a JSON file">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                <span data-i18n="presets_btn_import">Import</span>
+              </button>
+              <button id="saveCurrentAsPresetBtn" class="presets-tool-btn" data-i18n-title="presets_btn_save_current_title" title="Save current settings as a new preset">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+                <span data-i18n="presets_btn_save_current">Save config</span>
+              </button>
+              <button id="createNewPresetBtn" class="presets-create-btn" data-i18n-title="presets_btn_new_title" title="Create a new preset from scratch">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                <span data-i18n="presets_btn_new">New preset</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Presets Grid -->
+          <div id="presetGridContainer" class="presets-grid-new">
+            <!-- Dynamically populated by JS -->
+          </div>
+
+          <!-- Empty State -->
+          <div id="presetsEmptyState" class="presets-empty hidden">
+            <div class="presets-empty-icon">🎯</div>
+            <div class="presets-empty-title" data-i18n="presets_empty_title">No presets yet</div>
+            <div class="presets-empty-desc" data-i18n="presets_empty_desc">Click "New preset" to create your first config</div>
+          </div>
+        </div>
+
+        <!-- TRANSLUCENT RECORDING OVERLAY -->
+<div id="recordingOverlay" style="display:none;position:fixed;top:18px;left:50%;transform:translateX(-50%);z-index:10000;pointer-events:none;background:rgba(220,38,38,0.95);color:white;padding:10px 22px;border-radius:999px;font-weight:600;font-size:13px;box-shadow:0 4px 24px rgba(0,0,0,0.4);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,0.2);">
+  <span style="display:inline-block;width:10px;height:10px;background:white;border-radius:50%;margin-right:8px;animation:pulse 1.2s ease-in-out infinite;"></span>
+  <span id="recordingOverlayLabel" data-i18n="overlay_recording">Recording…</span>
+  <span id="recordingOverlayCount" style="opacity:0.85;margin-left:10px;font-weight:400;">0 actions</span>
+</div>
+<style>
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.7); }
+}
+</style>
+
+<!-- AUTOMATION -->
+        <div id="viewAutomation" class="view">
+          <div class="config-card" style="margin-top:16px;">
+            <div class="config-card-header" data-i18n="automation_header">🤖 AUTOMATION</div>
+            <p style="color:var(--text-dim);margin:6px 0 14px;" data-i18n="automation_subtitle">Record or build macros to automate multi-step sequences.</p>
+
+            <!-- Two paths: Record vs Build -->
+            <div style="display:flex;gap:10px;margin-bottom:12px;">
+              <button id="automationRecordBtn" class="btn-primary" style="flex:1;" data-i18n="automation_btn_record">🔴 Record</button>
+              <button id="automationBuildBtn" class="btn-secondary" style="flex:1;" data-i18n="automation_btn_build">＋ Build</button>
+            </div>
+
+            <!-- ⚡ Optimize level 3-segment switcher -->
+            <div class="macro-optimize-selector">
+              <div class="macro-opt-label">
+                <span class="macro-opt-title" data-i18n="automation_opt_title">⚡ Path Optimization (RDP)</span>
+                <span class="macro-opt-desc" id="macroOptDesc" data-i18n="automation_opt_desc_balanced">Balanced vector decimation for natural cursor velocity</span>
+              </div>
+              <div class="macro-opt-segments">
+                <button class="macro-opt-seg" data-level="subtle" data-i18n="automation_opt_subtle">🌙 Subtle</button>
+                <button class="macro-opt-seg active" data-level="balanced" data-i18n="automation_opt_balanced">⚡ Balanced</button>
+                <button class="macro-opt-seg" data-level="aggressive" data-i18n="automation_opt_aggressive">🔥 Aggressive</button>
+              </div>
+            </div>
+
+            <!-- Recording status (hidden by default) -->
+            <div id="automationRecordingStatus" style="display:none;background:rgba(239,68,68,0.15);border:1px solid #ef4444;border-radius:6px;padding:10px;margin-bottom:12px;">
+              <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#ef4444;animation:pulse 1s infinite;margin-right:8px;"></span>
+              <strong>Recording…</strong> click and type freely. Press <kbd style="background:#1a1d29;padding:2px 6px;border-radius:3px;">Esc</kbd> to stop.
+              <button id="automationStopRecordBtn" class="btn-danger" style="float:right;" data-i18n="automation_btn_stop">⏹ Stop</button>
+            </div>
+
+            <!-- My Macros list -->
+            <div style="margin-top:18px;">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+                <h3 style="margin:0;font-size:14px;color:var(--text-bright);" data-i18n="automation_macros_title">📚 My Macros</h3>
+                <span id="automationMacroCount" style="color:var(--text-dim);font-size:12px;">0 macros</span>
+              </div>
+              <div id="automationMacroList" style="display:flex;flex-direction:column;gap:8px;">
+                <!-- Filled by renderMacroList() in main.js -->
+                <div class="empty-state" style="color:var(--text-dim);padding:20px;text-align:center;border:1px dashed var(--border);border-radius:6px;">
+                  <span data-i18n="automation_empty">No macros yet. Hit 🔴 Record or + Build to create your first one.</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Quick Starter Templates (Eliminates Empty Space) -->
+            <div class="macro-templates-section">
+              <div class="macro-templates-header">
+                <div class="macro-templates-title" data-i18n="automation_templates_title">📦 Ready-to-Use Templates</div>
+                <div class="macro-templates-subtitle" data-i18n="automation_templates_subtitle">Import pre-configured automation recipes in one click.</div>
+              </div>
+              <div class="macro-templates-grid">
+                <div class="macro-template-card">
+                  <div class="template-card-header">
+                    <span class="template-card-icon">🔄</span>
+                    <div>
+                      <div class="template-card-name" data-i18n="template_afk_title">AFK Anti-Kick</div>
+                      <div class="template-card-desc" data-i18n="template_afk_desc">Micro-moves cursor & pauses every 45s to avoid idle disconnects.</div>
+                    </div>
+                  </div>
+                  <div class="template-card-actions">
+                    <span class="template-badge">4 actions · Loop</span>
+                    <button class="btn-template-use" data-template="afk" data-i18n="template_btn_use">+ Use Template</button>
+                  </div>
+                </div>
+
+                <div class="macro-template-card">
+                  <div class="template-card-header">
+                    <span class="template-card-icon">💥</span>
+                    <div>
+                      <div class="template-card-name" data-i18n="template_doubletap_title">Rapid Double-Tap</div>
+                      <div class="template-card-desc" data-i18n="template_doubletap_desc">Ultra-fast dual mouse strike with calibrated 35ms mechanical gap.</div>
+                    </div>
+                  </div>
+                  <div class="template-card-actions">
+                    <span class="template-badge">3 actions · Once</span>
+                    <button class="btn-template-use" data-template="doubletap" data-i18n="template_btn_use">+ Use Template</button>
+                  </div>
+                </div>
+
+                <div class="macro-template-card">
+                  <div class="template-card-header">
+                    <span class="template-card-icon">⛏️</span>
+                    <div>
+                      <div class="template-card-name" data-i18n="template_automine_title">Auto-Mine & Hold</div>
+                      <div class="template-card-desc" data-i18n="template_automine_desc">Presses and holds Left Click for 3s with anti-fatigue pauses.</div>
+                    </div>
+                  </div>
+                  <div class="template-card-actions">
+                    <span class="template-badge">5 actions · 10x</span>
+                    <button class="btn-template-use" data-template="automine" data-i18n="template_btn_use">+ Use Template</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- SETTINGS -->
+        <div id="viewSettings" class="view">
+          <!-- Row 1: Storage & Backup | Behavior & Safety -->
+          <div class="two-col-cards">
+            <!-- Card 1: Storage & Backup -->
+            <div class="config-card">
+              <div class="config-card-header">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+                <span data-i18n="settings_group_storage">STORAGE &amp; BACKUP</span>
+              </div>
+              <div class="settings-rows">
+                <div class="settings-row" style="flex-direction:column;align-items:stretch;gap:6px;">
+                  <button id="openConfigFolderBtn" class="preset-modal-btn cancel" style="display:flex;align-items:center;justify-content:center;gap:8px;padding:8px 12px;font-size:12px;cursor:pointer;" data-i18n-title="settings_open_folder_title" title="Open Config Folder in Explorer">
+                    <span>📁</span>
+                    <span data-i18n="settings_btn_open_folder">Open Config Folder</span>
+                  </button>
+                </div>
+                <div class="settings-row" style="flex-direction:column;align-items:stretch;gap:6px;margin-top:6px;border-top:1px solid rgba(255,255,255,0.06);padding-top:8px;">
+                  <label class="settings-label" data-i18n="settings_backup_label">Full Backup (config + presets + macros)</label>
+                  <div style="display:flex;gap:8px;">
+                    <button id="exportBackupBtn" class="preset-modal-btn save" style="flex:1;" data-i18n="settings_btn_export_backup">⬇ Export backup</button>
+                    <button id="importBackupBtn" class="preset-modal-btn cancel" style="flex:1;" data-i18n="settings_btn_import_backup">⬆ Import backup</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Card 2: Behavior & Safety -->
+            <div class="config-card">
+              <div class="config-card-header">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+                <span data-i18n="settings_group_behavior">BEHAVIOR</span>
+              </div>
+              <div class="checkbox-list">
+                <label class="checkbox-row">
+                  <input type="checkbox" id="alwaysOnTopCheckbox" class="custom-checkbox">
+                  <span class="checkbox-box"></span>
+                  <span data-i18n="settings_always_on_top">Always on Top (Keep window pinned)</span>
+                </label>
+                <label class="checkbox-row">
+                  <input type="checkbox" id="alwaysRunAsAdminCheckbox" class="custom-checkbox">
+                  <span class="checkbox-box"></span>
+                  <span data-i18n="settings_always_run_admin">Always Run as Administrator (UAC / UIPI)</span>
+                </label>
+                <label class="checkbox-row">
+                  <input type="checkbox" id="minimizeToTrayCheckbox" checked class="custom-checkbox">
+                  <span class="checkbox-box"></span>
+                  <span data-i18n="settings_minimize_on_close">Minimize to Tray on Close</span>
+                </label>
+                <label class="checkbox-row">
+                  <input type="checkbox" id="autostartCheckbox" class="custom-checkbox">
+                  <span class="checkbox-box"></span>
+                  <span data-i18n="settings_run_on_startup">Run on Windows Startup</span>
+                </label>
+                <label class="checkbox-row">
+                  <input type="checkbox" id="pauseFocusLossCheckbox" class="custom-checkbox">
+                  <span class="checkbox-box"></span>
+                  <span data-i18n="settings_pause_focus_loss">Auto-Pause on Focus Loss</span>
+                </label>
+                <label class="checkbox-row">
+                  <input type="checkbox" id="typingGuardCheckbox" class="custom-checkbox">
+                  <span class="checkbox-box"></span>
+                  <span data-i18n="settings_typing_guard">Stop clicking while typing, never switch on (WASD ignored)</span>
+                </label>
+                <label class="checkbox-row">
+                  <input type="checkbox" id="startMinimizedCheckbox" class="custom-checkbox">
+                  <span class="checkbox-box"></span>
+                  <span data-i18n="settings_start_minimized">Start Minimized to Tray</span>
+                </label>
+                <label class="checkbox-row">
+                  <input type="checkbox" id="notificationsCheckbox" checked class="custom-checkbox">
+                  <span class="checkbox-box"></span>
+                  <span data-i18n="settings_show_notifications">Show Notifications</span>
+                </label>
+              </div>
+              <div class="settings-row" style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.06);">
+                <span class="settings-label" data-i18n="settings_typing_freeze_label">Hotkey lockout after typing (ms)</span>
+                <input type="number" id="typingFreezeInput" class="num-input-right" min="100" max="5000" step="50" value="600">
+              </div>
+              <div id="guardStatus" class="app-guard-status"></div>
+              <div class="settings-row" style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.06);">
+                <span class="settings-label" data-i18n="settings_gui_lock_label">GUI Lock Duration (ms)</span>
+                <input type="number" id="guiLockDelayInput" class="num-input-right" min="500" max="5000" step="100" value="1500">
+              </div>
+            </div>
+          </div>
+
+          <!-- Row 2: Appearance & Visuals | Image Color Trigger -->
+          <div class="two-col-cards">
+            <!-- Card 3: Visual & HUD (Appearance) -->
+            <div class="config-card">
+              <div class="config-card-header">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="13.5" cy="6.5" r="2.5"/><circle cx="19" cy="14" r="2.5"/><circle cx="6" cy="14" r="2.5"/></svg>
+                <span data-i18n="settings_group_appearance">APPEARANCE</span>
+              </div>
+              <div class="settings-row">
+                <span class="settings-label" data-i18n="settings_lang_label">Interface Language</span>
+                <select id="languageSelect" class="dropdown-right">
+                  <option value="ua">🇺🇦 Українська</option>
+                  <option value="ru">🇷🇺 Русский</option>
+                  <option value="en">🇬🇧 English</option>
+                </select>
+              </div>
+              <div class="settings-row">
+                <span class="settings-label" data-i18n="settings_theme_label">Theme</span>
+                <select id="themeSelect" class="dropdown-right">
+                  <option value="cyberpunk" data-i18n="settings_theme_cyberpunk">Dark Cyberpunk</option>
+                  <option value="emerald" data-i18n="settings_theme_emerald">Neon Grass</option>
+                  <option value="slate" data-i18n="settings_theme_slate">Dark Slate</option>
+                  <option value="midnight" data-i18n="settings_theme_midnight">Midnight Blue</option>
+                  <option value="dracula" data-i18n="settings_theme_dracula">Dracula Crimson</option>
+                  <option value="amethyst" data-i18n="settings_theme_amethyst">Amethyst Purple</option>
+                </select>
+              </div>
+              <div class="settings-label" style="margin-top:8px;margin-bottom:6px;" data-i18n="settings_accent_label">Accent Color</div>
+              <div class="color-swatches" id="accentSwatches" style="margin-bottom:10px;">
+                <button class="swatch" data-accent="#10b981" style="background:#10b981;"></button>
+                <button class="swatch active" data-accent="#06b6d4" style="background:#06b6d4;"></button>
+                <button class="swatch" data-accent="#8b5cf6" style="background:#8b5cf6;"></button>
+                <button class="swatch" data-accent="#ec4899" style="background:#ec4899;"></button>
+                <button class="swatch" data-accent="#f97316" style="background:#f97316;"></button>
+                <button class="swatch" data-accent="#eab308" style="background:#eab308;"></button>
+              </div>
+              <div class="checkbox-list" style="padding-top:8px;border-top:1px solid rgba(255,255,255,0.06);">
+                <label class="checkbox-row">
+                  <input type="checkbox" id="rippleCheckbox" checked class="custom-checkbox">
+                  <span class="checkbox-box"></span>
+                  <span class="settings-label" data-i18n="settings_ripple_label">Visual Click Ripple Effect</span>
+                </label>
+                <label class="checkbox-row">
+                  <input type="checkbox" id="hudCheckbox" class="custom-checkbox">
+                  <span class="checkbox-box"></span>
+                  <span class="settings-label" data-i18n="settings_hud_label">Floating Click Counter HUD</span>
+                </label>
+              </div>
+            </div>
+
+            <!-- Card 4: Image Color Trigger -->
+            <div class="config-card">
+              <div class="config-card-header">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                <span data-i18n="settings_group_img_trigger">COLOR TRIGGER</span>
+              </div>
+              <label class="settings-label" style="display:block;margin-bottom:6px;" data-i18n="settings_img_trigger_label">Stop when this pixel matches a target color</label>
+              <div style="display:flex;flex-direction:column;gap:6px;">
+                <div style="display:flex;gap:6px;align-items:center;">
+                  <label style="font-size:12px;flex:0 0 30px;">X</label>
+                  <input type="number" id="imgTrigX" class="num-input-right" style="flex:1;" placeholder="0">
+                  <label style="font-size:12px;flex:0 0 30px;">Y</label>
+                  <input type="number" id="imgTrigY" class="num-input-right" style="flex:1;" placeholder="0">
+                </div>
+                <div style="display:flex;gap:6px;align-items:center;">
+                  <label style="font-size:12px;flex:0 0 80px;" data-i18n="settings_img_color_label">Color (HEX)</label>
+                  <input type="text" id="imgTrigColor" style="flex:1;background:var(--bg-elev);border:1px solid var(--border);border-radius:5px;color:var(--text);padding:5px 8px;font-size:12px;font-family:monospace;" data-i18n-placeholder="settings_img_color_placeholder" placeholder="RRGGBB or #RRGGBB">
+                  <button id="pickPixelBtn" class="preset-modal-btn cancel" style="flex:0 0 auto;padding:5px 10px;" data-i18n="settings_pick_pixel_btn" data-i18n-title="settings_pick_pixel_title" title="Read pixel at current cursor position">📍 Pick</button>
+                </div>
+                <div style="display:flex;gap:6px;align-items:center;">
+                  <label style="font-size:12px;flex:0 0 80px;" data-i18n="settings_trigger_tol_label">Tolerance</label>
+                  <input type="number" id="imgTrigTol" min="0" max="255" value="12" style="flex:1;background:var(--bg-elev);border:1px solid var(--border);border-radius:5px;color:var(--text);padding:5px 8px;font-size:12px;">
+                  <label style="font-size:12px;flex:0 0 50px;" data-i18n="settings_trigger_poll_label">Poll ms</label>
+                  <input type="number" id="imgTrigPoll" min="50" max="2000" value="120" style="flex:1;background:var(--bg-elev);border:1px solid var(--border);border-radius:5px;color:var(--text);padding:5px 8px;font-size:12px;">
+                </div>
+                <div style="display:flex;gap:6px;">
+                  <button id="setImgTrigBtn" class="preset-modal-btn save" style="flex:1;" data-i18n="settings_btn_save_trigger">💾 Save trigger</button>
+                  <button id="clearImgTrigBtn" class="preset-modal-btn cancel" style="flex:1;" data-i18n="settings_btn_clear_trigger">🗑 Clear</button>
+                </div>
+                <div id="imgTrigStatus" style="font-size:11px;color:var(--text-dim);" data-i18n="settings_trigger_status_none">No image trigger set.</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Card 5: App & Window Filter (Smart Guard) -->
+          <div class="config-card">
+            <div class="config-card-header">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+              <span data-i18n="settings_group_app_filter">APP &amp; WINDOW FILTER</span>
+            </div>
+            <label class="settings-label" style="display:block;margin-bottom:6px;" data-i18n="settings_app_filter_label">Where the clicker is allowed to click</label>
+            <div class="radio-group" id="appFilterModeGroup" style="flex-direction:row;gap:6px;margin-bottom:8px;">
+              <label class="radio-item selected" style="flex:1;justify-content:center;">
+                <input type="radio" name="appFilterMode" value="everywhere" checked>
+                <span data-i18n="settings_app_filter_everywhere">Everywhere</span>
+              </label>
+              <label class="radio-item" style="flex:1;justify-content:center;">
+                <input type="radio" name="appFilterMode" value="whitelist">
+                <span data-i18n="settings_app_filter_whitelist">Only in list</span>
+              </label>
+              <label class="radio-item" style="flex:1;justify-content:center;">
+                <input type="radio" name="appFilterMode" value="blacklist">
+                <span data-i18n="settings_app_filter_blacklist">Block listed</span>
+              </label>
+            </div>
+            <div id="appFilterList" style="display:flex;flex-direction:column;gap:6px;margin-bottom:8px;"></div>
+            <div style="display:flex;gap:6px;align-items:flex-start;">
+              <div style="flex:2;position:relative;">
+                <input type="text" id="appFilterEntry" data-i18n-placeholder="settings_app_filter_placeholder" placeholder="discord.exe (process name)" autocomplete="off" style="width:100%;box-sizing:border-box;background:var(--bg-elev);border:1px solid var(--border);border-radius:5px;color:var(--text);padding:5px 8px;font-size:12px;">
+                <div id="appFilterSuggest" class="app-suggest" style="display:none;"></div>
+              </div>
+              <button id="addAppFilterBtn" class="preset-modal-btn save" style="flex:0 0 auto;padding:5px 12px;" data-i18n="settings_btn_add_app">+ Add</button>
+              <button id="captureAppBtn" class="preset-modal-btn cancel" style="flex:0 0 auto;padding:5px 12px;" data-i18n="settings_btn_capture_app" data-i18n-title="settings_capture_app_title" title="Focus the target app during the countdown">+ 🎯 Capture</button>
+            </div>
+            <div id="captureAppStatus" style="font-size:11px;color:var(--text-dim);margin-top:6px;"></div>
+          </div>
+        </div>
+
+        <!-- HOTKEYS -->
+        <div id="viewHotkeys" class="view">
+          <div class="config-card">
+            <div class="config-card-header">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M6 12h.01M10 12h.01M14 12h.01M18 12h.01M6 16h12"/></svg>
+              <span data-i18n="hotkeys_header">HOTKEYS &amp; SHORTCUTS</span>
+            </div>
+            <div class="settings-rows">
+              <div class="settings-row">
+                <span class="settings-label" data-i18n="hotkeys_toggle_autoclicker">Toggle Autoclicker (Start/Stop)</span>
+                <button id="hotkeyRecordBtn" class="hotkey-recorder-btn" data-target="toggle" data-i18n-title="hotkeys_click_to_record" title="Click to record new shortcut">
+                  <span class="key-icon">⌨️</span>
+                  <span id="hotkeyRecordLabel" class="font-mono">R / K</span>
+                </button>
+              </div>
+              <div class="settings-row">
+                <span class="settings-label" data-i18n="hotkeys_mode_switch">Work / Autoclicker Mode Switch</span>
+                <button id="modeSwitchRecordBtn" class="hotkey-recorder-btn" data-target="mode_switch" data-i18n-title="hotkeys_click_to_record" title="Click to record new shortcut">
+                  <span class="key-icon">⚡</span>
+                  <span id="modeSwitchRecordLabel" class="font-mono">Ctrl+Alt+M</span>
+                </button>
+              </div>
+              <div class="settings-row">
+                <span class="settings-label" data-i18n="hotkeys_emergency_stop">Emergency Instant Kill</span>
+                <button id="emergencyRecordBtn" class="hotkey-recorder-btn" data-target="emergency_stop" data-i18n-title="hotkeys_click_to_record" title="Click to record new shortcut">
+                  <span class="key-icon">🛑</span>
+                  <span id="emergencyRecordLabel" class="font-mono">Escape</span>
+                </button>
+              </div>
+              <div class="settings-row">
+                <span class="settings-label" data-i18n="hotkeys_speed_up">Speed Up (+1 CPS)</span>
+                <button id="speedUpRecordBtn" class="hotkey-recorder-btn" data-target="speed_up" data-i18n-title="hotkeys_click_to_record" title="Click to record new shortcut">
+                  <span class="key-icon">➕</span>
+                  <span id="speedUpRecordLabel" class="font-mono">Ctrl+=</span>
+                </button>
+              </div>
+              <div class="settings-row">
+                <span class="settings-label" data-i18n="hotkeys_slow_down">Slow Down (-1 CPS)</span>
+                <button id="slowDownRecordBtn" class="hotkey-recorder-btn" data-target="slow_down" data-i18n-title="hotkeys_click_to_record" title="Click to record new shortcut">
+                  <span class="key-icon">➖</span>
+                  <span id="slowDownRecordLabel" class="font-mono">Ctrl+-</span>
+                </button>
+              </div>
+              <div class="settings-row">
+                <span class="settings-label" data-i18n="hotkeys_capture_pos">Capture Cursor Position</span>
+                <button id="pickPosRecordBtn" class="hotkey-recorder-btn" data-target="capture_pos" data-i18n-title="hotkeys_click_to_record" title="Click to record new shortcut">
+                  <span class="key-icon">🎯</span>
+                  <span id="pickPosRecordLabel" class="font-mono">Ctrl+P</span>
+                </button>
+              </div>
+              <div class="settings-row">
+                <span class="settings-label" data-i18n="hotkeys_record_macro">Record Macro (Start / Finish)</span>
+                <button id="recordMacroHotkeyBtn" class="hotkey-recorder-btn" data-target="record_hotkey" data-i18n-title="hotkeys_click_to_record" title="Click to record new shortcut">
+                  <span class="key-icon">⏺</span>
+                  <span id="recordMacroHotkeyLabel" class="font-mono">Ctrl+Shift+R</span>
+                </button>
+              </div>
+
+              <div class="settings-row" style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--border);">
+                <label class="checkbox-row">
+                  <input type="checkbox" id="smartRecordCheckbox" checked class="custom-checkbox">
+                  <span class="checkbox-box"></span>
+                  <span class="settings-label" data-i18n="hotkeys_smart_memory">Smart Key Memory (Hold released keys during combo recording)</span>
+                </label>
+              </div>
+              <div class="settings-row">
+                <span class="settings-label" data-i18n="hotkeys_key_ttl">Keypress Memory TTL (ms)</span>
+                <input type="number" id="keyTtlInput" class="num-input-right" min="100" max="3000" step="50" value="500" placeholder="500">
+              </div>
+
+              <div class="settings-row settings-row-stack">
+                <div class="settings-row-top">
+                  <span class="settings-label">
+                    <span data-i18n="hotkeys_response_time">Toggle Response Time</span> <span class="info-tip" data-i18n-title="hotkeys_response_time_tip" title="Maximum delay between a keypress and the autoclicker stopping. Instant ~5 ms is the fastest, Relaxed ~200 ms is for slow taps.">ⓘ</span>
+                  </span>
+                  <span id="debounceLabel" class="settings-value">80 ms · Fast</span>
+                </div>
+                <div class="debounce-zones">
+                  <button class="debounce-zone zone-instant" data-ms="5" type="button">
+                    <span class="zone-label" data-i18n="hotkeys_zone_instant">Instant</span>
+                    <span class="zone-ms">5–35 ms</span>
+                  </button>
+                  <button class="debounce-zone zone-fast" data-ms="60" type="button">
+                    <span class="zone-label" data-i18n="hotkeys_zone_fast">Fast</span>
+                    <span class="zone-ms">36–75 ms</span>
+                  </button>
+                  <button class="debounce-zone zone-relaxed" data-ms="150" type="button">
+                    <span class="zone-label" data-i18n="hotkeys_zone_relaxed">Relaxed</span>
+                    <span class="zone-ms">75–250 ms</span>
+                  </button>
+                </div>
+                <input id="debounceSlider" type="range" min="5" max="250" step="5" value="80" class="debounce-slider" />
+                <div class="settings-row-bottom">
+                  <span class="settings-hint" data-i18n="hotkeys_response_hint">Lower = faster reaction. Higher = protection against accidental presses.</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- STATS -->
+        <div id="viewStats" class="view">
+          <div class="config-card" style="margin-top:16px;">
+            <div class="config-card-header" style="display:flex;justify-content:space-between;align-items:center;">
+              <div style="display:flex;align-items:center;gap:8px;">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+                <span data-i18n="stats_header">ANALYTICS &amp; STATISTICS</span>
+              </div>
+              <button id="statsResetBtn" class="preset-modal-btn cancel" style="padding:4px 10px;font-size:12px;margin:0;" data-i18n="stats_btn_reset">Reset all stats</button>
+            </div>
+
+            <!-- LIVE SESSION TILES -->
+            <div style="font-size:12px;font-weight:600;color:var(--accent);letter-spacing:1px;margin-top:12px;margin-bottom:6px;"><span data-i18n="stats_live_session_title">⚡ CURRENT SESSION</span></div>
+            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px;">
+              <div class="stat-tile" style="background:var(--bg-elev);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center;">
+                <div class="stat-value" id="statSessionClicks" style="font-size:24px;font-weight:700;font-family:'Fira Code',monospace;color:var(--accent);">0</div>
+                <div style="color:var(--text-dim);font-size:11px;margin-top:4px;" data-i18n="stats_session_clicks">session clicks</div>
+              </div>
+              <div class="stat-tile" style="background:var(--bg-elev);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center;">
+                <div class="stat-value" id="statActiveTime" style="font-size:24px;font-weight:700;font-family:'Fira Code',monospace;">0s</div>
+                <div style="color:var(--text-dim);font-size:11px;margin-top:4px;" data-i18n="stats_session_active_time">session active time</div>
+              </div>
+              <div class="stat-tile" style="background:var(--bg-elev);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center;">
+                <div class="stat-value" id="statAvgCps" style="font-size:24px;font-weight:700;font-family:'Fira Code',monospace;">—</div>
+                <div style="color:var(--text-dim);font-size:11px;margin-top:4px;" data-i18n="stats_live_cps">live CPS</div>
+              </div>
+            </div>
+
+            <!-- ALL-TIME TILES -->
+            <div style="font-size:12px;font-weight:600;color:var(--accent);letter-spacing:1px;margin-bottom:6px;"><span data-i18n="stats_all_time_title">📈 ALL-TIME METRICS (SAVED PERMANENTLY)</span></div>
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px;">
+              <div class="stat-tile" style="background:var(--bg-elev);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center;">
+                <div class="stat-value" id="statTotalClicks" style="font-size:20px;font-weight:700;font-family:'Fira Code',monospace;">0</div>
+                <div style="color:var(--text-dim);font-size:11px;margin-top:4px;" data-i18n="stats_total_clicks_label">total clicks</div>
+              </div>
+              <div class="stat-tile" style="background:var(--bg-elev);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center;">
+                <div class="stat-value" id="statTotalActiveTime" style="font-size:20px;font-weight:700;font-family:'Fira Code',monospace;">0s</div>
+                <div style="color:var(--text-dim);font-size:11px;margin-top:4px;" data-i18n="stats_total_active_time_label">total active time</div>
+              </div>
+              <div class="stat-tile" style="background:var(--bg-elev);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center;">
+                <div class="stat-value" id="statMaxCps" style="font-size:20px;font-weight:700;font-family:'Fira Code',monospace;">0</div>
+                <div style="color:var(--text-dim);font-size:11px;margin-top:4px;" data-i18n="stats_peak_cps_label">peak CPS achieved</div>
+              </div>
+              <div class="stat-tile" style="background:var(--bg-elev);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center;">
+                <div class="stat-value" id="statTotalSessions" style="font-size:20px;font-weight:700;font-family:'Fira Code',monospace;">0</div>
+                <div style="color:var(--text-dim);font-size:11px;margin-top:4px;" data-i18n="stats_runs_sessions_label">runs / sessions</div>
+              </div>
+            </div>
+
+            <!-- LIVE ACTIVITY & CPS CHART -->
+            <div style="font-size:12px;font-weight:600;color:var(--accent);letter-spacing:1px;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;">
+              <span data-i18n="stats_timeline_title">📉 CPS &amp; ACTIVITY TIMELINE</span>
+              <span style="font-size:11px;color:var(--text-dim);font-weight:400;" data-i18n="stats_timeline_subtitle">Real-time CPS &amp; Recent Runs</span>
+            </div>
+            <div style="background:var(--bg-elev);border:1px solid var(--border);border-radius:8px;padding:12px;position:relative;margin-bottom:12px;">
+              <canvas id="statsChart" width="800" height="180" style="width:100%;height:180px;display:block;"></canvas>
+            </div>
+          </div>
+        </div>
+
+        <!-- ABOUT -->
+        <div id="viewAbout" class="view">
+          <div class="config-card about-card">
+            <div class="config-card-header">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+              <span data-i18n="about_header">ABOUT NANOCLICK</span>
+            </div>
+            <div class="about-hero">
+              <img src="NanoClick.png" alt="NanoClick Logo" class="about-logo">
+              <div class="about-title">NANOCLICK <span class="ver" id="aboutVersion">v1.0-beta</span> <span class="badge-beta">BETA</span></div>
+              <p class="about-tagline" data-i18n="about_tagline">High-performance, bloat-free desktop automation engine built with pure Rust.</p>
+            </div>
+            <div class="about-grid">
+              <div class="about-feature-card">
+                <div class="feature-title" data-i18n="about_feat1_title">🦀 Pure Rust Core</div>
+                <div class="feature-desc" data-i18n="about_feat1_desc">~3.5 MB installer, 15 MB RAM. No Electron, no hidden background services, no garbage collection freezes.</div>
+              </div>
+              <div class="about-feature-card">
+                <div class="feature-title" data-i18n="about_feat2_title">🛡️ Smart Guard Engine</div>
+                <div class="feature-desc" data-i18n="about_feat2_desc">UIPI elevation handling for Admin windows and intelligent hotkey lockout while typing in chat.</div>
+              </div>
+              <div class="about-feature-card">
+                <div class="feature-title" data-i18n="about_feat3_title">📐 RDP Vector Compression</div>
+                <div class="feature-desc" data-i18n="about_feat3_desc">Ramer-Douglas-Peucker algorithm compresses recorded mouse paths up to 95% preserving natural curves.</div>
+              </div>
+              <div class="about-feature-card">
+                <div class="feature-title" data-i18n="about_feat4_title">⚡ Sub-Millisecond Input</div>
+                <div class="feature-desc" data-i18n="about_feat4_desc">Configurable 5ms debounce, floating real-time stats HUD and GPU-accelerated click ripples.</div>
+              </div>
+            </div>
+
+            <!-- ACTION BUTTONS -->
+            <div class="about-actions">
+              <button id="aboutGithubBtn" class="about-btn about-btn-github" title="Open GitHub Repository">
+                <span class="about-btn-icon">⭐</span>
+                <span data-i18n="about_btn_github">GitHub Repository</span>
+              </button>
+              <button id="aboutCheckUpdateBtn" class="about-btn about-btn-update" title="Check for application updates">
+                <span class="about-btn-icon">🔄</span>
+                <span id="aboutUpdateBtnText" data-i18n="about_btn_update">Check for Updates</span>
+              </button>
+              <button id="aboutResetConfigBtn" class="about-btn about-btn-danger" title="Reset all settings to factory defaults">
+                <span class="about-btn-icon">⚠️</span>
+                <span data-i18n="about_btn_reset">Reset All Settings</span>
+              </button>
+            </div>
+
+            <!-- LICENSE -->
+            <div class="about-license">
+              <div class="about-license-title" data-i18n="about_license_title">License</div>
+              <p class="about-license-text" data-i18n="about_license_text">PolyForm Noncommercial 1.0.0 + NanoClick Additional Terms. Free for noncommercial use, gaming and streams. Derivatives must rebrand. See LICENSE.md for details.</p>
+              <button id="aboutLicenseBtn" class="about-license-link" title="Open full license text">
+                <span>📄</span>
+                <span data-i18n="about_license_link">View full license</span>
+              </button>
+            </div>
+
+            <div class="about-footer-text" data-i18n="about_footer">
+              Crafted with pride by Ar3ss12 · PolyForm Noncommercial · 2026
+            </div>
+          </div>
+        </div>
+
+      </div><!-- /views-container -->
+    </div><!-- /main-content -->
+  </div><!-- /app-shell -->
+
+  <!-- Reset Confirmation Modal -->
+  <div id="resetConfirmModal" class="modal-overlay hidden">
+    <div class="modal-card reset-modal-card">
+      <div class="modal-header reset-modal-header">
+        <span style="font-size:24px;">⚠️</span>
+        <h2 data-i18n="reset_modal_title" style="color:#ef4444;margin:0;font-size:18px;">⚠️ Reset All Settings</h2>
+        <button id="resetCancelXBtn" style="margin-left:auto;background:none;border:none;color:var(--text-dim);font-size:18px;cursor:pointer;" title="Close">✕</button>
+      </div>
+      <div class="modal-body">
+        <p data-i18n="reset_modal_desc" style="color:var(--text);line-height:1.5;margin-bottom:12px;">
+          Think twice! All settings, presets, and configs will be reset to factory defaults. A backup will be created automatically in config.json.bak.
+        </p>
+        <div style="background:rgba(239, 68, 68, 0.1);border:1px solid rgba(239, 68, 68, 0.3);border-radius:8px;padding:10px 14px;color:#fca5a5;font-size:13px;line-height:1.4;">
+          🛡️ <strong>Автобекап:</strong> Поточні макроси та конфіг збережуться у файлі <code>config.json.bak</code>, статистика кліків залишиться неушкодженою.
+        </div>
+      </div>
+      <div class="modal-footer" style="display:flex;gap:10px;justify-content:flex-end;">
+        <button id="resetCancelBtn" class="preset-modal-btn cancel" data-i18n="reset_modal_cancel">Cancel</button>
+        <button id="resetConfirmBtn" class="preset-modal-btn reset-danger-btn" disabled>
+          <span id="resetConfirmTimerText">Подумай (5)</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Onboarding Modal: One-Screen Welcome Matrix -->
+  <div id="onboardingModal" class="modal-overlay hidden">
+    <div class="modal-card onboarding-matrix-card">
+      <div class="modal-header onboarding-matrix-header">
+        <img src="NanoClick.png" alt="NanoClick Logo" class="modal-logo">
+        <div class="onboarding-header-text">
+          <h2 data-i18n="onboarding_modal_title" class="onboarding-neon-title">⚡ WELCOME TO NANOCLICK</h2>
+          <p data-i18n="onboarding_subtitle" class="onboarding-neon-subtitle">High-performance automation engine built in pure Rust</p>
+        </div>
+        <button id="onboardingCloseBtn" class="modal-close-icon-btn" title="Close">✕</button>
+      </div>
+      
+      <div class="modal-body onboarding-matrix-body">
+        <!-- 1. Language Picker -->
+        <div class="onboarding-section">
+          <div class="onboarding-section-title" data-i18n="onboarding_step_lang">🌍 1. CHOOSE LANGUAGE</div>
+          <div class="onboarding-lang-grid" id="onboardingLangGrid">
+            <button type="button" class="onboarding-lang-btn" data-lang="ua">
+              <span class="lang-flag">🇺🇦</span>
+              <span class="lang-name">Українська</span>
+            </button>
+            <button type="button" class="onboarding-lang-btn" data-lang="en">
+              <span class="lang-flag">🇬🇧</span>
+              <span class="lang-name">English</span>
+            </button>
+            <button type="button" class="onboarding-lang-btn" data-lang="ru">
+              <span class="lang-flag">🇷🇺</span>
+              <span class="lang-name">Русский</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- 2. Starter Preset Selection -->
+        <div class="onboarding-section">
+          <div class="onboarding-section-title" data-i18n="onboarding_step_preset">🎯 2. YOUR STARTER PRESET</div>
+          <div class="onboarding-preset-grid" id="onboardingPresetGrid">
+            <div class="onboarding-preset-card" data-preset="fast" data-cps="29" data-jitter="7.5">
+              <div class="onboarding-preset-icon">⚡</div>
+              <div class="onboarding-preset-title" data-i18n="onboarding_preset_fast_title">⚡ FAST</div>
+              <div class="onboarding-preset-cps font-mono">29 CPS</div>
+              <div class="onboarding-preset-desc" data-i18n="onboarding_preset_fast_desc">29 CPS · PvP / Rapid</div>
+            </div>
+
+            <div class="onboarding-preset-card active" data-preset="boost" data-cps="15" data-jitter="5">
+              <div class="onboarding-preset-badge">POPULAR</div>
+              <div class="onboarding-preset-icon">🎮</div>
+              <div class="onboarding-preset-title" data-i18n="onboarding_preset_boost_title">🎮 BOOST</div>
+              <div class="onboarding-preset-cps font-mono">15 CPS</div>
+              <div class="onboarding-preset-desc" data-i18n="onboarding_preset_boost_desc">15 CPS · Balanced Gaming</div>
+            </div>
+
+            <div class="onboarding-preset-card" data-preset="human" data-cps="8" data-jitter="12">
+              <div class="onboarding-preset-icon">👤</div>
+              <div class="onboarding-preset-title" data-i18n="onboarding_preset_human_title">👤 HUMAN</div>
+              <div class="onboarding-preset-cps font-mono">8 CPS</div>
+              <div class="onboarding-preset-desc" data-i18n="onboarding_preset_human_desc">8 CPS · Timing Variance</div>
+            </div>
+
+            <div class="onboarding-preset-card" data-preset="afk" data-cps="2" data-jitter="0">
+              <div class="onboarding-preset-icon">🌾</div>
+              <div class="onboarding-preset-title" data-i18n="onboarding_preset_afk_title">🌾 AFK</div>
+              <div class="onboarding-preset-cps font-mono">2 CPS</div>
+              <div class="onboarding-preset-desc" data-i18n="onboarding_preset_afk_desc">2 CPS · Idle Farming</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 3. Legal Safe-Harbor -->
+        <div class="onboarding-section">
+          <div class="onboarding-section-title" data-i18n="onboarding_step_legal">🛡️ 3. LEGAL SAFE-HARBOR</div>
+          <div class="onboarding-legal-card">
+            <div class="onboarding-legal-glance">
+              <div class="legal-glance-item yes" data-i18n="onboarding_legal_glance_yes">✅ Permitted: streams, gaming, tournaments, personal automation</div>
+              <div class="legal-glance-item no" data-i18n="onboarding_legal_glance_no">❌ Prohibited: reselling .exe, commercial bot farms, brand theft</div>
+            </div>
+            <div class="onboarding-legal-consent">
+              <label class="checkbox-row onboarding-consent-label">
+                <input type="checkbox" id="onboardingConsentCheckbox" class="custom-checkbox" checked>
+                <span class="checkbox-box"></span>
+                <span data-i18n="onboarding_legal_agree" class="onboarding-consent-text">I accept the PolyForm Noncommercial terms and understand that using automation in third-party games is at my own risk.</span>
+              </label>
+              <button type="button" id="onboardingLicenseLink" class="onboarding-license-link" data-i18n="onboarding_legal_view_link">View full license text</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer onboarding-matrix-footer">
+        <button id="onboardingBtn" class="start-btn onboarding-start-btn">
+          <span class="start-btn-icon">🚀</span>
+          <div class="start-btn-text"><span id="onboardingBtnText" data-i18n="onboarding_btn_start">START ENGINE</span></div>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Preset Edit Modal -->
+  <div id="presetEditModal" class="modal-overlay hidden">
+    <div class="modal-card preset-modal-card">
+      <div class="modal-header">
+        <h3 id="presetModalTitle" data-i18n="preset_modal_title_edit">✨ Preset Settings</h3>
+      </div>
+      <div class="modal-body preset-modal-body">
+        <input type="hidden" id="presetEditId">
+        
+        <div class="preset-form-grid">
+          <div class="preset-form-group">
+            <label data-i18n="preset_field_name">Preset name</label>
+            <input type="text" id="presetNameInput" class="text-input" data-i18n-placeholder="preset_field_name_placeholder" placeholder="e.g. Minecraft PVP / Auto-Loot">
+          </div>
+          <div class="preset-form-group">
+            <label data-i18n="preset_field_icon">Icon</label>
+            <select id="presetIconSelect" class="select-input">
+              <option value="⚡" data-i18n="preset_icon_fast">⚡ Lightning (Fast)</option>
+              <option value="🎮" data-i18n="preset_icon_gaming">🎮 Gaming</option>
+              <option value="👤" data-i18n="preset_icon_human">👤 Human</option>
+              <option value="🌾" data-i18n="preset_icon_afk">🌾 AFK Farming</option>
+              <option value="🎯" data-i18n="preset_icon_target">🎯 Target</option>
+              <option value="⚔️" data-i18n="preset_icon_combat">⚔️ Combat</option>
+              <option value="🛡️" data-i18n="preset_icon_defense">🛡️ Hold Defense</option>
+              <option value="🍪" data-i18n="preset_icon_cookie">🍪 Cookie Clicker</option>
+              <option value="🚀" data-i18n="preset_icon_turbo">🚀 Turbo</option>
+            </select>
+          </div>
+          
+          <div class="preset-form-group">
+            <label>Speed (CPS: <span id="presetCpsVal">29.0</span>)</label>
+            <input type="range" id="presetCpsRange" min="1" max="160" step="0.5" value="29.0" class="slider">
+          </div>
+          <div class="preset-form-group">
+            <label>Randomization (Jitter: <span id="presetJitterVal">7.5</span>%)</label>
+            <input type="range" id="presetJitterRange" min="0" max="30" step="0.5" value="7.5" class="slider">
+          </div>
+
+          <div class="preset-form-group">
+            <label data-i18n="preset_field_start_delay">Start delay (sec)</label>
+            <input type="number" id="presetStartDelaySec" class="num-input" min="0" max="300" step="1" value="0">
+          </div>
+
+          <div class="preset-form-group">
+            <label data-i18n="preset_field_time_limit">Time limit (min)</label>
+            <input type="number" id="presetStopDurationMin" class="num-input" min="0" max="1440" step="1" value="0">
+          </div>
+
+          <div class="preset-form-group">
+            <label data-i18n="preset_field_stop_at">Stop at</label>
+            <input type="time" id="presetStopTime" class="num-input">
+          </div>
+
+          <div class="preset-form-group">
+            <label data-i18n="preset_field_click_type">Click type</label>
+            <select id="presetClickTypeSelect" class="select-input">
+              <option value="single">Single</option>
+              <option value="double">Double</option>
+              <option value="hold">Hold</option>
+            </select>
+          </div>
+
+          <div class="preset-form-group">
+            <label data-i18n="preset_field_hold_duration">Hold duration (ms)</label>
+            <input type="number" id="presetHoldDuration" class="num-input" min="10" step="50" value="500">
+          </div>
+
+          <div class="preset-form-group">
+            <label data-i18n="preset_field_hold_pause">Hold pause (ms)</label>
+            <input type="number" id="presetHoldInterval" class="num-input" min="0" step="50" value="1000">
+          </div>
+
+          <div class="preset-form-group">
+            <label data-i18n="preset_field_mouse_button">Mouse button</label>
+            <select id="presetButtonSelect" class="select-input">
+              <option value="left">Left</option>
+              <option value="right">Right</option>
+              <option value="middle">Middle</option>
+              <option value="x1">Side 1 (X1)</option>
+              <option value="x2">Side 2 (X2)</option>
+            </select>
+          </div>
+
+          <div class="preset-form-group">
+            <label data-i18n="preset_field_pos_mode">Position mode</label>
+            <select id="presetPositionSelect" class="select-input">
+              <option value="cursor" data-i18n="preset_pos_follow_cursor">Follow cursor</option>
+              <option value="fixed" data-i18n="preset_pos_fixed_coord">Fixed coordinates (X, Y)</option>
+            </select>
+          </div>
+
+          <div class="preset-form-group full-width">
+            <label data-i18n="preset_field_multipoint">Multi-point sequence</label>
+            <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;flex-wrap:wrap;">
+              <button type="button" id="prPointsAdd" class="preset-modal-btn save" style="padding:4px 10px;font-size:11px;" data-i18n="preset_btn_points_add">+ Add</button>
+              <button type="button" id="prPointsClear" class="preset-modal-btn cancel" style="padding:4px 10px;font-size:11px;" data-i18n="preset_btn_points_clear">Clear</button>
+              <button type="button" id="prPointsCapture" class="preset-modal-btn save" style="padding:4px 10px;font-size:11px;" data-i18n="preset_btn_points_capture">Use capture-pos as first point</button>
+              <span style="flex:1;font-size:11px;color:var(--text-dim);text-align:right;" id="prPointsHint" data-i18n="preset_points_hint">Click on the grid to add a point. Drag to move. Double-click to remove.</span>
+            </div>
+            <div style="position:relative;background:var(--bg-elev);border:1px solid var(--border);border-radius:6px;overflow:hidden;">
+              <canvas id="prPointsCanvas" width="640" height="320" style="display:block;width:100%;cursor:crosshair;background:#0d1117;"></canvas>
+              <textarea id="prPoints" class="hidden"></textarea>
+            </div>
+            <small style="color:var(--text-dim);display:flex;justify-content:space-between;margin-top:4px;">
+              <span>Points: <span id="prPointsCount">0</span></span>
+              <span id="prPointsJsonHint" data-i18n="preset_points_json_hint">JSON kept in sync automatically.</span>
+            </small>
+          </div>
+
+          <div id="presetFixedCoordRow" class="preset-form-group coord-group hidden">
+            <label data-i18n="preset_field_fixed_xy">X / Y coordinates</label>
+            <div style="display:flex; gap:6px;">
+              <input type="number" id="presetFixedX" class="num-input" placeholder="X" value="100">
+              <input type="number" id="presetFixedY" class="num-input" placeholder="Y" value="100">
+            </div>
+          </div>
+
+          <div class="preset-form-group">
+            <label data-i18n="preset_field_click_limit">Click limit (0 = unlimited)</label>
+            <input type="number" id="presetClickLimit" class="num-input" min="0" value="0">
+          </div>
+
+          <div class="preset-form-group">
+            <label data-i18n="preset_field_repeat_mode">Repeat mode</label>
+            <select id="presetRepeatModeSelect" class="select-input">
+              <option value="unlimited" data-i18n="preset_repeat_unlimited">Unlimited</option>
+              <option value="repeat" data-i18n="preset_repeat_fixed_count">Fixed count</option>
+            </select>
+          </div>
+
+          <div class="preset-form-group">
+            <label data-i18n="preset_field_repeat_count">Repeat count</label>
+            <input type="number" id="presetRepeatCount" class="num-input" min="0" step="1" value="0">
+          </div>
+
+          <div class="preset-form-group">
+            <label data-i18n="preset_field_repeat_interval">Pause between repeats (ms)</label>
+            <input type="number" id="presetRepeatInterval" class="num-input" min="0" step="100" value="1000">
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <div id="presetHotkeySlots" style="width:100%;margin-bottom:10px;display:grid;grid-template-columns:repeat(3,1fr);gap:6px;"></div>
+        <button id="presetCancelBtn" class="preset-modal-btn cancel" data-i18n="modal_cancel">Cancel</button>
+        <button id="presetSaveBtn" class="preset-modal-btn save" data-i18n="preset_btn_save">💾 Save preset</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Preset Inspect Modal -->
+  <div id="presetInspectModal" class="modal-overlay hidden">
+    <div class="modal-card preset-modal-card">
+      <div class="modal-header">
+        <h3 id="inspectTitle">🔍 Preset Details</h3>
+      </div>
+      <div class="modal-body">
+        <div id="inspectBodyContent" class="inspect-details-box">
+          <!-- Populated by JS -->
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="inspectCloseBtn" class="preset-modal-btn cancel" data-i18n="modal_close">Close</button>
+        <button id="inspectApplyBtn" class="preset-modal-btn save" data-i18n="inspect_btn_apply">⚡ Apply now</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- UIPI Administrator Privilege Modal -->
+  <div id="uipiModal" class="modal-overlay hidden">
+    <div class="modal-card uipi-modal-card">
+      <div class="modal-header">
+        <h3 id="uipiTitle" data-i18n="uipi_modal_title">🛡️ Windows UIPI — Administrator Rights Required</h3>
+        <button id="uipiCloseXBtn" class="modal-close-x" title="Close">&#10005;</button>
+      </div>
+      <div class="modal-body uipi-modal-body">
+        <div class="uipi-alert-banner">
+          <div class="uipi-alert-icon">⚠️</div>
+          <div class="uipi-alert-text">
+            <strong data-i18n="uipi_alert_title">Click attempt blocked by Windows UIPI security system.</strong><br><span data-i18n="uipi_alert_desc">The target window is running with elevated privileges (Administrator / UAC), while NanoClick is running in standard mode. Windows prohibits standard processes from sending SendInput to elevated windows.</span>
+          </div>
+        </div>
+        <p class="uipi-help-text" data-i18n="uipi_help_text">To click into protected windows (Task Manager, elevated terminals, protected games, etc.), restart NanoClick as Administrator.</p>
+        <div class="uipi-options-row">
+          <label class="checkbox-row">
+            <input type="checkbox" id="uipiAlwaysAdminCheckbox" class="custom-checkbox">
+            <span class="checkbox-box"></span>
+            <span data-i18n="uipi_always_checkbox">Always Run as Administrator (Windows Registry)</span>
+          </label>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="uipiCancelBtn" class="preset-modal-btn cancel" data-i18n="uipi_cancel_btn">Cancel</button>
+        <button id="uipiRestartAdminBtn" class="preset-modal-btn save uipi-admin-btn" data-i18n="uipi_restart_btn">🛡️ Restart as Administrator</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Update available notification bar -->
+  <div id="updateBar" class="update-bar hidden">
+    <span id="updateBarText" data-i18n="update_bar_title">Update available</span>
+    <div class="update-bar-actions">
+      <button id="updateInstallBtn" class="update-btn primary" data-i18n="update_btn_install">Download &amp; install</button>
+      <button id="updateDismissBtn" class="update-btn" data-i18n-title="update_btn_dismiss_title" title="Dismiss">&#10005;</button>
+    </div>
+  </div>
+  <script src="i18n.js"></script>
+  <script src="uipi_manager.js"></script>
+  <script src="stats.js"></script>
+  <script src="settings_guard.js"></script>
+  <script type="module" src="main.js"></script>
+  <script src="sequence_editor.js"></script>
+</body>
+</html>

@@ -1,0 +1,43 @@
+# ── Build artifacts ─────────────────────────────
+target/
+
+# ── Node dependencies (unused, fallback) ────────
+node_modules/
+
+# ── Logs ────────────────────────────────────────
+*.log
+
+# ── Internal documentation (do not publish) ─────
+docs/
+NEXT_STEPS_ROADMAP.md
+*.md
+!README.md
+!LICENSE.md
+
+# ── Misc assets ─────────────────────────────────
+/1.png
+
+# ── Secrets / keys (never commit!) ────
+*.key
+*.key.pub
+*.pass
+.key/
+.tauri/
+.env
+.env*
+.env.bak
+*.env
+*.pem
+*.pfx
+*.cert
+
+# ── Temporary diagnostics & scratch scripts ─────
+*.tmp
+*.temp
+*.txt
+/diag*
+/sig*
+/dir*
+/state.txt
+/reg_dirs.txt
+

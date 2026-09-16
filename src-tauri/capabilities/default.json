@@ -1,0 +1,16 @@
+{
+  "$schema": "https://schema.tauri.app/config/2/capability",
+  "identifier": "default",
+  "description": "Default capabilities for NanoClick GUI",
+  "windows": [
+    "main",
+    "hud",
+    "overlay"
+  ],
+  "permissions": [
+    "core:default",
+    "updater:default",
+    "updater:allow-check",
+    "updater:allow-download-and-install"
+  ]
+}
