@@ -230,4 +230,19 @@ each release.
 
 ---
 
+## 🌟 Star History
+
+<p align="center">
+  <a href="https://star-history.com/#Ar3ss12/nanoclick&Date">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Ar3ss12/nanoclick&type=Date&theme=dark" />
+      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Ar3ss12/nanoclick&type=Date" />
+      <img alt="NanoClick Star History Chart" src="https://api.star-history.com/svg?repos=Ar3ss12/nanoclick&type=Date" width="750" />
+    </picture>
+  </a>
+</p>
+
+---
+
 <p align="center">Built with ❤️ using <a href="https://tauri.app">Tauri</a></p>
+
