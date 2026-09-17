@@ -177,6 +177,7 @@ if ($Action -in @("all", "build")) {
 
     Push-Location $repoRoot
     try {
+        $env:CARGO_BUILD_JOBS = "2"
         cargo tauri build --bundles nsis
         if ($LASTEXITCODE -ne 0) { throw "cargo tauri build failed (exit code $LASTEXITCODE)" }
     } finally {
