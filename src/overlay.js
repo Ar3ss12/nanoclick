@@ -23,7 +23,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   window.addEventListener("resize", updateCanvasSize);
   updateCanvasSize();
 
-  const MAX_CONCURRENT_RIPPLES = 15;
+  const MAX_CONCURRENT_RIPPLES = 25;
   const RIPPLE_DURATION_MS = 450;
   let ripples = [];
   let isAnimating = false;
@@ -85,16 +85,26 @@ document.addEventListener("DOMContentLoaded", async () => {
       const payload = event.payload;
       if (!payload) return;
 
-      const rawX = Array.isArray(payload) ? payload[0] : (payload?.x ?? 0);
-      const rawY = Array.isArray(payload) ? payload[1] : (payload?.y ?? 0);
-
-      // Windows Per-Monitor DPI Correction:
-      // Rust GetCursorPos returns physical screen pixels, while Canvas/CSS uses logical CSS pixels.
       const currentDpr = window.devicePixelRatio || 1;
-      const visualX = rawX / currentDpr;
-      const visualY = rawY / currentDpr;
 
-      spawnRipple(visualX, visualY);
+      // Handle coalesced batch of coordinates: [[x1, y1], [x2, y2], ...]
+      if (Array.isArray(payload)) {
+        if (payload.length > 0 && Array.isArray(payload[0])) {
+          for (let i = 0; i < payload.length; i++) {
+            const pt = payload[i];
+            spawnRipple(pt[0] / currentDpr, pt[1] / currentDpr);
+          }
+          return;
+        }
+        if (payload.length >= 2 && typeof payload[0] === "number") {
+          spawnRipple(payload[0] / currentDpr, payload[1] / currentDpr);
+          return;
+        }
+      }
+
+      const rawX = payload?.x ?? 0;
+      const rawY = payload?.y ?? 0;
+      spawnRipple(rawX / currentDpr, rawY / currentDpr);
     });
   }
 

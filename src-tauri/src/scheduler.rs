@@ -583,19 +583,8 @@ impl ClickScheduler {
             let mut batch_click_count: u32 = 0;
             let mut batches_done: u32 = 0;
 
-            static LAST_SCHED_RIPPLE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let emit_ripple_if_enabled = |spec: &ClickSpec| {
                 if visual_ripple.load(Ordering::Relaxed) {
-                    let now_ms = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis() as u64)
-                        .unwrap_or(0);
-                    let last = LAST_SCHED_RIPPLE_MS.load(Ordering::Relaxed);
-                    if now_ms.saturating_sub(last) < 33 {
-                        return;
-                    }
-                    LAST_SCHED_RIPPLE_MS.store(now_ms, Ordering::Relaxed);
-
                     if let Some(ref app) = app_handle {
                         let (rx, ry) = match spec.position_mode {
                             crate::platform::backend::PositionMode::Fixed => (spec.fixed_x, spec.fixed_y),
@@ -961,6 +950,7 @@ impl ClickScheduler {
                 };
                 let final_cps = f64::from_bits(cps_raw.load(Ordering::Relaxed));
                 Self::status_and_hud_maybe_emit(app, total, mode_str, final_cps, "IDLE", false, true);
+                crate::overlay::flush_click_ripples(app);
             }
         });
     }

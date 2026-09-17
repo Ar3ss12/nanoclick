@@ -9,26 +9,55 @@
 //! 3. Real-time click ripple event emission with screen cursor coordinates.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
 
 static LAST_RIPPLE_EMIT_MS: AtomicU64 = AtomicU64::new(0);
+static RIPPLE_BATCH: Mutex<Vec<(i32, i32)>> = Mutex::new(Vec::new());
 
 /// Emit a click ripple event to the overlay window with physical screen coordinates (x, y).
-/// The frontend overlay corrects for Per-Monitor DPI scaling via `window.devicePixelRatio`.
-/// Throttled to ~30 FPS (33ms) so high CPS click spam never saturates the IPC bridge or WebView2 memory.
+/// Coalesces high-frequency clicks (e.g. 160 CPS) into batches emitted at 25 FPS (40ms interval).
+/// Transmits the batched coordinates as a single IPC event, eliminating IPC queue flooding while preserving all click ripples.
 pub fn emit_click_ripple(app: &AppHandle, x: i32, y: i32) {
+    let mut batch = match RIPPLE_BATCH.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if batch.len() < 50 {
+        batch.push((x, y));
+    }
+
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     let last = LAST_RIPPLE_EMIT_MS.load(Ordering::Relaxed);
-    if now_ms.saturating_sub(last) < 33 {
-        return;
-    }
-    LAST_RIPPLE_EMIT_MS.store(now_ms, Ordering::Relaxed);
 
-    if let Some(win) = app.get_webview_window("overlay") {
-        let _ = win.emit("spawn-ripple", (x, y));
+    // Rate-limit IPC emissions to 25 per second (40ms interval)
+    if now_ms.saturating_sub(last) >= 40 {
+        LAST_RIPPLE_EMIT_MS.store(now_ms, Ordering::Relaxed);
+        let to_emit: Vec<(i32, i32)> = batch.drain(..).collect();
+        drop(batch);
+
+        if let Some(win) = app.get_webview_window("overlay") {
+            let _ = win.emit("spawn-ripple", to_emit);
+        }
+    }
+}
+
+/// Flush any buffered ripples immediately when clicking stops.
+pub fn flush_click_ripples(app: &AppHandle) {
+    let mut batch = match RIPPLE_BATCH.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if !batch.is_empty() {
+        let to_emit: Vec<(i32, i32)> = batch.drain(..).collect();
+        drop(batch);
+
+        if let Some(win) = app.get_webview_window("overlay") {
+            let _ = win.emit("spawn-ripple", to_emit);
+        }
     }
 }
 
@@ -89,5 +118,18 @@ mod tests {
         let (x, y): (i32, i32) = serde_json::from_str(&serialized).expect("Tuple should deserialize");
         assert_eq!(x, 1920);
         assert_eq!(y, 1080);
+    }
+
+    #[test]
+    fn test_ripple_coords_batch_serialization() {
+        let batch = vec![(1920, 1080), (1921, 1081)];
+        let serialized = serde_json::to_string(&batch).expect("Batch should serialize");
+        assert_eq!(serialized, "[[1920,1080],[1921,1081]]");
+
+        let deserialized: Vec<(i32, i32)> =
+            serde_json::from_str(&serialized).expect("Batch should deserialize");
+        assert_eq!(deserialized.len(), 2);
+        assert_eq!(deserialized[0], (1920, 1080));
+        assert_eq!(deserialized[1], (1921, 1081));
     }
 }
