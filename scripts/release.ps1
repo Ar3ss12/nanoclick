@@ -323,14 +323,18 @@ if ($Action -in @("all", "upload")) {
     $assets = Invoke-RestMethod -Uri "https://api.github.com/repos/$Owner/$Repo/releases/$releaseId/assets" `
               -Headers $headers -Method Get
 
+    $portableExe = Join-Path $repoRoot "target\release\nanoclick.exe"
     $filesToUpload = @(
-        @{ Path = $exePath;        Mime = "application/vnd.microsoft.portable-executable" },
-        @{ Path = $sigPath;        Mime = "text/plain" },
-        @{ Path = $latestJsonPath; Mime = "application/json" }
+        @{ Path = $exePath;        Name = [System.IO.Path]::GetFileName($exePath); Mime = "application/vnd.microsoft.portable-executable" },
+        @{ Path = $sigPath;        Name = [System.IO.Path]::GetFileName($sigPath); Mime = "text/plain" },
+        @{ Path = $latestJsonPath; Name = "latest.json";                            Mime = "application/json" }
     )
+    if (Test-Path -LiteralPath $portableExe) {
+        $filesToUpload += @{ Path = $portableExe; Name = "NanoClick-portable.exe"; Mime = "application/vnd.microsoft.portable-executable" }
+    }
 
     foreach ($file in $filesToUpload) {
-        $fileName = [System.IO.Path]::GetFileName($file.Path)
+        $fileName = if ($file.Name) { $file.Name } else { [System.IO.Path]::GetFileName($file.Path) }
         if (-not (Test-Path -LiteralPath $file.Path)) {
             Write-Host "  [SKIP] File missing: $($file.Path)" -ForegroundColor Red
             continue
