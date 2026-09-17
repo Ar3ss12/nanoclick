@@ -3425,6 +3425,9 @@ function updateClickTooltipValues(runClicks = null) {
   if (typeof runClicks === "number") {
     _currentRunClicks = runClicks;
   }
+  if (!clickStatsTooltip || clickStatsTooltip.style.display === "none") {
+    return;
+  }
   const eng = window.StatsEngine;
   const fmt = (n) => {
     const v = Number(n) || 0;
@@ -3483,8 +3486,10 @@ listenSilent("status-update", (event) => {
     const n = clicks_done || 0;
     if (mode) {
       const modeChanged = mode !== currentConfig.active_mode;
-      setModeDisplay(mode, true);
-      if (modeChanged) saveConfig();
+      if (modeChanged) {
+        setModeDisplay(mode, true);
+        saveConfig();
+      }
     }
     setRunningState(active, status_text);
     if (clickCounter) {

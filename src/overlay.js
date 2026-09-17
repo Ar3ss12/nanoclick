@@ -1,34 +1,82 @@
 // nanoclick Visual Click Ripple Overlay Engine
-// Manages zero-overhead hardware-accelerated ripple animations across the screen.
+// Zero-overhead hardware-accelerated Canvas 2D ripple renderer.
+// Completely eliminates DOM allocation churn, orphaned nodes, and timer leaks.
 
 document.addEventListener("DOMContentLoaded", async () => {
   const tauri = window.__TAURI__;
-  const container = document.getElementById("rippleContainer");
+  const canvas = document.getElementById("rippleCanvas");
+  if (!canvas) return;
 
-  // Keep a small bound on simultaneous DOM nodes to eliminate memory growth at high CPS (e.g. 100 CPS)
-  const MAX_CONCURRENT_RIPPLES = 30;
+  const ctx = canvas.getContext("2d", { alpha: true });
+  if (!ctx) return;
+
+  let dpr = window.devicePixelRatio || 1;
+
+  function updateCanvasSize() {
+    dpr = window.devicePixelRatio || 1;
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    canvas.width = Math.floor(w * dpr);
+    canvas.height = Math.floor(h * dpr);
+  }
+
+  window.addEventListener("resize", updateCanvasSize);
+  updateCanvasSize();
+
+  const MAX_CONCURRENT_RIPPLES = 15;
+  const RIPPLE_DURATION_MS = 450;
+  let ripples = [];
+  let isAnimating = false;
+
+  function render(now) {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+
+    let activeCount = 0;
+    for (let i = 0; i < ripples.length; i++) {
+      const r = ripples[i];
+      const elapsed = now - r.start;
+      if (elapsed < RIPPLE_DURATION_MS) {
+        ripples[activeCount++] = r;
+        const progress = elapsed / RIPPLE_DURATION_MS;
+        // Ease-out cubic: snappy initial expansion, smooth settling
+        const ease = 1 - Math.pow(1 - progress, 3);
+        const radius = 5 + ease * 35;
+        const alpha = 1 - progress;
+
+        ctx.beginPath();
+        ctx.arc(r.x, r.y, radius, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(110, 190, 255, ${0.45 * alpha})`;
+        ctx.fill();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = `rgba(110, 190, 255, ${0.85 * alpha})`;
+        ctx.stroke();
+      }
+    }
+    ripples.length = activeCount;
+
+    if (activeCount > 0) {
+      requestAnimationFrame(render);
+    } else {
+      isAnimating = false;
+      ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+    }
+  }
 
   function spawnRipple(visualX, visualY) {
-    if (!container) return;
-
-    if (container.children.length >= MAX_CONCURRENT_RIPPLES) {
-      // Remove oldest ripple to keep rendering fast and lean
-      container.removeChild(container.firstChild);
+    if (ripples.length >= MAX_CONCURRENT_RIPPLES) {
+      ripples.shift();
     }
+    ripples.push({
+      x: visualX,
+      y: visualY,
+      start: performance.now(),
+    });
 
-    const dot = document.createElement("div");
-    dot.className = "ripple-dot";
-    dot.style.left = `${Math.round(visualX)}px`;
-    dot.style.top = `${Math.round(visualY)}px`;
-
-    container.appendChild(dot);
-
-    // Auto-cleanup DOM node once CSS keyframe animation completes
-    setTimeout(() => {
-      if (dot.parentNode) {
-        dot.parentNode.removeChild(dot);
-      }
-    }, 650);
+    if (!isAnimating) {
+      isAnimating = true;
+      requestAnimationFrame(render);
+    }
   }
 
   // Subscribe to click event emitted by Rust click loop
@@ -41,10 +89,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       const rawY = Array.isArray(payload) ? payload[1] : (payload?.y ?? 0);
 
       // Windows Per-Monitor DPI Correction:
-      // Rust GetCursorPos returns physical screen pixels, while CSS WebView2 uses logical CSS pixels.
-      const dpr = window.devicePixelRatio || 1;
-      const visualX = rawX / dpr;
-      const visualY = rawY / dpr;
+      // Rust GetCursorPos returns physical screen pixels, while Canvas/CSS uses logical CSS pixels.
+      const currentDpr = window.devicePixelRatio || 1;
+      const visualX = rawX / currentDpr;
+      const visualY = rawY / currentDpr;
 
       spawnRipple(visualX, visualY);
     });

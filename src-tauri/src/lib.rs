@@ -628,9 +628,11 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    static TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn test_debug_mode_toggle() {
+        let _guard = TEST_MUTEX.lock().unwrap();
         set_debug_mode(true);
         assert!(get_debug_mode());
         set_debug_mode(false);
@@ -639,6 +641,7 @@ mod tests {
 
     #[test]
     fn test_debug_log_batch_execution() {
+        let _guard = TEST_MUTEX.lock().unwrap();
         set_debug_mode(true);
         let batch = vec![
             LogItem {

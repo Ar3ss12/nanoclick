@@ -8,11 +8,25 @@
 //! 2. Platform click-through configuration (`set_ignore_cursor_events(true)` / `WS_EX_TRANSPARENT`).
 //! 3. Real-time click ripple event emission with screen cursor coordinates.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::{AppHandle, Emitter, Manager};
+
+static LAST_RIPPLE_EMIT_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Emit a click ripple event to the overlay window with physical screen coordinates (x, y).
 /// The frontend overlay corrects for Per-Monitor DPI scaling via `window.devicePixelRatio`.
+/// Throttled to ~30 FPS (33ms) so high CPS click spam never saturates the IPC bridge or WebView2 memory.
 pub fn emit_click_ripple(app: &AppHandle, x: i32, y: i32) {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let last = LAST_RIPPLE_EMIT_MS.load(Ordering::Relaxed);
+    if now_ms.saturating_sub(last) < 33 {
+        return;
+    }
+    LAST_RIPPLE_EMIT_MS.store(now_ms, Ordering::Relaxed);
+
     if let Some(win) = app.get_webview_window("overlay") {
         let _ = win.emit("spawn-ripple", (x, y));
     }
