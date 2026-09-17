@@ -19,6 +19,7 @@ param(
     [string]$Notes,
     [string]$NotesFile,
     [switch]$Draft,
+    [switch]$Prerelease,
     [switch]$Gui,
     [string]$KeyPath = "$env:USERPROFILE\.tauri\nanoclick.key",
     [string]$KeyPassword = $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD,
@@ -289,10 +290,11 @@ if ($Action -in @("all", "upload")) {
 
         # Update title/notes if requested
         $updateBody = @{
-            name       = $Title
-            body       = $Notes
-            draft      = $isDraft
-            prerelease = $true
+            name        = $Title
+            body        = $Notes
+            draft       = $isDraft
+            prerelease  = [bool]$Prerelease.IsPresent
+            make_latest = if ($Prerelease.IsPresent) { "false" } else { "true" }
         } | ConvertTo-Json
 
         $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Owner/$Repo/releases/$($release.id)" `
@@ -301,11 +303,12 @@ if ($Action -in @("all", "upload")) {
     } catch {
         Write-Host "  -> Release $Tag not found on GitHub. Creating release..." -ForegroundColor Yellow
         $body = @{
-            tag_name   = $Tag
-            name       = $Title
-            body       = $Notes
-            draft      = $isDraft
-            prerelease = $true
+            tag_name    = $Tag
+            name        = $Title
+            body        = $Notes
+            draft       = $isDraft
+            prerelease  = [bool]$Prerelease.IsPresent
+            make_latest = if ($Prerelease.IsPresent) { "false" } else { "true" }
         } | ConvertTo-Json
 
         $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Owner/$Repo/releases" `

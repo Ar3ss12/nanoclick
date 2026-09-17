@@ -71,6 +71,7 @@ Invoke-Step "build" {
         # Passwordless key: explicitly UNSET the password so the CLI never
         # waits on an interactive stdin prompt in automated shells.
         Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY_PASSWORD -ErrorAction SilentlyContinue
+        $env:CARGO_BUILD_JOBS = "2"
         cargo tauri build --bundles nsis
         if ($LASTEXITCODE -ne 0) { throw "tauri build failed (exit $LASTEXITCODE)" }
     } finally { Pop-Location }

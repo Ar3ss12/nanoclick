@@ -58,9 +58,9 @@ try {
     $createBody = @{
         tag_name   = $TAG
         name       = "NanoClick $TAG"
-        body       = "First public beta of the 1.0 line - PolyForm Noncommercial license, license block in the About tab, English README, signed updater artifacts."
-        draft      = $false
-        prerelease = $true
+        draft       = $false
+        prerelease  = $false
+        make_latest = "true"
     } | ConvertTo-Json
     try {
         $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$OWNER/$REPO/releases" `

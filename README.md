@@ -20,7 +20,8 @@ Built with **Tauri 2 + Rust + vanilla JS**. No Electron, no bundler, no bloat: t
 - **Single / Double / Hold** click modes with configurable press & pause durations
 - **Gaussian Timing & Coordinate Variance** — statistical timing jitter (±0–30%) and spatial micro-dispersion (±0–50 px) within configurable variance thresholds
 - **Position picker** — bind clicks to a fixed screen point or follow the cursor
-- **Precise CPS control** (0.1–100+) with live hotkey speed adjustment and real-time performance telemetry
+- **Precise CPS control** (0.1–160 CPS) with live hotkey speed adjustment and real-time telemetry
+- **Hover/Flyout Unit Switchers** — seamlessly toggle between CPS (Clicks/sec) and ms (Interval) directly from the dashboard
 
 ### 🎬 Smart Macro Recorder & Visual Editor
 - **Two ways to create a macro:** 🔴 record real input in real-time, or ＋ build it from blocks manually
@@ -37,9 +38,10 @@ Built with **Tauri 2 + Rust + vanilla JS**. No Electron, no bundler, no bloat: t
 - **Presets & Statistics** — save, import/export full engine presets and persist total click analytics across application updates
 
 ### 🌍 100% Tri-Lingual Internationalization (i18n)
-- **Comprehensive coverage** across 🇺🇦 Ukrainian, 🇷🇺 Russian, and 🇬🇧 English (337 symmetric keys).
+- **Comprehensive coverage** across 🇺🇦 Ukrainian, 🇷🇺 Russian, and 🇬🇧 English (372 symmetric keys).
 - **Zero-overhead memory footprint** — lazy loads only the chosen JSON locale on demand (~12 KB).
 - **Instant reactive updates** — all static UI and dynamic runtime strings adapt immediately without restart.
+- **One-Screen Welcome Matrix** — tri-lingual cyberpunk onboarding overlay with instant language switching and starter presets.
 
 ### 🛡️ Windows UIPI Security & Admin Elevation
 - **Elevated Window Detection** — detects when hovering over elevated processes (Task Manager, admin consoles, protected games) to prevent dropped clicks.
@@ -50,8 +52,11 @@ Built with **Tauri 2 + Rust + vanilla JS**. No Electron, no bundler, no bloat: t
 - **PerMonitorV2 awareness** — zero coordinate drift across mixed DPI multi-monitor configurations.
 - **Full Side-by-Side Windows Manifest** — integrates `Microsoft.Windows.Common-Controls` v6.0.0.0 and OS compatibility tags.
 
-### 🛡️ Safety & Convenience
-- **Smart Typing Guard & Kill-Switch** — auto-stops clicking when typing real text and locks out hotkeys for a configurable window (100–5000ms), while gamer keys (WASD, Space, QERF) are preserved
+### 🛡️ Safety, Reliability & Self-Healing
+- **Smart Typing Guard (Default ON)** — auto-stops clicking when typing real text and locks out hotkeys (600ms default); features a 2-second intentional safety cooldown before disarming
+- **Self-Healing Configuration Engine** — intelligent syntax repair (trailing commas, unclosed braces) and smart patcher that preserves valid user hotkeys, custom presets, and stats
+- **Factory Reset with 5-Second Cooldown** — safe reset button with auto-backup (`config.json.bak`) and "Think (5)" confirmation modal
+- **Always on Top Window Toggle** — keeps the interface floating during full-screen games or workflows
 - **Zero-Latency Stop & Fast Double-Tap** — stops clicking instantly on keypress (0ms) without debounce blocking
 - **Work Mode** — suspends global hotkeys while you're using other applications
 - **Auto-pause on navigation**, emergency stop (<kbd>Escape</kbd>), start-delay & auto-stop timers
