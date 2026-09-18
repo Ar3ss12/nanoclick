@@ -474,28 +474,20 @@ impl ClickScheduler {
         next
     }
 
-    /// Emit the HUD and status updates at most every 40 ms (25 FPS) so high-frequency
-    /// CPS clicking loops (e.g. 100 CPS) never saturate the Tauri IPC bridge or cause UI lag.
-    fn status_and_hud_maybe_emit(
+    /// Targeted RUNNING/IDLE telemetry emitter — SINGLE OWNER: the decoupled 66 ms
+    /// telemetry worker (+ one final IDLE emit from the click thread after the
+    /// loop exits). The hot click loop NEVER calls this (zero-jitter rule).
+    /// No throttle inside: the worker's 66 ms sleep IS the cadence (~15 FPS),
+    /// so there is no shared `LAST_EMIT` atomic and no `SystemTime` syscall —
+    /// nothing to false-share with the click thread.
+    fn status_and_hud_emit(
         app: &AppHandle,
         total: u32,
         mode: &str,
         cps: f64,
         status_text: &str,
         active: bool,
-        force: bool,
     ) {
-        use std::sync::atomic::AtomicU64;
-        static LAST_EMIT: AtomicU64 = AtomicU64::new(0);
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        let last = LAST_EMIT.load(Ordering::Relaxed);
-        if !force && now_ms.saturating_sub(last) < 40 {
-            return;
-        }
-        LAST_EMIT.store(now_ms, Ordering::Relaxed);
         // Targeted emit: hud-clicks only to "hud" window.
         // app.emit() = broadcast to ALL windows → floods HUD IPC queue at high CPS.
         if let Some(hud) = app.get_webview_window("hud") {
@@ -544,6 +536,12 @@ impl ClickScheduler {
         let app_filter_arc = Arc::clone(&self.app_filter);
 
         thread::spawn(move || {
+            #[cfg(target_os = "windows")]
+            unsafe {
+                use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST};
+                let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+            }
+
             let mut rng = rand::thread_rng();
             let timer = PlatformTimer::new();
             let platform_backend = platform::default_input_backend();
@@ -613,6 +611,34 @@ impl ClickScheduler {
                         },
                     );
                 }
+            }
+
+            // ── DECOUPLED ASYNCHRONOUS TELEMETRY WORKER (Fire-and-Forget) ─
+            // Runs on a separate low-overhead thread so the high-CPS click loop
+            // never touches Tauri IPC, awaits WebViews, or experiences UI lockup.
+            if let Some(ref app) = app_handle {
+                let active_for_telemetry = Arc::clone(&active);
+                let clicks_for_telemetry = Arc::clone(&clicks_done);
+                let mode_for_telemetry = Arc::clone(&mode_autoclicker);
+                let cps_for_telemetry = Arc::clone(&cps_raw);
+                let app_for_telemetry = app.clone();
+
+                std::thread::spawn(move || {
+                    while active_for_telemetry.load(Ordering::Relaxed) {
+                        std::thread::sleep(Duration::from_millis(66)); // ~15 FPS UI telemetry cadence
+                        if !active_for_telemetry.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let total = clicks_for_telemetry.load(Ordering::Relaxed);
+                        let mode_str = if mode_for_telemetry.load(Ordering::Relaxed) {
+                            "autoclicker"
+                        } else {
+                            "work"
+                        };
+                        let cur_cps = f64::from_bits(cps_for_telemetry.load(Ordering::Relaxed));
+                        Self::status_and_hud_emit(&app_for_telemetry, total, mode_str, cur_cps, "RUNNING", true);
+                    }
+                });
             }
 
             // ── IMAGE TRIGGER POLLER ──────────────────────────────────────
@@ -794,17 +820,9 @@ impl ClickScheduler {
                             }
                         }
                     } else if platform_backend.click_mouse(&cur_click_spec) {
-                        let total = clicks_done.fetch_add(1, Ordering::Relaxed) + 1;
+                        clicks_done.fetch_add(1, Ordering::Relaxed);
                         batch_click_count += 1;
                         emit_ripple_if_enabled(&cur_click_spec);
-                        if let Some(ref app) = app_handle {
-                            let mode_str = if mode_autoclicker.load(Ordering::Relaxed) {
-                                "autoclicker"
-                            } else {
-                                "work"
-                            };
-                            Self::status_and_hud_maybe_emit(app, total, mode_str, 0.0, "HOLDING", true, false);
-                        }
                     }
 
                     // Hold for hold_duration_ms
@@ -876,17 +894,12 @@ impl ClickScheduler {
                     seq_spec.points.clear();
                     seq_spec.point_index = 0;
                     if platform_backend.click_mouse(&seq_spec) {
-                        let total = clicks_done.fetch_add(1, Ordering::Relaxed) + 1;
+                        clicks_done.fetch_add(1, Ordering::Relaxed);
                         batch_click_count += 1;
                         emit_ripple_if_enabled(&seq_spec);
-                        if let Some(ref app) = app_handle {
-                            let mode_str = if mode_autoclicker.load(Ordering::Relaxed) {
-                                "autoclicker"
-                            } else {
-                                "work"
-                            };
-                            Self::status_and_hud_maybe_emit(app, total, mode_str, cps, "RUNNING", true, false);
-                        }
+                        // ZERO-JITTER: no UI/IPC in the hot click loop.
+                        // RUNNING telemetry is emitted solely by the decoupled
+                        // 66 ms worker (see below) reading lock-free atomics.
                         if p.delay_ms > 0 {
                             let event_handle =
                                 stop_event_lock.lock().unwrap().clone().expect("stop_event");
@@ -901,17 +914,10 @@ impl ClickScheduler {
                     continue;
                 }
                 if platform_backend.click_mouse(&cur_click_spec) {
-                    let total = clicks_done.fetch_add(1, Ordering::Relaxed) + 1;
+                    clicks_done.fetch_add(1, Ordering::Relaxed);
                     batch_click_count += 1;
                     emit_ripple_if_enabled(&cur_click_spec);
-                    if let Some(ref app) = app_handle {
-                        let mode_str = if mode_autoclicker.load(Ordering::Relaxed) {
-                            "autoclicker"
-                        } else {
-                            "work"
-                        };
-                        Self::status_and_hud_maybe_emit(app, total, mode_str, cps, "RUNNING", true, false);
-                    }
+                    // ZERO-JITTER: no UI/IPC in the hot click loop (see sequence branch above).
                 }
 
                 let interval_ns = if deviation_ns > 0 {
@@ -949,7 +955,7 @@ impl ClickScheduler {
                     "work"
                 };
                 let final_cps = f64::from_bits(cps_raw.load(Ordering::Relaxed));
-                Self::status_and_hud_maybe_emit(app, total, mode_str, final_cps, "IDLE", false, true);
+                Self::status_and_hud_emit(app, total, mode_str, final_cps, "IDLE", false);
                 crate::overlay::flush_click_ripples(app);
             }
         });

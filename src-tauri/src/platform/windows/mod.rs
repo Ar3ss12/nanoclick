@@ -304,6 +304,15 @@ pub fn spawn_global_hotkey_listener(scheduler: Arc<ClickScheduler>, app_handle: 
     }
     GLOBAL_HOTKEY_STOP.store(false, Ordering::Release);
     thread::spawn(move || {
+        // ZERO-JITTER: hotkey path is on the critical click start/stop path.
+        // Highest scheduler priority so a game at 100% CPU never delays hotkeys.
+        #[cfg(target_os = "windows")]
+        unsafe {
+            use windows::Win32::System::Threading::{
+                GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST,
+            };
+            let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+        }
         run_keyboard_hook(scheduler, app_handle);
         GLOBAL_HOTKEY_RUNNING.store(false, Ordering::Release);
     });
