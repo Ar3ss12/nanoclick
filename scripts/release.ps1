@@ -29,12 +29,63 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$PipelineStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $ver = $Tag.TrimStart("v")
 $bundleDir = Join-Path $repoRoot "target\release\bundle\nsis"
 $exePath = Join-Path $bundleDir "NanoClick_${ver}_x64-setup.exe"
 $sigPath = "$exePath.sig"
 $latestJsonPath = Join-Path $bundleDir "latest.json"
+$portableExe = Join-Path $repoRoot "target\release\nanoclick.exe"
+
+# ── Structured Logging Helpers ────────────────────────────────────────────────
+function Get-Timestamp {
+    return (Get-Date -Format "HH:mm:ss")
+}
+
+function Write-StageHeader([string]$stageNum, [string]$totalStages, [string]$stageName) {
+    $time = Get-Timestamp
+    Write-Host ""
+    Write-Host "==================================================================" -ForegroundColor Cyan
+    Write-Host " [$time] [STAGE $stageNum/$totalStages] $stageName" -ForegroundColor Cyan
+    Write-Host "==================================================================" -ForegroundColor Cyan
+}
+
+function Write-StepLog([string]$action, [string]$detail = "") {
+    $time = Get-Timestamp
+    if ($detail) {
+        Write-Host " [$time] ⏳ ${action}: " -NoNewline -ForegroundColor Yellow
+        Write-Host $detail -ForegroundColor Gray
+    } else {
+        Write-Host " [$time] ⏳ $action" -ForegroundColor Yellow
+    }
+}
+
+function Write-StepDone([string]$msg, [string]$detail = "") {
+    $time = Get-Timestamp
+    if ($detail) {
+        Write-Host " [$time] ✅ $msg " -NoNewline -ForegroundColor Green
+        Write-Host "($detail)" -ForegroundColor DarkGray
+    } else {
+        Write-Host " [$time] ✅ $msg" -ForegroundColor Green
+    }
+}
+
+function Write-StepInfo([string]$label, [string]$info) {
+    $time = Get-Timestamp
+    Write-Host " [$time]    ℹ️  ${label}: " -NoNewline -ForegroundColor DarkCyan
+    Write-Host $info -ForegroundColor White
+}
+
+function Write-StepWarn([string]$msg) {
+    $time = Get-Timestamp
+    Write-Host " [$time] ⚠️  $msg" -ForegroundColor DarkYellow
+}
+
+function Write-StepError([string]$msg) {
+    $time = Get-Timestamp
+    Write-Host " [$time] ❌ $msg" -ForegroundColor Red
+}
 
 if (-not $Title) {
     $Title = "NanoClick $Tag"
@@ -64,11 +115,13 @@ Released under the **PolyForm Noncommercial License 1.0.0** with NanoClick Addit
 
 ### 📦 Installation
 Download and run `NanoClick_${ver}_x64-setup.exe` below. No administrative privileges required.
+Or use `NanoClick-portable.exe` for zero-install portable execution.
 "@
 }
 
 # ── Optional GUI Form for editing release details ─────────────────────────────
 if ($Gui) {
+    Write-StepLog "Opening interactive release editor form..."
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
 
@@ -138,17 +191,14 @@ if ($Gui) {
 
     $dialogResult = $form.ShowDialog()
     if ($dialogResult -ne [System.Windows.Forms.DialogResult]::OK) {
-        Write-Host "Release publication cancelled by user." -ForegroundColor Yellow
+        Write-StepWarn "Release publication cancelled by user in GUI form."
         exit 0
     }
 
     $Title = $txtTitle.Text.Trim()
     $Notes = $txtNotes.Text.Trim()
-    if ($chkDraft.Checked) {
-        $Draft = $true
-    } else {
-        $Draft = $false
-    }
+    $Draft = [bool]$chkDraft.Checked
+    Write-StepDone "Release parameters updated from GUI."
 }
 
 # Resolve key password if not explicitly passed
@@ -159,16 +209,28 @@ if (-not $KeyPassword) {
     }
 }
 
-Write-Host "======================================================" -ForegroundColor Cyan
-Write-Host "  NanoClick Release Pipeline - $Tag ($Action)" -ForegroundColor Cyan
-Write-Host "======================================================" -ForegroundColor Cyan
+$totalSteps = if ($Action -eq "all") { "3" } else { "1" }
+
+Write-Host ""
+Write-Host "╔════════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
+Write-Host "║              NanoClick Release & Deployment Pipeline           ║" -ForegroundColor Cyan
+Write-Host "╠════════════════════════════════════════════════════════════════╣" -ForegroundColor Cyan
+Write-Host "║  Target Version : $($Tag.PadRight(46)) ║" -ForegroundColor White
+Write-Host "║  Pipeline Mode  : $($Action.ToUpper().PadRight(46)) ║" -ForegroundColor White
+Write-Host "║  Repository     : $("$Owner/$Repo".PadRight(46)) ║" -ForegroundColor White
+Write-Host "╚════════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
 
 # ── 1. BUILD STEP ─────────────────────────────────────────────────────────────
 if ($Action -in @("all", "build")) {
-    Write-Host "`n[1/3] Building NSIS installer via Tauri..." -ForegroundColor Yellow
+    $stepTimer = [System.Diagnostics.Stopwatch]::StartNew()
+    Write-StageHeader "1" $totalSteps "BUILD - Compiling Rust Core & Packaging NSIS Bundle"
+
+    Write-StepLog "Validating private signing key" $KeyPath
     if (-not (Test-Path -LiteralPath $KeyPath)) {
-        throw "Private key not found at '$KeyPath'. Generate it first."
+        Write-StepError "Private key not found at '$KeyPath'. Generate it first via scripts\make_release.ps1"
+        throw "Private key not found at '$KeyPath'."
     }
+    Write-StepDone "Signing key found"
 
     $rawKey = (Get-Content -LiteralPath $KeyPath -Raw).Trim()
     $env:TAURI_SIGNING_PRIVATE_KEY = $rawKey
@@ -176,24 +238,57 @@ if ($Action -in @("all", "build")) {
         $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = $KeyPassword
     }
 
+    Write-StepLog "Configuring build concurrency" "CARGO_BUILD_JOBS=2 (safe memory footprint)"
+    $env:CARGO_BUILD_JOBS = "2"
+
+    Write-StepLog "Executing Tauri release build" "cargo tauri build --bundles nsis"
+    Write-StepInfo "Detail" "Compiling Rust core backend, bundling web UI, and generating NSIS installer..."
+
     Push-Location $repoRoot
     try {
-        $env:CARGO_BUILD_JOBS = "2"
         cargo tauri build --bundles nsis
-        if ($LASTEXITCODE -ne 0) { throw "cargo tauri build failed (exit code $LASTEXITCODE)" }
+        if ($LASTEXITCODE -ne 0) { 
+            Write-StepError "cargo tauri build failed with exit code $LASTEXITCODE"
+            throw "cargo tauri build failed (exit code $LASTEXITCODE)" 
+        }
     } finally {
         Pop-Location
     }
-    Write-Host "  -> Build completed successfully!" -ForegroundColor Green
+    $stepTimer.Stop()
+    $elapsed = [math]::Round($stepTimer.Elapsed.TotalSeconds, 1)
+
+    # Verify generated artifacts
+    if (-not (Test-Path -LiteralPath $exePath)) {
+        Write-StepError "Build finished but expected NSIS installer was not found at $exePath"
+        throw "Missing installer artifact: $exePath"
+    }
+
+    $setupSize = [math]::Round((Get-Item $exePath).Length / 1MB, 2)
+    Write-StepDone "NSIS Installer generated" "$exePath ($setupSize MB)"
+
+    if (Test-Path -LiteralPath $portableExe) {
+        $portableSize = [math]::Round((Get-Item $portableExe).Length / 1MB, 2)
+        Write-StepDone "Portable executable compiled" "$portableExe ($portableSize MB) -> mapped as 'NanoClick-portable.exe'"
+    } else {
+        Write-StepWarn "Standalone executable not found at $portableExe (only NSIS installer will be available)"
+    }
+
+    Write-StepDone "Stage 1 (BUILD) complete in ${elapsed}s"
 }
 
 # ── 2. SIGN STEP ──────────────────────────────────────────────────────────────
 if ($Action -in @("all", "build", "sign")) {
-    Write-Host "`n[2/3] Cryptographically signing installer..." -ForegroundColor Yellow
+    $stepTimer = [System.Diagnostics.Stopwatch]::StartNew()
+    $stageIndex = if ($Action -eq "all") { "2" } else { "1" }
+    Write-StageHeader $stageIndex $totalSteps "SIGN - Cryptographic Minisign Verification & Manifest"
+
+    Write-StepLog "Checking target installer executable" $exePath
     if (-not (Test-Path -LiteralPath $exePath)) {
+        Write-StepError "Target executable not found: $exePath"
         throw "Target executable not found: $exePath"
     }
     if (-not (Test-Path -LiteralPath $KeyPath)) {
+        Write-StepError "Private key not found: $KeyPath"
         throw "Private key not found: $KeyPath"
     }
 
@@ -203,10 +298,11 @@ if ($Action -in @("all", "build", "sign")) {
 
     # Clean old signature if exists
     if (Test-Path -LiteralPath $sigPath) {
+        Write-StepLog "Removing previous signature" $sigPath
         Remove-Item -LiteralPath $sigPath -Force
     }
 
-    # Execute signing with explicit password argument
+    Write-StepLog "Signing installer with private key" "cargo tauri signer sign -f $KeyPath"
     if ($KeyPassword) {
         cargo tauri signer sign -f $KeyPath -p $KeyPassword $exePath
     } else {
@@ -214,11 +310,15 @@ if ($Action -in @("all", "build", "sign")) {
     }
 
     if ($LASTEXITCODE -ne 0 -or (-not (Test-Path -LiteralPath $sigPath))) {
+        Write-StepError "Signing installer failed with exit code $LASTEXITCODE"
         throw "Signing installer failed (exit code $LASTEXITCODE)"
     }
-    Write-Host "  -> Signature generated: $sigPath" -ForegroundColor Green
+    
+    $sigSize = (Get-Item $sigPath).Length
+    Write-StepDone "Minisign signature verified" "$sigPath ($sigSize bytes)"
 
     # Generate latest.json for Tauri updater v2
+    Write-StepLog "Generating updater manifest" "latest.json"
     $sigContent = (Get-Content -LiteralPath $sigPath -Raw).Trim()
     $pubDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
     $downloadUrl = "https://github.com/$Owner/$Repo/releases/download/$Tag/NanoClick_${ver}_x64-setup.exe"
@@ -240,29 +340,54 @@ if ($Action -in @("all", "build", "sign")) {
         ($manifest | ConvertTo-Json -Depth 6),
         [Text.UTF8Encoding]::new($false)
     )
-    Write-Host "  -> Generated updater manifest: $latestJsonPath" -ForegroundColor Green
+    $stepTimer.Stop()
+    $elapsed = [math]::Round($stepTimer.Elapsed.TotalSeconds, 1)
+
+    Write-StepDone "Updater manifest generated" "$latestJsonPath"
+    Write-StepDone "Stage 2 (SIGN) complete in ${elapsed}s"
 }
 
 # ── 3. UPLOAD STEP ────────────────────────────────────────────────────────────
 if ($Action -in @("all", "upload")) {
-    Write-Host "`n[3/3] Publishing to GitHub Releases ($Owner/$Repo)..." -ForegroundColor Yellow
+    $stepTimer = [System.Diagnostics.Stopwatch]::StartNew()
+    $stageIndex = if ($Action -eq "all") { "3" } else { "1" }
+    Write-StageHeader $stageIndex $totalSteps "UPLOAD - Publishing Assets to GitHub Releases ($Owner/$Repo)"
 
-    # Try resolving token from git-credential-manager if not passed
+    # Try resolving token from git-credential-manager or .env if not passed
     if (-not $Token) {
+        Write-StepLog "Searching for GitHub credentials..."
         if ($env:GITHUB_TOKEN) {
             $Token = $env:GITHUB_TOKEN
+            Write-StepDone "GitHub token found in environment variable GITHUB_TOKEN"
         } else {
-            try {
-                $pyToken = python -c "import subprocess; p=subprocess.Popen(['git','credential','fill'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True); out,_=p.communicate('protocol=https\nhost=github.com\n\n'); print([l[9:] for l in out.splitlines() if l.startswith('password=')][0])" 2>$null
-                if ($pyToken) {
-                    $Token = $pyToken.Trim()
-                    Write-Host "  -> Resolved GitHub Token from Git Credential Manager." -ForegroundColor DarkGray
+            foreach ($envFile in @("$PSScriptRoot\.env", "$repoRoot\.env")) {
+                if (Test-Path -LiteralPath $envFile) {
+                    Get-Content -LiteralPath $envFile | ForEach-Object {
+                        if ($_ -match '^\s*GITHUB_TOKEN\s*=\s*(.+)$') {
+                            $Token = $matches[1].Trim()
+                        }
+                    }
+                    if ($Token) {
+                        Write-StepDone "GitHub token resolved from $envFile"
+                        break
+                    }
                 }
-            } catch {}
+            }
         }
     }
 
     if (-not $Token) {
+        try {
+            $pyToken = python -c "import subprocess; p=subprocess.Popen(['git','credential','fill'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True); out,_=p.communicate('protocol=https\nhost=github.com\n\n'); print([l[9:] for l in out.splitlines() if l.startswith('password=')][0])" 2>$null
+            if ($pyToken) {
+                $Token = $pyToken.Trim()
+                Write-StepDone "GitHub token resolved via Git Credential Manager"
+            }
+        } catch {}
+    }
+
+    if (-not $Token) {
+        Write-StepWarn "No token in environment or Git Credential Manager."
         $sec = Read-Host -Prompt "Enter GitHub Personal Access Token (repo scope)" -AsSecureString
         $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)
         $Token = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
@@ -270,6 +395,7 @@ if ($Action -in @("all", "upload")) {
     }
 
     if (-not $Token) {
+        Write-StepError "GitHub Token is required to upload release assets."
         throw "GitHub Token is required to upload release assets."
     }
 
@@ -282,13 +408,15 @@ if ($Action -in @("all", "upload")) {
     $isDraft = [bool]$Draft.IsPresent
 
     # Find or create release
+    Write-StepLog "Connecting to GitHub API for tag" $Tag
     $release = $null
     try {
         $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Owner/$Repo/releases/tags/$Tag" `
                    -Headers $headers -Method Get
-        Write-Host "  -> Found existing release: $($release.name) (ID: $($release.id))" -ForegroundColor Cyan
+        Write-StepDone "Found existing release on GitHub" "ID: $($release.id), Name: $($release.name)"
 
         # Update title/notes if requested
+        Write-StepLog "Updating release metadata on GitHub..."
         $updateBody = @{
             name        = $Title
             body        = $Notes
@@ -299,9 +427,9 @@ if ($Action -in @("all", "upload")) {
 
         $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Owner/$Repo/releases/$($release.id)" `
                    -Headers $headers -Method Patch -Body $updateBody
-        Write-Host "  -> Updated release details on GitHub." -ForegroundColor Green
+        Write-StepDone "Release metadata updated successfully"
     } catch {
-        Write-Host "  -> Release $Tag not found on GitHub. Creating release..." -ForegroundColor Yellow
+        Write-StepWarn "Release $Tag not found. Creating new release..."
         $body = @{
             tag_name    = $Tag
             name        = $Title
@@ -313,17 +441,19 @@ if ($Action -in @("all", "upload")) {
 
         $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Owner/$Repo/releases" `
                    -Headers $headers -Method Post -Body $body
-        Write-Host "  -> Created release: $($release.name) (ID: $($release.id))" -ForegroundColor Green
+        Write-StepDone "New release created on GitHub" "ID: $($release.id)"
     }
 
     $releaseId = $release.id
     $uploadBase = "https://uploads.github.com/repos/$Owner/$Repo/releases/$releaseId/assets"
 
-    # Clean existing assets with same name to avoid 422 collision
+    # Query existing assets to avoid 422 collision
+    Write-StepLog "Checking existing assets on release ID $releaseId..."
     $assets = Invoke-RestMethod -Uri "https://api.github.com/repos/$Owner/$Repo/releases/$releaseId/assets" `
               -Headers $headers -Method Get
+    Write-StepInfo "Existing assets found on GitHub" "$($assets.Count) files"
 
-    $portableExe = Join-Path $repoRoot "target\release\nanoclick.exe"
+    # Prepare file upload list
     $filesToUpload = @(
         @{ Path = $exePath;        Name = [System.IO.Path]::GetFileName($exePath); Mime = "application/vnd.microsoft.portable-executable" },
         @{ Path = $sigPath;        Name = [System.IO.Path]::GetFileName($sigPath); Mime = "text/plain" },
@@ -331,25 +461,42 @@ if ($Action -in @("all", "upload")) {
     )
     if (Test-Path -LiteralPath $portableExe) {
         $filesToUpload += @{ Path = $portableExe; Name = "NanoClick-portable.exe"; Mime = "application/vnd.microsoft.portable-executable" }
+    } else {
+        Write-StepWarn "Portable binary ($portableExe) not found; skipping."
     }
 
+    $uploadIndex = 0
+    $totalUploads = $filesToUpload.Count
+
     foreach ($file in $filesToUpload) {
+        $uploadIndex++
         $fileName = if ($file.Name) { $file.Name } else { [System.IO.Path]::GetFileName($file.Path) }
+
         if (-not (Test-Path -LiteralPath $file.Path)) {
-            Write-Host "  [SKIP] File missing: $($file.Path)" -ForegroundColor Red
+            Write-StepWarn "[$uploadIndex/$totalUploads] File not found locally: $($file.Path) (SKIPPING)"
             continue
         }
 
+        # Check and delete existing asset with the same name
         foreach ($asset in $assets) {
             if ($asset.name -eq $fileName) {
-                Write-Host "  -> Replacing existing asset: $fileName" -ForegroundColor DarkGray
+                Write-StepLog "[$uploadIndex/$totalUploads] Deleting existing asset on GitHub" "$fileName (ID: $($asset.id))"
                 Invoke-RestMethod -Uri "https://api.github.com/repos/$Owner/$Repo/releases/assets/$($asset.id)" `
                                   -Headers $headers -Method Delete | Out-Null
+                Write-StepDone "Deleted old asset $fileName"
             }
         }
 
-        $sizeMb = [math]::Round((Get-Item $file.Path).Length / 1MB, 2)
-        Write-Host "  -> Uploading $fileName ($sizeMb MB)..." -ForegroundColor Cyan
+        $fileSize = (Get-Item $file.Path).Length
+        $sizeFormatted = if ($fileSize -gt 1MB) {
+            "$([math]::Round($fileSize / 1MB, 2)) MB"
+        } else {
+            "$([math]::Round($fileSize / 1KB, 1)) KB"
+        }
+
+        Write-StepLog "[$uploadIndex/$totalUploads] Uploading $fileName ($sizeFormatted)..." "Streaming to GitHub"
+        $fileTimer = [System.Diagnostics.Stopwatch]::StartNew()
+
         $uploadUrl = "${uploadBase}?name=${fileName}"
         $fileBytes = [System.IO.File]::ReadAllBytes($file.Path)
 
@@ -360,9 +507,26 @@ if ($Action -in @("all", "upload")) {
         }
 
         $null = Invoke-RestMethod -Uri $uploadUrl -Headers $uploadHeaders -Method Post -Body $fileBytes
-        Write-Host "  [OK] Uploaded: $fileName" -ForegroundColor Green
+        $fileTimer.Stop()
+        $fileElapsed = [math]::Round($fileTimer.Elapsed.TotalSeconds, 1)
+
+        Write-StepDone "[$uploadIndex/$totalUploads] Uploaded $fileName ($sizeFormatted) in ${fileElapsed}s"
     }
 
-    Write-Host "`nRelease status: $(if ($isDraft) {'DRAFT (hidden)'} else {'PUBLISHED (public)'})" -ForegroundColor Green
-    Write-Host "Release URL: $($release.html_url)" -ForegroundColor Green
+    $stepTimer.Stop()
+    $uploadElapsed = [math]::Round($stepTimer.Elapsed.TotalSeconds, 1)
+    Write-StepDone "Stage 3 (UPLOAD) complete in ${uploadElapsed}s"
+
+    $statusStr = if ($isDraft) { "DRAFT (hidden from public)" } else { "PUBLISHED (public release)" }
+    Write-Host ""
+    Write-Host "╔════════════════════════════════════════════════════════════════╗" -ForegroundColor Green
+    Write-Host "║                  RELEASE SUCCESSFULLY PUBLISHED                ║" -ForegroundColor Green
+    Write-Host "╠════════════════════════════════════════════════════════════════╣" -ForegroundColor Green
+    Write-Host "║  Status : $($statusStr.PadRight(54)) ║" -ForegroundColor White
+    Write-Host "║  URL    : $($release.html_url.PadRight(54)) ║" -ForegroundColor Cyan
+    Write-Host "╚════════════════════════════════════════════════════════════════╝" -ForegroundColor Green
 }
+
+$PipelineStopwatch.Stop()
+$totalSec = [math]::Round($PipelineStopwatch.Elapsed.TotalSeconds, 1)
+Write-StepDone "NanoClick Pipeline finished in ${totalSec}s total."
