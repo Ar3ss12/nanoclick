@@ -4,7 +4,7 @@
 
 Built with **Tauri 2 + Rust + vanilla JS**. No Electron, no bundler, no bloat: the production installer is **~3.5 MB**.
 
-![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue) ![Tests](https://img.shields.io/badge/tests-137%2F137-brightgreen) ![i18n](https://img.shields.io/badge/i18n-UA%20%7C%20RU%20%7C%20EN-blue) ![Tauri](https://img.shields.io/badge/Tauri-2.x-FFC131) ![Rust](https://img.shields.io/badge/rust-stable--msvc-DEA584)
+![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue) ![Tests](https://img.shields.io/badge/tests-146%2F146-brightgreen) ![i18n](https://img.shields.io/badge/i18n-UA%20%7C%20RU%20%7C%20EN-blue) ![Tauri](https://img.shields.io/badge/Tauri-2.x-FFC131) ![Rust](https://img.shields.io/badge/rust-stable--msvc-DEA584)
 
 ---
 
@@ -84,10 +84,11 @@ All hotkeys are handled by an event-driven `WH_KEYBOARD_LL` listener in Rust —
 
 ## 📦 Install
 
-Download the first `v1.0.0-beta` installer from [Releases](https://github.com/Ar3ss12/nanoclick/releases/tag/v1.0.0-beta):
+Download the `v1.0.0-beta` installer from [Releases](https://github.com/Ar3ss12/nanoclick/releases/tag/v1.0.0-beta):
 
 ```
-NanoClick_1.0.0-beta_x64-setup.exe   (~3.5 MB)
+NanoClick_1.0.0-beta_x64-setup.exe   (~2.2 MB)
+NanoClick-portable.exe               (~4.9 MB, zero-install)
 ```
 
 - Installs per-user (no admin rights needed)
@@ -118,7 +119,7 @@ cargo tauri build --bundles nsis
 ```bash
 cd src-tauri
 cargo test -- --skip physical_
-# → 126 passed; 0 failed (119 unit + 7 integration)
+# → 146 passed; 0 failed (138 unit + 8 integration)
 ```
 
 The test suite covers:
@@ -152,8 +153,9 @@ The test suite covers:
 ```
 
 - **All timing runs on a Rust worker thread** — UI never drives the click loop
-- **25 FPS (40 ms) IPC Update Throttling** — click counter & status telemetry are throttled to 25 FPS in Rust, keeping IPC overhead negligible even during 100+ CPS clicking
-- **Low-Memory Chromium Profile** — enforced `--js-flags="--max-old-space-size=64"` and `--in-process-gpu` reduce RAM usage by 2–2.5x (~120–140 MB) while eliminating startup CPU spikes
+- **Lazy secondary WebViews** — cold boot creates only the `main` window (`tauri.conf.json` declares no `overlay`/`hud`). The fullscreen ripple overlay and floating HUD are built on demand via `WebviewWindowBuilder` (`ensure_overlay_window` / `ensure_hud_window`), shown only after their transparent DOM renders (Zero-Flash), and fully `destroy()`ed when toggled off — idle RAM holds zero secondary WebViews
+- **66 ms (15 FPS) IPC telemetry** — click counter & status updates come from a dedicated background worker reading lock-free atomics, keeping IPC overhead negligible even at 160 CPS
+- **No extra Chromium flags** — `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` is deliberately unset: in-process GPU mode would merge Chromium's GPU into our process and hang the click/hook thread on a DirectX reset (see `docs/ZERO_JITTER_ISOLATION_PLAN.md`); RAM is saved by lazy windows instead
 - **Global hotkeys** use an event-driven channel (hook → mpsc → matcher), not polling
 - **Zero-Lock Hooks** — `thread_local!` state avoids mutex contention on high-frequency input
 - **Updater**: artifacts signed with a minisign keypair; verification is mandatory and built into Tauri's updater plugin

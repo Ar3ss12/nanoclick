@@ -61,42 +61,82 @@ pub fn flush_click_ripples(app: &AppHandle) {
     }
 }
 
-/// Initialize the overlay window during application setup.
-/// Ensures the window starts click-through so it never traps mouse events.
-pub fn setup_overlay(app: &AppHandle) -> Result<(), String> {
-    if let Some(win) = app.get_webview_window("overlay") {
-        // Enforce click-through from the start
-        let _ = win.set_ignore_cursor_events(true);
-        crate::debug_log_internal("info", "[Overlay] setup completed with click-through enabled");
-    }
-    Ok(())
-}
-
-/// Invoked by `overlay.js` once the transparent DOM has finished loading.
-/// Showing the window only after this signal prevents the standard DWM/WebView2
-/// white background buffer flash.
+// overlay_ready is invoked by overlay.js AFTER the WebView document is rendered.
+// Lazy-created overlay window starts hidden; showing it only here eliminates
+// the WebView2 DWM white flash (Zero-Flash init). Safe for cold boot:
+// get_webview_window returns None until ensure_overlay_window() creates it.
 #[tauri::command]
 pub fn overlay_ready(app: AppHandle) -> Result<(), String> {
     if let Some(win) = app.get_webview_window("overlay") {
         let _ = win.set_ignore_cursor_events(true);
-        let _ = win.show();
+        // Restore persisted preference: show only if the user enabled ripple.
+        // Default ON (matches UiSettings::default visual_ripple=true) so a fresh
+        // profile keeps current behaviour; cold boot with ripple disabled stays hidden.
+        if is_ripple_enabled(&app) {
+            let _ = win.show();
+        }
         crate::debug_log_internal("info", "[Overlay] ready signal received; overlay window visible and click-through");
     }
     Ok(())
 }
 
+/// Read persisted `ui.visual_ripple` without touching the click-loop atomics.
+/// Falls back to `true` (UiSettings::default) when config is unreadable.
+fn is_ripple_enabled(app: &AppHandle) -> bool {
+    app.try_state::<crate::AppState>()
+        .map(|s| s.config_manager.load().ui.visual_ripple)
+        .unwrap_or(true)
+}
+
+/// Lazily create the fullscreen transparent overlay WebView (overlay.html).
+/// Returns the window handle whether newly built or already existing.
+/// Idempotent: second call just returns the existing window.
+pub fn ensure_overlay_window(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
+    if let Some(win) = app.get_webview_window("overlay") {
+        return Ok(win);
+    }
+    let win = tauri::WebviewWindowBuilder::new(
+        app,
+        "overlay",
+        tauri::WebviewUrl::App("overlay.html".into()),
+    )
+    .title("NanoClick Overlay")
+    .transparent(true)
+    .fullscreen(true)
+    .always_on_top(true)
+    .decorations(false)
+    .shadow(false)
+    .skip_taskbar(true)
+    .resizable(false)
+    .focused(false)
+    .visible(false)
+    .build()
+    .map_err(|e| format!("overlay create failed: {e}"))?;
+    let _ = win.set_ignore_cursor_events(true);
+    crate::debug_log_internal("info", "[Overlay] lazy-created on demand");
+    Ok(win)
+}
+
 /// Show or hide the overlay window dynamically (e.g. when toggling Visual Click Ripple in settings).
+/// Lazy: creates the WebView on first `show=true`, destroys it on `show=false`
+/// so idle RAM holds ZERO overlay WebViews. Hot click-loop is untouched —
+/// emit_click_ripple() still no-ops via get_webview_window(None) when absent.
 #[tauri::command]
 pub fn toggle_overlay(app: AppHandle, show: bool) -> Result<(), String> {
-    if let Some(win) = app.get_webview_window("overlay") {
-        if show {
-            let _ = win.set_ignore_cursor_events(true);
+    if show {
+        let already_existed = app.get_webview_window("overlay").is_some();
+        let win = ensure_overlay_window(&app)?;
+        let _ = win.set_ignore_cursor_events(true);
+        // Fresh WebView: DON'T show yet — overlay_ready() shows it once the
+        // transparent DOM has rendered (Zero-Flash, no DWM white rectangle).
+        // Existing window (DOM ready): show immediately.
+        if already_existed {
             let _ = win.show();
-            crate::debug_log_internal("info", "[Overlay] overlay shown");
-        } else {
-            let _ = win.hide();
-            crate::debug_log_internal("info", "[Overlay] overlay hidden");
         }
+        crate::debug_log_internal("info", "[Overlay] overlay shown (lazy)");
+    } else if let Some(win) = app.get_webview_window("overlay") {
+        let _ = win.destroy();
+        crate::debug_log_internal("info", "[Overlay] overlay destroyed, WebView memory released");
     }
     Ok(())
 }

@@ -1476,6 +1476,9 @@ if (jitterRadiusInput) {
 }
 if (rippleCheckbox) rippleCheckbox.addEventListener("change", async () => {
   currentConfig.ui.visual_ripple = rippleCheckbox.checked;
+  // NOTE: save_app_config (Rust) already syncs the lazy overlay WebView when
+  // visual_ripple flips. This direct invoke is a fast-path for instant feedback;
+  // failures are non-fatal because saveConfig() below triggers the same sync.
   try {
     await invoke("toggle_overlay", { show: rippleCheckbox.checked });
   } catch (e) {
@@ -1485,6 +1488,7 @@ if (rippleCheckbox) rippleCheckbox.addEventListener("change", async () => {
 });
 if (hudCheckbox) hudCheckbox.addEventListener("change", async () => {
   currentConfig.ui.show_hud = hudCheckbox.checked;
+  // Same as above: save_app_config syncs the lazy HUD WebView as fallback.
   try {
     await invoke("toggle_hud_window", { show: hudCheckbox.checked });
   } catch (e) {

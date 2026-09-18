@@ -47,12 +47,21 @@ fn get_app_config(state: State<'_, AppState>) -> AppConfig {
 }
 
 #[tauri::command]
-fn save_app_config(config: AppConfig, state: State<'_, AppState>) -> Result<AppConfig, String> {
+fn save_app_config(config: AppConfig, state: State<'_, AppState>, app: AppHandle) -> Result<AppConfig, String> {
     let _ = crate::platform::set_always_run_as_admin(config.ui.always_run_as_admin);
+    // Keep persisted UI prefs and the lazy WebViews in sync: toggling ripple/HUD
+    // in Settings must create/destroy the WebView on demand, not just flip a flag.
+    let prev = state.config_manager.load();
     state.config_manager.save(&config)?;
     state
         .scheduler
         .set_config(config::Config::from(config.clone()));
+    if config.ui.visual_ripple != prev.ui.visual_ripple {
+        let _ = overlay::toggle_overlay(app.clone(), config.ui.visual_ripple);
+    }
+    if config.ui.show_hud != prev.ui.show_hud {
+        let _ = toggle_hud_window(app.clone(), config.ui.show_hud);
+    }
     Ok(config)
 }
 
@@ -74,11 +83,20 @@ fn complete_onboarding(state: State<'_, AppState>) -> Result<AppConfig, String> 
 }
 
 #[tauri::command]
-fn reset_config_to_defaults(state: State<'_, AppState>) -> Result<AppConfig, String> {
+fn reset_config_to_defaults(state: State<'_, AppState>, app: AppHandle) -> Result<AppConfig, String> {
+    let prev = state.config_manager.load();
     let app_cfg = state.config_manager.reset_to_defaults()?;
     state
         .scheduler
         .set_config(config::Config::from(app_cfg.clone()));
+    // Same lazy-WebView sync as save_app_config: defaults flip visual_ripple
+    // (true) / show_hud (false), so create/destroy on demand.
+    if app_cfg.ui.visual_ripple != prev.ui.visual_ripple {
+        let _ = overlay::toggle_overlay(app.clone(), app_cfg.ui.visual_ripple);
+    }
+    if app_cfg.ui.show_hud != prev.ui.show_hud {
+        let _ = toggle_hud_window(app.clone(), app_cfg.ui.show_hud);
+    }
     Ok(app_cfg)
 }
 
@@ -308,17 +326,55 @@ pub(crate) fn shutdown_application(app: &AppHandle) {
 
 #[tauri::command]
 fn toggle_hud_window(app: AppHandle, show: bool) -> Result<(), String> {
-    if let Some(win) = app.get_webview_window("hud") {
-        if show {
+    if show {
+        let already_existed = app.get_webview_window("hud").is_some();
+        ensure_hud_window(&app)?;
+        if let Some(win) = app.get_webview_window("hud") {
             let _ = win.set_ignore_cursor_events(true);
-            let _ = win.show();
-            debug_log_internal("info", "[HUD] hud window shown");
-        } else {
-            let _ = win.hide();
-            debug_log_internal("info", "[HUD] hud window hidden");
+            // Fresh WebView: DON'T show yet — hud_ready() shows it once the DOM
+            // has rendered (avoids DWM white flash). Existing: show now.
+            if already_existed {
+                let _ = win.show();
+            }
+            debug_log_internal("info", "[HUD] hud window shown (lazy)");
         }
+    } else if let Some(win) = app.get_webview_window("hud") {
+        let _ = win.destroy();
+        debug_log_internal("info", "[HUD] hud window destroyed, WebView memory released");
     }
     Ok(())
+}
+
+/// Lazily create the floating HUD WebView (hud.html).
+/// Idempotent: returns the existing window when already created.
+fn ensure_hud_window(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
+    if let Some(win) = app.get_webview_window("hud") {
+        return Ok(win);
+    }
+    let win = tauri::WebviewWindowBuilder::new(
+        app,
+        "hud",
+        tauri::WebviewUrl::App("hud.html".into()),
+    )
+    .title("NanoClick HUD")
+    .transparent(true)
+    .inner_size(140.0, 40.0)
+    .always_on_top(true)
+    .decorations(false)
+    .shadow(false)
+    .skip_taskbar(true)
+    .resizable(false)
+    .focused(false)
+    .visible(false)
+    .build()
+    .map_err(|e| format!("hud create failed: {e}"))?;
+    {
+        use tauri::PhysicalPosition;
+        let _ = win.set_position(PhysicalPosition::new(60, 60));
+    }
+    let _ = win.set_ignore_cursor_events(true);
+    debug_log_internal("info", "[HUD] lazy-created on demand");
+    Ok(win)
 }
 
 #[tauri::command]
@@ -388,20 +444,12 @@ macro_rules! stage {
 pub fn run() {
     crate::platform::init_dpi_awareness();
 
-    // Set Chromium WebView2 flags for minimum memory footprint (~120MB) and low CPU consumption.
-    // Limits V8 JS heap to 64MB, forces aggressive GC, runs GPU in-process, restricts process spawning,
-    // and disables unused background Chromium components.
-    if std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").is_err() {
-        std::env::set_var(
-            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-            "--js-flags=\"--max-old-space-size=64 --gc-global --optimize-for-size\" \
-             --in-process-gpu \
-             --renderer-process-limit=1 \
-             --disable-features=Translate,MediaRouter,OptimizationHints,ProcessPriorityPolicy \
-             --disable-background-networking \
-             --disable-component-update",
-        );
-    }
+    // NOTE: no WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS here on purpose.
+    // In-process GPU mode merges Chromium's GPU into OUR process: a fullscreen
+    // DirectX exclusive / driver reset then hangs the Win32 thread that also
+    // owns the click loop + WH_KEYBOARD_LL hook (see ZERO_JITTER_ISOLATION_PLAN).
+    // Keep the GPU in its own msedgewebview2.exe process; secondary WebViews
+    // (overlay/hud) are lazy-created on demand instead (cold boot = main only).
 
     let config_manager = Arc::new(ConfigManager::new());
     let initial_app_cfg = config_manager.load();
@@ -532,13 +580,21 @@ pub fn run() {
             if let Err(e) = hk.start() {
                 crate::debug_log_internal("warn", &format!("[Hotkeys] backend start failed: {e}"));
             }
-            // Initialize overlay window (ensures click-through from startup)
-            let _ = overlay::setup_overlay(&handle);
-            // Initialize HUD window (position and click-through from startup)
-            if let Some(win) = handle.get_webview_window("hud") {
-                use tauri::PhysicalPosition;
-                let _ = win.set_position(PhysicalPosition::new(60, 60));
-                let _ = win.set_ignore_cursor_events(true);
+            // LAZY secondary WebViews: cold boot = main window ONLY.
+            // Overlay is restored here (staggered, off the critical boot path)
+            // so persisted visual_ripple=true keeps working without any
+            // pre-created WebView in tauri.conf.json. HUD restores itself:
+            // main.js re-invokes toggle_hud_window ~150 ms after main load.
+            // overlay_ready/hud_ready show the window once transparent DOM renders.
+            if initial_app_cfg.ui.visual_ripple {
+                let h = handle.clone();
+                std::thread::spawn(move || {
+                    // Let the main window finish loading first: creating two
+                    // WebViews at the exact same instant doubles the startup
+                    // memory spike we are trying to avoid.
+                    std::thread::sleep(std::time::Duration::from_millis(2500));
+                    let _ = overlay::ensure_overlay_window(&h);
+                });
             }
             Ok(())
         })

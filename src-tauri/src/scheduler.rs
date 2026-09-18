@@ -581,6 +581,19 @@ impl ClickScheduler {
             let mut batch_click_count: u32 = 0;
             let mut batches_done: u32 = 0;
 
+            // LAZY overlay: pre-create the ripple WebView on a background thread
+            // at click-START (not in the hot loop) when ripple is enabled, so the
+            // first spawn-ripple emit already has a target. Zero cadence impact:
+            // this runs once before the loop, never per click.
+            if visual_ripple.load(Ordering::Relaxed) {
+                if let Some(ref app) = app_handle {
+                    let app_clone = app.clone();
+                    std::thread::spawn(move || {
+                        let _ = crate::overlay::ensure_overlay_window(&app_clone);
+                    });
+                }
+            }
+
             let emit_ripple_if_enabled = |spec: &ClickSpec| {
                 if visual_ripple.load(Ordering::Relaxed) {
                     if let Some(ref app) = app_handle {

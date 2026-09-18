@@ -232,15 +232,16 @@ fn test_overlay_assets_and_capabilities() {
     let html = String::from_utf8_lossy(&html_bytes);
     assert!(html.contains("overlay.css"), "overlay.html must link overlay.css");
     assert!(html.contains("overlay.js"), "overlay.html must link overlay.js");
-    assert!(html.contains("rippleContainer"), "overlay.html must have #rippleContainer");
+    assert!(html.contains("rippleCanvas"), "overlay.html must have #rippleCanvas");
 
-    // 2. overlay.css must define transparent background and ripple animation
+    // 2. overlay.css must define transparent background and canvas layout
+    // (ripple is a Canvas 2D renderer — no DOM keyframes anymore)
     let css_key = tauri::utils::assets::AssetKey::from("overlay.css");
     let css_bytes = ctx.assets().get(&css_key).expect("overlay.css must be embedded");
     let css = String::from_utf8_lossy(&css_bytes);
-    assert!(css.contains("background: transparent !important"), "overlay.css must enforce transparency");
+    assert!(css.contains("background: transparent"), "overlay.css must enforce transparency");
     assert!(css.contains("pointer-events: none"), "overlay.css must be pointer-events: none");
-    assert!(css.contains("ripple-expand"), "overlay.css must have ripple-expand animation");
+    assert!(css.contains("rippleCanvas"), "overlay.css must style #rippleCanvas");
 
     // 3. overlay.js must handle DPI scaling and overlay_ready
     let js_key = tauri::utils::assets::AssetKey::from("overlay.js");
@@ -263,13 +264,34 @@ fn test_overlay_assets_and_capabilities() {
     let index_html = String::from_utf8_lossy(&index_bytes);
     assert!(!index_html.contains("<div id=\"rippleContainer\""), "index.html must not contain legacy rippleContainer");
 
-    // 6. tauri.conf.json & capabilities must declare overlay window
+    // 6. tauri.conf.json must declare ONLY the main window at boot (lazy overlay/hud)
     let tauri_conf = include_str!("../tauri.conf.json");
-    assert!(tauri_conf.contains("\"label\": \"overlay\""), "tauri.conf.json must declare overlay window");
-    assert!(tauri_conf.contains("\"url\": \"overlay.html\""), "tauri.conf.json must point overlay to overlay.html");
-    assert!(tauri_conf.contains("\"fullscreen\": true"), "tauri.conf.json must set overlay fullscreen");
+    assert!(tauri_conf.contains("NanoClick"), "tauri.conf.json must declare main window");
+    assert!(tauri_conf.contains("\"windows\""), "tauri.conf.json must declare windows");
+    assert!(!tauri_conf.contains("overlay.html"), "tauri.conf.json must NOT pre-create overlay (lazy via ensure_overlay_window)");
+    assert!(!tauri_conf.contains("hud.html"), "tauri.conf.json must NOT pre-create hud (lazy via ensure_hud_window)");
 
     let cap_default = include_str!("../capabilities/default.json");
     assert!(cap_default.contains("\"overlay\""), "capabilities/default.json must include overlay window");
+    assert!(cap_default.contains("\"hud\""), "capabilities/default.json must include hud window");
+}
+
+/// Lazy-creation wiring: secondary WebViews must be built at runtime, never
+/// pre-declared in tauri.conf.json. Cold boot = main window only.
+#[test]
+fn test_lazy_windows_built_at_runtime() {
+    let overlay_src = include_str!("../src/overlay.rs");
+    assert!(overlay_src.contains("ensure_overlay_window"), "overlay.rs must expose ensure_overlay_window");
+    assert!(overlay_src.contains("WebviewWindowBuilder::new"), "overlay.rs must build overlay via WebviewWindowBuilder");
+    assert!(overlay_src.contains("overlay.html"), "overlay.rs must load overlay.html at runtime");
+    assert!(overlay_src.contains("win.destroy()") || overlay_src.contains("win.destroy"), "toggle_overlay(false) must destroy the WebView to free RAM");
+
+    let lib_src = include_str!("../src/lib.rs");
+    assert!(lib_src.contains("ensure_hud_window"), "lib.rs must expose ensure_hud_window");
+    assert!(lib_src.contains("hud.html"), "lib.rs must load hud.html at runtime");
+    assert!(lib_src.contains("no WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"), "lib.rs must document why no extra browser flags are set");
+
+    let sched_src = include_str!("../src/scheduler.rs");
+    assert!(sched_src.contains("ensure_overlay_window"), "scheduler must pre-create overlay on click-start (background thread)");
 }
 

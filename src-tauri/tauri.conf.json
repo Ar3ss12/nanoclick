@@ -19,35 +19,6 @@
                                     "decorations":  true,
                                     "transparent":  false,
                                     "center":  true
-                                },
-                                {
-                                    "label":  "overlay",
-                                    "title":  "NanoClick Overlay",
-                                    "url":  "overlay.html",
-                                    "transparent":  true,
-                                    "fullscreen":  true,
-                                    "alwaysOnTop":  true,
-                                    "decorations":  false,
-                                    "shadow":  false,
-                                    "skipTaskbar":  true,
-                                    "resizable":  false,
-                                    "focus":  false,
-                                    "visible":  false
-                                },
-                                {
-                                    "label":  "hud",
-                                    "title":  "NanoClick HUD",
-                                    "url":  "hud.html",
-                                    "transparent":  true,
-                                    "width":  140,
-                                    "height":  40,
-                                    "alwaysOnTop":  true,
-                                    "decorations":  false,
-                                    "shadow":  false,
-                                    "skipTaskbar":  true,
-                                    "resizable":  false,
-                                    "focus":  false,
-                                    "visible":  false
                                 }
                             ],
                 "security":  {
