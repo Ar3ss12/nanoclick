@@ -4,3 +4,10 @@ members = [
     "src-tauri"
 ]
 default-members = ["src-tauri"]
+
+[profile.release]
+opt-level = "z"     # Optimize for minimum binary size
+lto = true          # Link-Time Optimization across all crates
+codegen-units = 1   # Single code generation unit for maximum LLVM inlining
+panic = "abort"     # Strip panic unwinding tables & landing pads
+strip = true        # Strip all debug and symbol tables from binary
