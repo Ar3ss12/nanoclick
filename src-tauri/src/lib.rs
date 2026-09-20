@@ -9,6 +9,7 @@ mod platform;
 mod recorder;
 mod scheduler;
 mod overlay;
+mod watcher;
 
 use config_manager::{AppConfig, ConfigManager};
 use scheduler::ClickScheduler;
@@ -35,6 +36,135 @@ pub(crate) fn set_debug_mode_enabled(enabled: bool) {
 pub struct AppState {
     pub scheduler: Arc<ClickScheduler>,
     pub config_manager: Arc<ConfigManager>,
+    /// FIFO queue of mandatory-acknowledge boot notices (Deadbolt Modal).
+    /// Drained one-by-one by `get_startup_notices`; the UI stays bolted
+    /// until every notice is dismissed with OK. Never blocks boot itself.
+    pub startup_notices: Mutex<Vec<AppNotice>>,
+    /// Non-blocking runtime toast queue fed by the observer watcher.
+    /// Drained by `poll_file_toasts` (auto-dismiss in UI, no OK bolt).
+    pub file_toasts: Mutex<Vec<AppNotice>>,
+}
+
+/// Shared observer handle so save-commands can mark their own writes.
+pub struct WatcherState(pub Arc<crate::watcher::Observer>);
+
+/// Granular notice level for the Deadbolt Modal.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NoticeLevel {
+    Info,
+    Warning,
+    Critical,
+}
+
+/// Blocking-modal payload: level + title + message + optional path details.
+/// Frontend rules (vanilla JS, no libs): no [X], backdrop clicks are swallowed,
+/// Esc is killed, the ONLY exit is the OK button. Multiple notices are shown
+/// strictly in order until the queue is empty.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AppNotice {
+    pub level: NoticeLevel,
+    pub title: String,
+    pub message: String,
+    pub details: Option<String>,
+}
+
+fn healing_notice(action: &crate::defaults::SelfHealingAction) -> Option<AppNotice> {
+    use crate::defaults::SelfHealingAction as A;
+    match action {
+        A::RepairedAndPatched { backup_path, details } => Some(AppNotice {
+            level: NoticeLevel::Warning,
+            title: "notice_cfg_repaired_title".into(),
+            message: format!(
+                "notice_cfg_repaired_msg|{}",
+                details.len()
+            ),
+            details: Some(backup_path.display().to_string()),
+        }),
+        A::CorruptedAndRecovered { backup_path, restored_from_last_good } => {
+            let message = if *restored_from_last_good {
+                "notice_cfg_lkg_msg".into()
+            } else {
+                "notice_cfg_factory_msg".into()
+            };
+            Some(AppNotice {
+                level: NoticeLevel::Critical,
+                title: "notice_cfg_corrupted_title".into(),
+                message,
+                details: Some(backup_path.display().to_string()),
+            })
+        }
+        A::Migrated => Some(AppNotice {
+            level: NoticeLevel::Info,
+            title: "notice_cfg_migrated_title".into(),
+            message: "notice_cfg_migrated_msg".into(),
+            details: None,
+        }),
+        A::LoadedExisting | A::CreatedFresh => None,
+    }
+}
+
+/// Macros-store healing mapped into the same Deadbolt queue shape.
+/// Titles/messages are i18n KEYS resolved by the frontend (see locales).
+fn macros_healing_notice(
+    action: &crate::persistence::macros::MacrosHealAction,
+) -> Option<AppNotice> {
+    use crate::persistence::macros::MacrosHealAction as M;
+    match action {
+        M::RecoveredFromLastGood { backup_path } => Some(AppNotice {
+            level: NoticeLevel::Critical,
+            title: "notice_macros_lkg_title".into(),
+            message: "notice_macros_lkg_msg".into(),
+            details: Some(backup_path.display().to_string()),
+        }),
+        M::ResetEmpty { backup_path } => Some(AppNotice {
+            level: NoticeLevel::Critical,
+            title: "notice_macros_empty_title".into(),
+            message: "notice_macros_empty_msg".into(),
+            details: Some(backup_path.display().to_string()),
+        }),
+        M::LoadedExisting | M::CreatedMissing => None,
+    }
+}
+
+/// Runtime watcher verdict (observer only, never rewrites files).
+/// Titles/messages are i18n KEYS resolved by the frontend.
+fn file_health_notice(
+    file: &str,
+    verdict: &crate::watcher::FileHealth,
+) -> Option<AppNotice> {
+    use crate::watcher::FileHealth as H;
+    match verdict {
+        H::ChangedValid => Some(AppNotice {
+            level: NoticeLevel::Info,
+            title: "notice_watch_changed_title".into(),
+            message: format!("notice_watch_changed_msg|{file}"),
+            details: None,
+        }),
+        H::ChangedInvalid => Some(AppNotice {
+            level: NoticeLevel::Warning,
+            title: "notice_watch_invalid_title".into(),
+            message: format!("notice_watch_invalid_msg|{file}"),
+            details: None,
+        }),
+        H::Unchanged | H::IgnoredOwnWrite | H::Missing => None,
+    }
+}
+
+/// Drain ALL pending boot notices as an ordered queue (empty vec = all clear).
+/// Frontend shows them one-by-one; each requires its own OK click.
+/// Titles/messages are i18n KEYS — the frontend resolves them via I18nEngine;
+/// `|` suffix carries a param (count or file name), details carry the path.
+#[tauri::command]
+fn get_startup_notices(state: State<'_, AppState>) -> Vec<AppNotice> {
+    state.startup_notices.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default()
+}
+
+/// Non-blocking runtime toast queue (watcher verdicts). Unlike the boot
+/// Deadbolt queue, these auto-dismiss: observer info, never file rewrites.
+#[tauri::command]
+fn poll_file_toasts(state: State<'_, AppState>) -> Vec<AppNotice> {
+    state.file_toasts.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default()
 }
 
 #[tauri::command]
@@ -52,7 +182,27 @@ fn save_app_config(config: AppConfig, state: State<'_, AppState>, app: AppHandle
     // Keep persisted UI prefs and the lazy WebViews in sync: toggling ripple/HUD
     // in Settings must create/destroy the WebView on demand, not just flip a flag.
     let prev = state.config_manager.load();
+    let mut config = config;
+    // Remember window position: capture outer_position() into the SAME atomic
+    // save (no extra file, no plugin). Best-effort: window may be absent in
+    // tests, remember may be OFF. Never fails the save.
+    if config.ui.remember_window_position {
+        if let Some(win) = app.get_webview_window("main") {
+            if let Ok(pos) = win.outer_position() {
+                config.ui.window_x = Some(pos.x);
+                config.ui.window_y = Some(pos.y);
+            }
+        }
+    } else {
+        // Remember OFF: don't hoard stale coordinates.
+        config.ui.window_x = None;
+        config.ui.window_y = None;
+    }
     state.config_manager.save(&config)?;
+    // Swallow OUR OWN echo so the observer never toasts our save.
+    if let Some(w) = app.try_state::<crate::WatcherState>() {
+        w.0.mark_own_write("config");
+    }
     state
         .scheduler
         .set_config(config::Config::from(config.clone()));
@@ -452,7 +602,31 @@ pub fn run() {
     // (overlay/hud) are lazy-created on demand instead (cold boot = main only).
 
     let config_manager = Arc::new(ConfigManager::new());
-    let initial_app_cfg = config_manager.load();
+    // Boot-time heal: capture the action for the one-shot startup modal.
+    // `load()` runs ensure_config_file() internally (snapshot/quarantine/restore).
+    let (initial_app_cfg, boot_action) = config_manager.load_with_action();
+    let mut boot_notices: Vec<AppNotice> = healing_notice(&boot_action).into_iter().collect();
+    // Macros store heals here too (same boot, ordered right after config).
+    // Seeded ONCE: later saves refresh the snapshot directly (no boot queue).
+    let (_, macros_boot_action) = crate::persistence::macros::load_macros_healed();
+    if let Some(n) = macros_healing_notice(&macros_boot_action) {
+        boot_notices.push(n);
+    }
+    let startup_notices = Mutex::new(boot_notices);
+    let file_toasts = Mutex::new(Vec::<AppNotice>::new());
+    let watcher = Arc::new(crate::watcher::Observer::new());
+    // Register BEFORE any save can happen: config + macros, observer only.
+    watcher.watch(
+        "config",
+        config_manager.config_path(),
+        crate::watcher::config_bytes_valid,
+    );
+    watcher.watch(
+        "macros",
+        crate::persistence::macros::macros_path(),
+        crate::watcher::macros_bytes_valid,
+    );
+    let watcher_for_setup = Arc::clone(&watcher);
 
     let scheduler = Arc::new(ClickScheduler::new());
     scheduler.set_config(config::Config::from(initial_app_cfg.clone()));
@@ -463,6 +637,8 @@ pub fn run() {
     let app_state = AppState {
         scheduler,
         config_manager,
+        startup_notices,
+        file_toasts,
     };
 
     let macro_state = commands::MacroState::default();
@@ -497,6 +673,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(app_state)
         .manage(macro_state)
+        .manage(WatcherState(watcher_for_setup.clone()))
         .setup(move |app| {
             let handle = app.handle().clone();
             crate::platform::set_global_app_handle(handle.clone());
@@ -526,6 +703,32 @@ pub fn run() {
                             url, title, pos.x, pos.y, size.width, size.height
                         ),
                     );
+                    // Remember-window-position restore (BEHAVIOR card).
+                    // Sanitizer: only inside the CURRENT virtual screen —
+                    // a disconnected 2nd monitor (x=2560 on a 1920 screen)
+                    // must fall back to center, never off-screen.
+                    // Best-effort: all failures -> center (or conf default).
+                    if initial_app_cfg.ui.remember_window_position {
+                        if let (Some(x), Some(y)) =
+                            (initial_app_cfg.ui.window_x, initial_app_cfg.ui.window_y)
+                        {
+                            let (vw, vh) = platform::get_screen_size();
+                            if x >= 0 && y >= 0 && x < vw && y < vh {
+                                use tauri::PhysicalPosition;
+                                let _ = win.set_position(PhysicalPosition::new(x, y));
+                                debug_log_internal(
+                                    "info",
+                                    &format!("[Startup] restored window position to ({x},{y})"),
+                                );
+                            } else {
+                                let _ = win.center();
+                                debug_log_internal(
+                                    "warn",
+                                    &format!("[Startup] saved pos ({x},{y}) outside {vw}x{vh}; centered"),
+                                );
+                            }
+                        }
+                    }
                     // Force the main window into the foreground at startup.
                     // Without this, the OS sometimes leaves it behind other
                     // apps that were active when we launched (especially
@@ -596,10 +799,48 @@ pub fn run() {
                     let _ = overlay::ensure_overlay_window(&h);
                 });
             }
+            // ── Observer watcher thread (eyes only, hands off) ──────────
+            // 1s poll, 750ms debounce, own-write grace: external edits in
+            // Notepad surface as toasts, never as file rewrites. Healing is
+            // boot-time only — no war with the editor mid-keystroke.
+            // Heavy parse runs on THIS thread; toast push is a short lock.
+            {
+                let w = watcher_for_setup.clone();
+                let h = handle.clone();
+                std::thread::spawn(move || {
+                    // Skip the boot storm (lazy overlay/HUD + first saves).
+                    std::thread::sleep(std::time::Duration::from_millis(5000));
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            crate::watcher::POLL_INTERVAL_MS,
+                        ));
+                        for (key, health) in w.poll_all() {
+                            if let Some(n) = crate::file_health_notice(&key, &health) {
+                                let push_ok = h.try_state::<crate::AppState>().map(|s| {
+                                    if let Ok(mut q) = s.file_toasts.lock() {
+                                        // Cap: drop oldest, keep the queue bounded.
+                                        if q.len() >= 8 {
+                                            q.remove(0);
+                                        }
+                                        q.push(n);
+                                    }
+                                });
+                                let _ = push_ok;
+                                crate::debug_log_internal(
+                                    "info",
+                                    &format!("[Watcher] {key} -> {health:?} (toast queued)"),
+                                );
+                            }
+                        }
+                    }
+                });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_app_config,
+            get_startup_notices,
+            poll_file_toasts,
             save_app_config,
             toggle_mode,
             complete_onboarding,

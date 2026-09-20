@@ -1,10 +1,9 @@
 use crate::config::Config;
 use crate::guard::{AppFilter, ForegroundCache, TypingGuard, GUARD_POLL_MS};
 use crate::platform::{self, backend::ClickSpec, NativeEventHandle, PlatformTimer};
-use rand::Rng;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex as StdMutex, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
@@ -41,6 +40,79 @@ pub fn toggle_diag_dump() -> Vec<String> {
         return q.drain(..).collect();
     }
     Vec::new()
+}
+
+/// Focus Guard state machine — owned by the click-loop thread, toggled ON
+/// by the UI (`pause_on_focus_loss`). Contract:
+/// * `arm()` at run start: remember the foreground exe AS THE ALLOWED ONE
+///   (usually our own window — the clicker clicks elsewhere by design).
+/// * `poll()` on each loop pass: foreground CHANGED to a different process
+///   → auto-pause. `None` (lock screen, elevated) fails OPEN.
+/// * `disarm()` on run end / config save. Zero syscalls while disabled.
+pub struct FocusGuard {
+    enabled: AtomicBool,
+    session_exe: StdMutex<Option<String>>,
+}
+
+impl FocusGuard {
+    pub fn new(enabled: bool) -> Self {
+        FocusGuard {
+            enabled: AtomicBool::new(enabled),
+            session_exe: StdMutex::new(None),
+        }
+    }
+
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Relaxed);
+        if !enabled {
+            if let Ok(mut g) = self.session_exe.lock() {
+                *g = None;
+            }
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
+    }
+
+    /// Run start: snapshot the current foreground exe as the allowed one.
+    /// Failure to resolve is NOT an error: poll() fails open until a real
+    /// exe is seen (we never pause on what we cannot measure).
+    pub fn arm(&self, exe: Option<String>) {
+        if !self.is_enabled() {
+            return;
+        }
+        if let Ok(mut g) = self.session_exe.lock() {
+            *g = exe;
+        }
+    }
+
+    /// Disarm at run end / config save (no stale session across runs).
+    pub fn disarm(&self) {
+        if let Ok(mut g) = self.session_exe.lock() {
+            *g = None;
+        }
+    }
+
+    /// `true` when the foreground app changed away from the session exe.
+    /// Fail-open: `None` (unresolvable foreground) never pauses.
+    pub fn should_pause(&self, current: Option<&str>) -> bool {
+        if !self.is_enabled() {
+            return false;
+        }
+        let Some(cur) = current else {
+            return false; // fail-open
+        };
+        match self.session_exe.lock() {
+            Ok(guard) => match guard.as_deref() {
+                // Session exe unknown (resolution failed at arm): fail-open
+                // until we HAVE a baseline — otherwise first poll pauses.
+                None => false,
+                Some(allowed) => !cur.eq_ignore_ascii_case(allowed),
+            },
+            Err(_) => false,
+        }
+    }
 }
 
 pub struct ClickScheduler {
@@ -90,6 +162,10 @@ pub struct ClickScheduler {
     typing_guard: Arc<TypingGuard>,
     /// Smart Guard: restricts clicking to (or away from) selected apps.
     app_filter: Arc<AppFilter>,
+    /// Smart Guard: auto-pause when the foreground app CHANGES mid-run
+    /// (Alt+Tab, mouse click on another window, Win key, system toast).
+    /// State machine owned by the click loop; UI only writes the flag.
+    focus_guard: Arc<FocusGuard>,
 }
 
 impl ClickScheduler {
@@ -138,6 +214,7 @@ impl ClickScheduler {
                 &initial_cfg.app_filter_mode,
                 &initial_cfg.app_filter_list,
             )),
+            focus_guard: Arc::new(FocusGuard::new(initial_cfg.pause_on_focus_loss)),
         }
     }
 
@@ -147,6 +224,11 @@ impl ClickScheduler {
     /// never be (re)started while the user is typing.
     pub fn typing_guard(&self) -> &TypingGuard {
         &self.typing_guard
+    }
+
+    /// Focus Guard handle (written by config saves, read by the click loop).
+    pub fn focus_guard(&self) -> &FocusGuard {
+        &self.focus_guard
     }
 
     /// App-filter handle (read by the click loop, written by config saves).
@@ -195,6 +277,7 @@ impl ClickScheduler {
             typing_pause_ms: self.typing_guard.pause_ms(),
             app_filter_mode: self.app_filter.mode().as_config_str().to_string(),
             app_filter_list: self.app_filter.list(),
+            pause_on_focus_loss: self.focus_guard.is_enabled(),
         }
     }
 
@@ -242,6 +325,10 @@ impl ClickScheduler {
         self.typing_guard.set_pause_ms(cfg.typing_pause_ms);
         self.app_filter
             .set(&cfg.app_filter_mode, &cfg.app_filter_list);
+        // Focus Guard: sync the enabled flag; disarm a stale session so a
+        // config save never carries an old exe across runs.
+        self.focus_guard.set_enabled(cfg.pause_on_focus_loss);
+        self.focus_guard.disarm();
         // Signal the hotkey listener that bindings changed so it re-parses
         // them once instead of diffing string snapshots on every poll.
         self.hotkeys_version.fetch_add(1, Ordering::Release);
@@ -534,6 +621,7 @@ impl ClickScheduler {
         let image_trigger_should_stop = Arc::clone(&self.image_trigger_should_stop);
         let visual_ripple = Arc::clone(&self.visual_ripple);
         let app_filter_arc = Arc::clone(&self.app_filter);
+        let focus_guard_arc = Arc::clone(&self.focus_guard);
 
         thread::spawn(move || {
             #[cfg(target_os = "windows")]
@@ -549,6 +637,12 @@ impl ClickScheduler {
             // Smart Guard: TTL-memoized foreground lookup for the app filter
             // (2 syscalls, so it must never run per click).
             let fg_cache = ForegroundCache::new();
+            // Focus Guard: remember the foreground exe AS THE ALLOWED ONE at
+            // run start (hotkey start = the app we are about to click into).
+            // Zero syscalls while the guard is disabled; once per run else.
+            if focus_guard_arc.is_enabled() {
+                focus_guard_arc.arm(fg_cache.exe());
+            }
 
             let cur_button = button_arc.lock().unwrap().clone();
             // v4.2 — parse the config strings ONCE here at the boundary
@@ -796,6 +890,26 @@ impl ClickScheduler {
                     }
                 }
 
+                // ── SMART GUARD: FOCUS LOSS AUTO-PAUSE ────────────────────
+                // Alt+Tab / click-away / Win key / system toast moved the
+                // foreground to a DIFFERENT process mid-run → stop the
+                // clicker so it never keeps hammering the newly focused
+                // window. Same choke point as the app filter, so no dispatch
+                // branch can slip past. Same TTL cache: one atomic load
+                // while disabled, at most the shared 2 syscalls per 300 ms
+                // while enabled. `None` (lock screen, elevated) fails OPEN —
+                // we never pause on what we cannot measure.
+                if focus_guard_arc.is_enabled() {
+                    let fg_exe = fg_cache.exe();
+                    if focus_guard_arc.should_pause(fg_exe.as_deref()) {
+                        active.store(false, Ordering::Relaxed);
+                        if let Some(ref app) = app_handle {
+                            let _ = app.emit("focus-loss-paused", fg_exe);
+                        }
+                        break;
+                    }
+                }
+
                 // ── HOLD CLICK LOGIC ─────────────────────────────────────
                 if cur_click_spec.click_type == crate::platform::backend::ClickType::Hold {
                     // Press Down
@@ -934,7 +1048,9 @@ impl ClickScheduler {
                 }
 
                 let interval_ns = if deviation_ns > 0 {
-                    rng.gen_range((base_ns - deviation_ns)..=(base_ns + deviation_ns))
+                    // Bates B3: Gaussian-like tremor, strict ±deviation bounds.
+                    let f = bates_jitter_factor(&mut rng, deviation_ns as f64 / base_ns as f64);
+                    (base_ns as f64 * (1.0 + f)) as i64
                 } else {
                     base_ns
                 };
@@ -971,8 +1087,30 @@ impl ClickScheduler {
                 Self::status_and_hud_emit(app, total, mode_str, final_cps, "IDLE", false);
                 crate::overlay::flush_click_ripples(app);
             }
+
+            // Focus Guard: the session is over — drop the baseline so the
+            // next run re-arms with a fresh foreground. (set_config also
+            // disarms on save; this is the authoritative run-end cleanup.)
+            focus_guard_arc.disarm();
         });
     }
+}
+
+/// Bates B3 jitter factor: mean of 3 independent uniform draws in [-pct, +pct].
+///
+/// Gaussian-like human tremor (concentrated near target CPS) with STRICT bounds:
+/// the mean of three values in [-p, +p] can never leave [-p, +p] — no clamp,
+/// no broken slider contract, no timer underflow at 160 CPS.
+/// Moments: E = 0, Var = p²/9 (uniform would be p²/3). NO ×√3 compensation
+/// on purpose: rescaling would push edges to ±p×1.73 and break the ±35% promise.
+pub(crate) fn bates_jitter_factor(rng: &mut impl rand::Rng, pct_frac: f64) -> f64 {
+    if !(pct_frac > 0.0) {
+        return 0.0;
+    }
+    let r1 = rng.gen_range(-pct_frac..=pct_frac);
+    let r2 = rng.gen_range(-pct_frac..=pct_frac);
+    let r3 = rng.gen_range(-pct_frac..=pct_frac);
+    (r1 + r2 + r3) / 3.0
 }
 
 #[cfg(test)]
@@ -1163,5 +1301,193 @@ mod single_mode_active_precheck_tests {
         cfg2.visual_ripple = true;
         scheduler.set_config(cfg2);
         assert!(scheduler.get_config().visual_ripple);
+    }
+
+    #[test]
+    fn bates_jitter_moments_and_strict_bounds() {
+        use rand::SeedableRng;
+        // Deterministic seed: stable in CI, no flake.
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0xC10C_0001);
+        let p = 0.35f64;
+        let n = 10_000usize;
+        let mut sum = 0.0f64;
+        let mut sum_sq = 0.0f64;
+        let mut out_of_bounds = 0usize;
+        for _ in 0..n {
+            let f = bates_jitter_factor(&mut rng, p);
+            if f < -p || f > p {
+                out_of_bounds += 1;
+            }
+            sum += f;
+            sum_sq += f * f;
+        }
+        let mean = sum / n as f64;
+        let var = sum_sq / n as f64 - mean * mean;
+        // Mean ≈ 0 within ±0.5% of the scale.
+        assert!(mean.abs() < 0.005 * p, "Bates mean drifted: {mean}");
+        // Variance ≈ p²/9 within ±15% (uniform would be p²/3 — 3x wider).
+        let expected = p * p / 9.0;
+        let rel = ((var - expected) / expected).abs();
+        assert!(rel < 0.15, "Bates variance off: got {var}, want ~{expected}");
+        // Hard bound: ZERO escapes in 10k draws — no clamp ever needed.
+        assert_eq!(out_of_bounds, 0, "Bates escaped [-p, +p]");
+    }
+
+    #[test]
+    fn bates_jitter_zero_pct_is_exact() {
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(1);
+        assert_eq!(bates_jitter_factor(&mut rng, 0.0), 0.0);
+        assert_eq!(bates_jitter_factor(&mut rng, -0.5), 0.0);
+        // NaN guard: `!(NaN > 0.0)` is true → exact 0.0, never NaN out.
+        assert_eq!(bates_jitter_factor(&mut rng, f64::NAN), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod focus_guard_tests {
+    use super::*;
+
+    /// Disabled guard (default config) is transparent: a foreground change
+    /// never pauses, and arming while disabled stores nothing.
+    #[test]
+    fn disabled_guard_never_pauses() {
+        let g = FocusGuard::new(false);
+        assert!(!g.is_enabled());
+        g.arm(Some("game.exe".into()));
+        assert!(!g.should_pause(Some("game.exe")));
+        assert!(!g.should_pause(Some("browser.exe")));
+        assert!(!g.should_pause(None));
+    }
+
+    /// Core contract: same exe as at run start → keep going; a DIFFERENT
+    /// exe mid-run (Alt+Tab, click-away, Win key) → pause.
+    #[test]
+    fn same_exe_continues_changed_exe_pauses() {
+        let g = FocusGuard::new(true);
+        g.arm(Some("game.exe".into()));
+        assert!(!g.should_pause(Some("game.exe")));
+        assert!(
+            !g.should_pause(Some("GAME.EXE")),
+            "match must be case-insensitive"
+        );
+        assert!(g.should_pause(Some("browser.exe")));
+        assert!(g.should_pause(Some("explorer.exe")));
+    }
+
+    /// Fail-open: an unresolvable foreground (lock screen, elevated process)
+    /// never pauses, and an enabled guard without a baseline never pauses.
+    #[test]
+    fn fail_open_on_unknown_foreground_and_missing_baseline() {
+        let g = FocusGuard::new(true);
+        // No arm() at all: no baseline → fail-open.
+        assert!(!g.should_pause(Some("browser.exe")));
+        g.arm(Some("game.exe".into()));
+        // Baseline present but current unresolvable → fail-open.
+        assert!(!g.should_pause(None));
+    }
+
+    /// Arm while disabled must NOT seed the baseline: enabling later starts
+    /// from a clean slate (first polls fail-open until a fresh arm).
+    #[test]
+    fn arm_while_disabled_is_ignored() {
+        let g = FocusGuard::new(false);
+        g.arm(Some("game.exe".into()));
+        g.set_enabled(true);
+        assert!(!g.should_pause(Some("browser.exe")));
+        // A proper arm after enabling fixes the baseline.
+        g.arm(Some("game.exe".into()));
+        assert!(g.should_pause(Some("browser.exe")));
+    }
+
+    /// Disarm clears the baseline (run end / config save contract): the next
+    /// decision fails open until a new arm.
+    #[test]
+    fn disarm_clears_session_baseline() {
+        let g = FocusGuard::new(true);
+        g.arm(Some("game.exe".into()));
+        assert!(g.should_pause(Some("browser.exe")));
+        g.disarm();
+        assert!(!g.should_pause(Some("browser.exe")));
+    }
+
+    /// Toggling the switch OFF clears the baseline too (set_config contract):
+    /// a stale session exe must never survive a disable/enable cycle.
+    #[test]
+    fn set_enabled_false_disarms() {
+        let g = FocusGuard::new(true);
+        g.arm(Some("game.exe".into()));
+        g.set_enabled(false);
+        assert!(!g.is_enabled());
+        g.set_enabled(true);
+        assert!(
+            !g.should_pause(Some("browser.exe")),
+            "stale baseline must not survive a disable cycle"
+        );
+    }
+
+    /// Scheduler wiring: set_config() must sync the guard's enabled flag and
+    /// always disarm a stale session (a config save never carries an old exe
+    /// across runs).
+    #[test]
+    fn set_config_syncs_focus_guard_flag_and_disarms() {
+        let scheduler = ClickScheduler::new();
+        assert!(!scheduler.focus_guard().is_enabled());
+
+        let mut cfg = scheduler.get_config();
+        cfg.pause_on_focus_loss = true;
+        scheduler.set_config(cfg);
+        assert!(scheduler.focus_guard().is_enabled());
+
+        // Arm a session manually, then re-save config: the stale baseline
+        // must go (fail-open after the disarm).
+        scheduler.focus_guard().arm(Some("game.exe".into()));
+        let cfg2 = scheduler.get_config();
+        scheduler.set_config(cfg2);
+        assert!(
+            !scheduler.focus_guard().should_pause(Some("browser.exe")),
+            "set_config must disarm a stale session"
+        );
+
+        let mut cfg3 = scheduler.get_config();
+        cfg3.pause_on_focus_loss = false;
+        scheduler.set_config(cfg3);
+        assert!(!scheduler.focus_guard().is_enabled());
+        assert!(!scheduler.focus_guard().should_pause(Some("browser.exe")));
+    }
+
+    /// Source-level structural test (codebase convention): the focus check
+    /// must sit AFTER the app filter choke and BEFORE any dispatch branch
+    /// (hold / sequence / single), and arm() must happen before the loop
+    /// starts — otherwise the first clicks escape the guard.
+    #[test]
+    fn focus_check_gates_every_dispatch_branch() {
+        let src = include_str!("scheduler.rs");
+        let filter_off = src
+            .find("── SMART GUARD: APP FILTER")
+            .expect("app filter choke not present");
+        let focus_off = src
+            .find("── SMART GUARD: FOCUS LOSS AUTO-PAUSE")
+            .expect("focus loss choke not present");
+        let hold_off = src
+            .find("── HOLD CLICK LOGIC")
+            .expect("hold dispatch branch not present");
+        assert!(
+            filter_off < focus_off,
+            "focus check must come after the app filter choke"
+        );
+        assert!(
+            focus_off < hold_off,
+            "focus check must gate every dispatch branch"
+        );
+
+        let arm_off = src.find("focus_guard_arc.arm(").expect("arm() missing");
+        let loop_off = src
+            .find("// ── DECOUPLED ASYNCHRONOUS TELEMETRY WORKER")
+            .expect("telemetry marker missing");
+        assert!(
+            arm_off < loop_off,
+            "arm() must happen before the click loop starts"
+        );
     }
 }

@@ -34,6 +34,9 @@ pub struct Config {
     /// Typing Guard: a toggle hotkey pressed within this window after real
     /// text input is ignored (a letter inside a word, not a deliberate switch).
     pub typing_pause_ms: u32,
+    /// Focus Guard: auto-pause when the foreground app CHANGES mid-run
+    /// (Alt+Tab, click on another window, Win key, system toast).
+    pub pause_on_focus_loss: bool,
     /// App-scope filter mode: "everywhere" | "whitelist" | "blacklist".
     pub app_filter_mode: String,
     /// Lowercase process image names for the app filter (e.g. "discord.exe").
@@ -79,6 +82,7 @@ impl Default for Config {
             hotkey_debounce_ms: 80,
             active_mode: "autoclicker".into(),
             typing_pause_ms: 600,
+            pause_on_focus_loss: false,
             app_filter_mode: "everywhere".into(),
             app_filter_list: Vec::new(),
             sequence_points: Vec::new(),
@@ -120,6 +124,7 @@ impl From<AppConfig> for Config {
             hotkey_debounce_ms: app_cfg.engine.hotkey_debounce_ms,
             active_mode: app_cfg.active_mode,
             typing_pause_ms: app_cfg.ui.typing_pause_ms,
+            pause_on_focus_loss: app_cfg.ui.pause_on_focus_loss,
             app_filter_mode: normalize_app_filter_mode(&app_cfg.ui.app_filter_mode),
             app_filter_list: normalize_app_filter_list(&app_cfg.ui.app_filter_list),
             sequence_points: app_cfg.engine.sequence_points.clone(),

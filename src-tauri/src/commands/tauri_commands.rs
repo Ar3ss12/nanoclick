@@ -121,7 +121,7 @@ use crate::persistence;
 use crate::platform;
 use crate::recorder::{RecorderHandle, RecordingMode};
 use std::sync::{Arc, Mutex};
-use tauri::State;
+use tauri::{Manager, State};
 
 /// App state for macro/recorder commands.
 pub struct MacroState {
@@ -191,7 +191,7 @@ pub fn list_macros() -> Vec<Macro> {
 }
 
 #[tauri::command]
-pub fn save_macro(m: Macro) -> Result<Vec<Macro>, String> {
+pub fn save_macro(m: Macro, app: tauri::AppHandle) -> Result<Vec<Macro>, String> {
     let mut all = persistence::macros::load_macros();
     if let Some(existing) = all.iter_mut().find(|x| x.id == m.id) {
         *existing = m;
@@ -199,14 +199,20 @@ pub fn save_macro(m: Macro) -> Result<Vec<Macro>, String> {
         all.push(m);
     }
     persistence::macros::save_macros(&all)?;
+    if let Some(w) = app.try_state::<crate::WatcherState>() {
+        w.0.mark_own_write("macros");
+    }
     Ok(all)
 }
 
 #[tauri::command]
-pub fn delete_macro(id: String) -> Result<Vec<Macro>, String> {
+pub fn delete_macro(id: String, app: tauri::AppHandle) -> Result<Vec<Macro>, String> {
     let mut all = persistence::macros::load_macros();
     all.retain(|x| x.id != id);
     persistence::macros::save_macros(&all)?;
+    if let Some(w) = app.try_state::<crate::WatcherState>() {
+        w.0.mark_own_write("macros");
+    }
     Ok(all)
 }
 

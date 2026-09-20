@@ -104,6 +104,15 @@ fn test_stats_js_and_immediate_updates() {
     assert!(stats_code.contains("recordSessionTick"), "stats.js must have recordSessionTick");
     assert!(stats_code.contains("drawStatsChart"), "stats.js must have drawStatsChart");
     assert!(stats_code.contains("saveToLocalStorage"), "stats.js must have localStorage backup");
+    // Session lifecycle invariants: exactly-once finalize, junk filter, dirty flag.
+    // Finalize runs ONLY on the true active->idle transition (early return on
+    // !activeNow swallows late 66ms worker echoes); belt-and-suspenders
+    // monotonic guard survives even a missed flag reset.
+    assert!(stats_code.contains("if (!this.state.activeNow)"), "stats.js finalize must no-op on late idle echoes");
+    assert!(stats_code.contains("lastFinalizedClicks"), "stats.js must guard double-flush with lastFinalizedClicks");
+    assert!(stats_code.contains("isJunk"), "stats.js must filter junk runs from history");
+    assert!(stats_code.contains("statsDirty"), "stats.js must gate disk writes with a dirty flag");
+    assert!(stats_code.contains("st.history.length > 50"), "stats.js history must stay ring-capped at 50");
 
     // 2. index.html must load stats.js
     let html_key = tauri::utils::assets::AssetKey::from("index.html");
@@ -294,4 +303,160 @@ fn test_lazy_windows_built_at_runtime() {
     let sched_src = include_str!("../src/scheduler.rs");
     assert!(sched_src.contains("ensure_overlay_window"), "scheduler must pre-create overlay on click-start (background thread)");
 }
+
+/// Last-Known-Good wiring: golden snapshots + quarantine + notice queues.
+#[test]
+fn test_last_good_black_box_wiring() {
+    let defaults_src = include_str!("../src/defaults/mod.rs");
+    assert!(defaults_src.contains("config.last_good.json"), "must define LKG snapshot file name");
+    assert!(defaults_src.contains("refresh_last_good_snapshot"), "save path must refresh snapshot");
+    assert!(defaults_src.contains("load_last_good_snapshot"), "must restore LKG on corruption");
+    assert!(defaults_src.contains(".broken-"), "must quarantine broken file with timestamp");
+    assert!(defaults_src.contains("restored_from_last_good"), "must report LKG vs factory source");
+
+    let lib_src = include_str!("../src/lib.rs");
+    assert!(lib_src.contains("get_startup_notices"), "lib.rs must expose queue drain command");
+    assert!(lib_src.contains("poll_file_toasts"), "lib.rs must expose toast drain command");
+    assert!(lib_src.contains("startup_notices"), "AppState must carry notice queue");
+    assert!(lib_src.contains("file_toasts"), "AppState must carry toast queue");
+    assert!(lib_src.contains("WatcherState"), "save commands must mark own writes");
+    assert!(lib_src.contains("load_with_action"), "boot must capture healing action");
+    assert!(lib_src.contains("NoticeLevel"), "must define granular notice levels");
+    assert!(lib_src.contains("AppNotice"), "must define AppNotice payload");
+    assert!(lib_src.contains("Critical"), "critical level must exist");
+    assert!(lib_src.contains("macros_healing_notice"), "macros healing must feed the queue");
+    assert!(lib_src.contains("file_health_notice"), "watcher verdicts must feed toasts");
+
+    let cm_src = include_str!("../src/config_manager.rs");
+    assert!(cm_src.contains("load_with_action"), "ConfigManager must expose load_with_action");
+
+    let main_js = {
+        let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
+        let key = tauri::utils::assets::AssetKey::from("main.js");
+        let bytes = ctx.assets().get(&key).expect("main.js must be embedded");
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    assert!(main_js.contains("get_startup_notices"), "main.js must drain notice queue");
+    assert!(main_js.contains("poll_file_toasts"), "main.js must poll toast queue");
+    assert!(main_js.contains("showDeadboltQueue"), "main.js must chain queue in order");
+    assert!(main_js.contains("deadboltModal"), "main.js must build deadbolt modal");
+    assert!(main_js.contains("deadboltOk"), "modal must have mandatory OK button");
+    assert!(main_js.contains("resolveNoticeText"), "notices must resolve i18n keys");
+    assert!(main_js.contains("showFileToast"), "watcher verdicts must toast non-blocking");
+}
+
+/// Remember-window-position wiring: BEHAVIOR checkbox -> config fields ->
+/// save capture -> boot restore with virtual-screen sanitizer.
+#[test]
+fn test_remember_window_position_wiring() {
+    let cm_src = include_str!("../src/config_manager.rs");
+    assert!(cm_src.contains("remember_window_position"), "UiSettings must carry remember flag");
+    assert!(cm_src.contains("window_x"), "UiSettings must carry window_x");
+    assert!(cm_src.contains("window_y"), "UiSettings must carry window_y");
+
+    let lib_src = include_str!("../src/lib.rs");
+    assert!(lib_src.contains("outer_position"), "save_app_config must capture outer_position");
+    assert!(lib_src.contains("remember_window_position"), "save/restore must respect the flag");
+    assert!(lib_src.contains("get_screen_size"), "boot restore must sanitize against virtual screen");
+    assert!(lib_src.contains("set_position"), "boot restore must set_position when inside screen");
+    assert!(lib_src.contains("win.center()") || lib_src.contains(".center()"), "off-screen save must fall back to center");
+
+    let defaults_src = include_str!("../src/defaults/mod.rs");
+    assert!(defaults_src.contains("remember_window_position"), "repair must preserve the flag");
+    assert!(defaults_src.contains("window_x"), "repair must handle window_x");
+
+    let html = {
+        let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
+        let key = tauri::utils::assets::AssetKey::from("index.html");
+        let bytes = ctx.assets().get(&key).expect("index.html must be embedded");
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    assert!(html.contains("rememberPosCheckbox"), "BEHAVIOR card must have the checkbox");
+    assert!(html.contains("settings_remember_pos"), "checkbox must use i18n key");
+
+    let main_js = {
+        let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
+        let key = tauri::utils::assets::AssetKey::from("main.js");
+        let bytes = ctx.assets().get(&key).expect("main.js must be embedded");
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    assert!(main_js.contains("rememberPosCheckbox"), "main.js must hydrate/collect the checkbox");
+    assert!(main_js.contains("remember_window_position"), "main.js must sync the config field");
+}
+
+/// Focus-loss auto-pause wiring: BEHAVIOR checkbox -> UiSettings/Config field
+/// -> FocusGuard state machine -> click-loop choke -> UI pause toast.
+#[test]
+fn test_focus_loss_guard_wiring() {
+    let cm_src = include_str!("../src/config_manager.rs");
+    assert!(cm_src.contains("pause_on_focus_loss"), "UiSettings must carry pause_on_focus_loss (default false)");
+
+    let cfg_src = include_str!("../src/config.rs");
+    assert!(cfg_src.contains("pause_on_focus_loss"), "runtime Config must map pause_on_focus_loss");
+
+    let sched_src = include_str!("../src/scheduler.rs");
+    assert!(sched_src.contains("pub struct FocusGuard"), "FocusGuard state machine must exist");
+    assert!(sched_src.contains("focus_guard_arc.arm("), "run start must arm the guard with the session exe");
+    assert!(sched_src.contains("focus_guard_arc.should_pause("), "click loop must poll the guard");
+    assert!(sched_src.contains("focus_guard_arc.disarm();"), "run end / set_config must disarm the session");
+    assert!(sched_src.contains("focus-loss-paused"), "pause must notify the UI");
+
+    let html = {
+        let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
+        let key = tauri::utils::assets::AssetKey::from("index.html");
+        let bytes = ctx.assets().get(&key).expect("index.html must be embedded");
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    assert!(html.contains("pauseFocusLossCheckbox"), "BEHAVIOR card must have the focus-loss checkbox");
+    assert!(html.contains("settings_pause_focus_loss"), "checkbox must use i18n key");
+
+    let main_js = {
+        let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
+        let key = tauri::utils::assets::AssetKey::from("main.js");
+        let bytes = ctx.assets().get(&key).expect("main.js must be embedded");
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    assert!(main_js.contains("pause_on_focus_loss"), "main.js must hydrate/collect the flag");
+    assert!(main_js.contains("focus-loss-paused"), "main.js must toast the auto-pause reason");
+}
+
+/// i18n symmetry: every notice key used by Rust/JS must exist in all 3 locales.
+#[test]
+fn test_notice_i18n_symmetry() {
+    let keys = [
+        "deadbolt_ok",
+        "notice_cfg_repaired_title",
+        "notice_cfg_repaired_msg",
+        "notice_cfg_corrupted_title",
+        "notice_cfg_lkg_msg",
+        "notice_cfg_factory_msg",
+        "notice_cfg_migrated_title",
+        "notice_cfg_migrated_msg",
+        "notice_macros_lkg_title",
+        "notice_macros_lkg_msg",
+        "notice_macros_empty_title",
+        "notice_macros_empty_msg",
+        "notice_watch_changed_title",
+        "notice_watch_changed_msg",
+        "notice_watch_invalid_title",
+        "notice_watch_invalid_msg",
+        "toast_watch_changed",
+        "toast_watch_invalid",
+        "settings_pause_focus_loss",
+        "settings_remember_pos",
+        "focus_loss_paused_notify",
+    ];
+    for locale in ["en", "ua", "ru"] {
+        let asset = format!("locales/{locale}.json");
+        let key = tauri::utils::assets::AssetKey::from(asset.as_str());
+        let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
+        let bytes = ctx.assets().get(&key).unwrap_or_else(|| panic!("{locale}.json must be embedded"));
+        let text = String::from_utf8_lossy(&bytes);
+        let v: serde_json::Value = serde_json::from_str(&text).expect("locale must be valid JSON");
+        for k in keys {
+            assert!(v.get(k).is_some_and(|x| x.is_string()), "locale {locale} missing notice key {k}");
+        }
+    }
+}
+
 

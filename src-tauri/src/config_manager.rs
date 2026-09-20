@@ -191,6 +191,17 @@ pub struct UiSettings {
     pub show_notifications: bool,
     #[serde(default)]
     pub pause_on_focus_loss: bool,
+    /// Remember main window position across restarts (BEHAVIOR card).
+    /// Default ON: desktop QoL, zero risk (sanitized against virtual screen).
+    #[serde(default = "default_true")]
+    pub remember_window_position: bool,
+    /// Last known main-window position (physical px). Written on every
+    /// `save_app_config` from `outer_position()` when remember is ON;
+    /// restored at boot only if inside the current virtual screen.
+    #[serde(default)]
+    pub window_x: Option<i32>,
+    #[serde(default)]
+    pub window_y: Option<i32>,
     /// Typing Guard: while the user is typing, a toggle hotkey pressed within
     /// this window is ignored — a single-key hotkey sitting inside a word
     /// ("go rush B" → the `r`) must not switch the clicker on. Gameplay keys
@@ -243,6 +254,9 @@ impl Default for UiSettings {
             minimize_to_tray: true,
             show_notifications: true,
             pause_on_focus_loss: false,
+            remember_window_position: true,
+            window_x: None,
+            window_y: None,
             typing_pause_ms: 600,
             app_filter_mode: default_app_filter_mode(),
             app_filter_list: Vec::new(),
@@ -589,16 +603,29 @@ impl ConfigManager {
         self.config_path.to_string_lossy().to_string()
     }
 
+    /// Raw path handle for the observer watcher registration.
+    pub fn config_path(&self) -> PathBuf {
+        self.config_path.clone()
+    }
+
     /// Dedicated file path for statistics persistence across reinstalls and resets.
     pub fn stats_path(&self) -> PathBuf {
         self.config_path.with_file_name("stats.json")
     }
 
     pub fn load(&self) -> AppConfig {
-        let (mut app_config, _action) = crate::defaults::ensure_config_file(&self.config_path);
+        self.load_with_action().0
+    }
+
+    /// Same as `load()` but also returns the boot-time healing action so the
+    /// UI can show the mandatory-OK modal (repaired / recovered / migrated).
+    pub fn load_with_action(&self) -> (AppConfig, crate::defaults::SelfHealingAction) {
+        let (mut app_config, action) = crate::defaults::ensure_config_file(&self.config_path);
 
         // Fallback recovery: if total_clicks is 0, check if a dedicated stats.json
         // backup exists (e.g. fresh install/reinstall or config reset), and restore it.
+        // NEVER touches stats.json quarantine: stats is append-only telemetry,
+        // the LKG/quarantine scheme covers config.json only.
         if app_config.stats.total_clicks == 0 {
             let stats_file = self.stats_path();
             if stats_file.exists() {
@@ -612,7 +639,7 @@ impl ConfigManager {
             }
         }
 
-        app_config
+        (app_config, action)
     }
 
     pub fn reset_to_defaults(&self) -> Result<AppConfig, String> {
@@ -664,6 +691,11 @@ impl ConfigManager {
                 let _ = fs::rename(&stats_tmp, &stats_file);
             }
         }
+
+        // Our own write is proven good: refresh LKG snapshot so a later
+        // corruption restores THIS state. The observer's grace window
+        // (mark below happens in save callers) swallows the echo.
+        crate::defaults::refresh_last_good_snapshot(&self.config_path, config);
 
         Ok(())
     }

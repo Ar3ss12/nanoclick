@@ -15,6 +15,12 @@ const StatsEngine = {
     lastClicksDone: 0,   // Last known clicks_done value; reset to 0 on STOP
     lastDiskSave: 0,
     liveCpsHistory: [], // Max 60 rolling points for live Canvas chart
+    // ── Idempotent finalization (double-flush guard) ──
+    // Zapiznilyi 66ms worker tick after STOP must be a no-op, never a 2nd push.
+    lastFinalizedAt: 0,      // nowMs of the last history.push
+    lastFinalizedClicks: -1, // clicks value that was finalized
+    // ── Dirty flag: disk writes only when clicks actually happened ──
+    statsDirty: false,
   },
 
   _lastCpsRecordMs: 0,
@@ -61,11 +67,14 @@ const StatsEngine = {
   },
 
   // Called on each IPC state tick from the Rust scheduler
+  // saveConfigCallback is called ONLY on: START, STOP-finalize, and the
+  // 5s dirty-flush (when statsDirty). Never in idle — disk sleeps.
   recordSessionTick(active, clicks_done, cps, config, saveConfigCallback) {
     const nowMs = Date.now();
     const clicks = Math.max(0, Number(clicks_done) || 0);
     const st = this.ensureStatsConfig(config);
     const curCps = Math.max(0, Number(cps) || 0);
+    const markDirty = () => { this.state.statsDirty = true; };
 
     if (active) {
       if (!this.state.activeNow) {
@@ -86,6 +95,7 @@ const StatsEngine = {
         this.state.runClicks += deltaClicks;      // Per-run accumulator
         this.state.sessionClicks += deltaClicks;  // Session-wide accumulator
         st.total_clicks = (Number(st.total_clicks) || 0) + deltaClicks;
+        markDirty();
       }
 
       if (this.state.lastUpdate) {
@@ -101,40 +111,56 @@ const StatsEngine = {
         st.max_cps = Number(curCps.toFixed(1));
       }
 
-      if (nowMs - (this.state.lastDiskSave || 0) > 10000) {
+      // ── 5s dirty-flush: ONE disk write per 5s of clicking, ZERO in idle ──
+      if (nowMs - (this.state.lastDiskSave || 0) > 5000) {
         this.state.lastDiskSave = nowMs;
-        this.saveToLocalStorage(st);
-        if (typeof saveConfigCallback === "function") saveConfigCallback();
+        if (this.state.statsDirty) {
+          this.state.statsDirty = false;
+          this.saveToLocalStorage(st);
+          if (typeof saveConfigCallback === "function") saveConfigCallback();
+        }
       }
     } else {
-      if (this.state.activeNow) {
-        // ── Run ended: capture final click delta, log it, and reset lastClicksDone ──
-        const deltaClicks = clicks > this.state.lastClicksDone ? (clicks - this.state.lastClicksDone) : 0;
-        if (deltaClicks > 0) {
-          this.state.runClicks += deltaClicks;
-          this.state.sessionClicks += deltaClicks;
-          st.total_clicks = (Number(st.total_clicks) || 0) + deltaClicks;
-        }
-
-        this.state.activeNow = false;
-        this.state.lastUpdate = null;
-        this.state.lastClicksDone = 0; // Critical: reset so next START doesn't skip clicks
-        if (this.state.runClicks > 0 || this.state.sessionActiveMs > 1000) {
-          const avgVal = this.state.sessionActiveMs > 0
-            ? (this.state.runClicks / (this.state.sessionActiveMs / 1000))
-            : 0;
-          if (!Array.isArray(st.history)) st.history = [];
-          st.history.push({
-            timestamp: nowMs,
-            clicks: this.state.runClicks,         // Log per-run clicks in history
-            active_ms: this.state.sessionActiveMs,
-            avg_cps: Number(avgVal.toFixed(1)),
-          });
-          if (st.history.length > 50) st.history.shift();
-        }
-        this.saveToLocalStorage(st);
-        if (typeof saveConfigCallback === "function") saveConfigCallback();
+      // Late echo AFTER finalize: activeNow is already false — pure no-op.
+      // (The twin tick 550 -> 551 lands here, not in the branch below.)
+      if (!this.state.activeNow) {
+        return;
       }
+      // ── Run ended: EXACTLY-ONCE finalize (single entry point) ──
+      // Reached only on the true active->idle transition.
+      // ── Capture final click delta, log it, and reset lastClicksDone ──
+      const deltaClicks = clicks > this.state.lastClicksDone ? (clicks - this.state.lastClicksDone) : 0;
+      if (deltaClicks > 0) {
+        this.state.runClicks += deltaClicks;
+        this.state.sessionClicks += deltaClicks;
+        st.total_clicks = (Number(st.total_clicks) || 0) + deltaClicks;
+      }
+
+      this.state.activeNow = false;
+      this.state.lastUpdate = null;
+      this.state.lastClicksDone = 0; // Critical: reset so next START doesn't skip clicks
+      // ── Junk filter: skip noise runs (accidental hotkey taps) ──
+      // Counters above still grow; only the history chart stays clean.
+      const isJunk = this.state.runClicks < 5 && this.state.sessionActiveMs < 1000;
+      if (!isJunk && (this.state.runClicks > 0 || this.state.sessionActiveMs > 1000)) {
+        const avgVal = this.state.sessionActiveMs > 0
+          ? (this.state.runClicks / (this.state.sessionActiveMs / 1000))
+          : 0;
+        if (!Array.isArray(st.history)) st.history = [];
+        st.history.push({
+          timestamp: nowMs,
+          clicks: this.state.runClicks,         // Log per-run clicks in history
+          active_ms: this.state.sessionActiveMs,
+          avg_cps: Number(avgVal.toFixed(1)),
+        });
+        // Ring buffer cap: stats.json never grows past ~6 KB.
+        if (st.history.length > 50) st.history.shift();
+        this.state.lastFinalizedAt = nowMs;
+        this.state.lastFinalizedClicks = clicks;
+      }
+      this.state.statsDirty = false; // STOP always flushes synchronously below
+      this.saveToLocalStorage(st);
+      if (typeof saveConfigCallback === "function") saveConfigCallback();
     }
 
     this.recordCpsHistoryPoint(curCps, active);

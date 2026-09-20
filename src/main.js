@@ -495,6 +495,7 @@ const autostartCheckbox       = document.getElementById("autostartCheckbox");
 const minimizeToTrayCheckbox  = document.getElementById("minimizeToTrayCheckbox");
 const notificationsCheckbox   = document.getElementById("notificationsCheckbox");
 const pauseFocusLossCheckbox  = document.getElementById("pauseFocusLossCheckbox");
+const rememberPosCheckbox     = document.getElementById("rememberPosCheckbox");
 const alwaysOnTopCheckbox     = document.getElementById("alwaysOnTopCheckbox");
 
 const speedUnitBtn            = document.getElementById("speedUnitBtn");
@@ -933,6 +934,7 @@ function updateUiFromConfig(config) {
   if (minimizeToTrayCheckbox) minimizeToTrayCheckbox.checked = config.ui.minimize_to_tray !== false;
   if (notificationsCheckbox) notificationsCheckbox.checked = config.ui.show_notifications !== false;
   if (pauseFocusLossCheckbox) pauseFocusLossCheckbox.checked = !!config.ui.pause_on_focus_loss;
+  if (rememberPosCheckbox) rememberPosCheckbox.checked = config.ui.remember_window_position !== false;
   if (window.SmartGuard) window.SmartGuard.hydrate(config);
 
   if (themeSelect && config.ui.theme) {
@@ -1223,9 +1225,136 @@ async function loadConfig() {
     const path = await invoke("get_config_path");
     _configPath = path || "";
     updateConfigFolderTooltip();
+    // Deadbolt Modal queue: every boot notice needs its own OK click.
+    // No backdrop/Esc/[X] dismiss — the app stays bolted until drained.
+    // i18n dict may load a beat later: retry resolve is inside the modal,
+    // and toasts start polling in parallel (non-blocking).
+    try {
+      const notices = await invoke("get_startup_notices");
+      if (Array.isArray(notices) && notices.length) showDeadboltQueue(notices);
+    } catch (e) { /* notices are best-effort, never block boot */ }
+    try { startFileToastPolling(); } catch (_) {}
   } catch (err) {
     console.error("Failed to load app config:", err);
   }
+}
+
+// ── Deadbolt Modal: mandatory-acknowledge queue (vanilla JS, no libs) ─
+// Rules: no [X] in markup, backdrop clicks swallowed via stopPropagation,
+// Esc killed at window level while bolted, ONLY exit is the OK button.
+// Multiple notices chain strictly in order until the queue is empty.
+let _deadboltEscGuard = null;
+function showDeadboltQueue(notices) {
+  const queue = Array.isArray(notices) ? notices.slice() : [];
+  if (!queue.length) return;
+  // Kill Esc while any deadbolt is on screen.
+  if (!_deadboltEscGuard) {
+    _deadboltEscGuard = (e) => {
+      if ((e.key === "Escape" || e.key === "Esc") && document.getElementById("deadboltModal")) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+    window.addEventListener("keydown", _deadboltEscGuard, true);
+  }
+  const showNext = () => {
+    const notice = queue.shift();
+    if (!notice) {
+      const guard = _deadboltEscGuard;
+      _deadboltEscGuard = null;
+      if (guard) window.removeEventListener("keydown", guard, true);
+      return;
+    }
+    showDeadboltModal(notice, showNext);
+  };
+  showNext();
+}
+
+function resolveNoticeText(key, fallback) {
+  // Keys arrive as "key" or "key|param" (count / file name after the pipe).
+  if (typeof key !== "string" || !key) return fallback || "";
+  const pipe = key.indexOf("|");
+  const base = pipe >= 0 ? key.slice(0, pipe) : key;
+  const param = pipe >= 0 ? key.slice(pipe + 1) : "";
+  const dict = (typeof window !== "undefined" && window.I18nEngine && window.I18nEngine.dict) || null;
+  let text = (dict && dict[base]) || fallback || base;
+  // {n} for counts (repair details), {file} for watcher verdicts.
+  if (param) {
+    text = String(text).split("{n}").join(param).split("{file}").join(param);
+  }
+  return text;
+}
+
+function showDeadboltModal(notice, onOk) {
+  const prev = document.getElementById("deadboltModal");
+  if (prev) prev.remove();
+  const level = String(notice.level || "info").toLowerCase();
+  const accent = level === "critical" ? "#ef4444" : level === "warning" ? "#f59e0b" : "#06b6d4";
+  const overlay = document.createElement("div");
+  overlay.id = "deadboltModal";
+  overlay.className = "modal-overlay";
+  overlay.style.display = "flex";
+  // Backdrop clicks die here: stopPropagation, no dismiss.
+  overlay.addEventListener("click", (e) => e.stopPropagation(), true);
+  overlay.addEventListener("mousedown", (e) => e.stopPropagation(), true);
+  let detailsHtml = "";
+  if (notice.details) {
+    detailsHtml = '<div class="modal-body"><code style="word-break:break-all;font-size:12px;opacity:.85">' +
+      escapeHtml(String(notice.details)) + "</code></div>";
+  }
+  const okLabel = resolveNoticeText("deadbolt_ok", "OK");
+  overlay.innerHTML =
+    '<div class="modal-card" role="alertdialog" aria-modal="true" aria-labelledby="deadboltTitle" ' +
+    'style="border-top:3px solid ' + accent + '">' +
+    '<h3 id="deadboltTitle">' + escapeHtml(resolveNoticeText(notice.title, "Configuration notice")) + "</h3>" +
+    '<div class="modal-body"><p style="line-height:1.5">' + escapeHtml(resolveNoticeText(notice.message || notice.body, "")) + "</p></div>" +
+    detailsHtml +
+    '<div class="modal-footer"><button id="deadboltOk" class="btn primary">' + escapeHtml(okLabel) + "</button></div>" +
+    "</div>";
+  document.body.appendChild(overlay);
+  const ok = document.getElementById("deadboltOk");
+  // No [X] in markup on purpose. No Esc. No backdrop close. Only OK.
+  if (ok) {
+    ok.focus();
+    ok.addEventListener("click", () => { overlay.remove(); if (typeof onOk === "function") onOk(); });
+  }
+}
+
+// ── Runtime file-health toasts (observer watcher, non-blocking) ────
+// Poll every 3s; auto-dismiss after 6s. NEVER bolt the UI: observer only.
+function showFileToast(notice) {
+  const host = document.getElementById("toastHost") || document.body;
+  const el = document.createElement("div");
+  el.className = "toast toast-file-health toast-" + String(notice.level || "info").toLowerCase();
+  const title = resolveNoticeText(notice.title, "File changed");
+  const msg = resolveNoticeText(notice.message, "");
+  el.innerHTML = "<strong>" + escapeHtml(title) + "</strong><span>" + escapeHtml(msg) + "</span>";
+  el.style.cssText = "pointer-events:auto;margin-top:8px;padding:10px 14px;border-radius:8px;" +
+    "background:rgba(20,24,32,.95);border:1px solid rgba(255,255,255,.12);" +
+    "font-size:13px;line-height:1.4;max-width:340px;box-shadow:0 8px 24px rgba(0,0,0,.45)";
+  host.appendChild(el);
+  setTimeout(() => { if (el.parentNode) el.parentNode.removeChild(el); }, 6000);
+}
+
+function startFileToastPolling() {
+  if (startFileToastPolling._started) return;
+  startFileToastPolling._started = true;
+  const tick = async () => {
+    try {
+      const inv = getRawInvoke();
+      const toasts = inv ? await inv("poll_file_toasts") : [];
+      if (Array.isArray(toasts)) {
+        for (const t of toasts) showFileToast(t);
+      }
+    } catch (_) { /* watcher toasts are best-effort */ }
+  };
+  setInterval(tick, 3000);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
 }
 
 // Helper: safely parse int preserving 0 as a valid value
@@ -1312,6 +1441,7 @@ async function saveConfig() {
       if (minimizeToTrayCheckbox) currentConfig.ui.minimize_to_tray = minimizeToTrayCheckbox.checked;
       if (notificationsCheckbox) currentConfig.ui.show_notifications = notificationsCheckbox.checked;
       if (pauseFocusLossCheckbox) currentConfig.ui.pause_on_focus_loss = pauseFocusLossCheckbox.checked;
+      if (rememberPosCheckbox) currentConfig.ui.remember_window_position = rememberPosCheckbox.checked;
       if (window.SmartGuard) window.SmartGuard.collect(currentConfig);
       if (themeSelect) currentConfig.ui.theme = themeSelect.value;
       if (languageSelect) currentConfig.ui.language = languageSelect.value;
@@ -1403,14 +1533,14 @@ if (cpsInput) {
 // ── Jitter slider + number input (Dashboard) ─────────────────
 if (randomRange) randomRange.addEventListener("input", (e) => {
   const val = parseFloat(e.target.value);
-  const safeVal = isNaN(val) ? 0 : Math.max(0, Math.min(30, val));
+  const safeVal = isNaN(val) ? 0 : Math.max(0, Math.min(35, val));
   if (randomInput) randomInput.value = safeVal;
   if (currentConfig?.engine) currentConfig.engine.jitter_percent = safeVal;
   saveConfigThrottled();
 });
 if (randomInput) randomInput.addEventListener("input", (e) => {
   const val = parseFloat(e.target.value);
-  const safeVal = isNaN(val) ? 0 : Math.max(0, Math.min(30, val));
+  const safeVal = isNaN(val) ? 0 : Math.max(0, Math.min(35, val));
   if (randomRange) randomRange.value = safeVal;
   if (currentConfig?.engine) currentConfig.engine.jitter_percent = safeVal;
   saveConfigThrottled();
@@ -1861,6 +1991,7 @@ if (startMinimizedCheckbox) startMinimizedCheckbox.addEventListener("change", sa
 if (minimizeToTrayCheckbox) minimizeToTrayCheckbox.addEventListener("change", saveConfig);
 if (notificationsCheckbox) notificationsCheckbox.addEventListener("change", saveConfig);
 if (pauseFocusLossCheckbox) pauseFocusLossCheckbox.addEventListener("change", saveConfig);
+if (rememberPosCheckbox) rememberPosCheckbox.addEventListener("change", saveConfig);
 
 // ── DYNAMIC THEMES & ACCENT ENGINE ───────────────────────────
 function applyTheme(themeName, accentHex) {
@@ -3557,6 +3688,21 @@ listenSilent("status-update", (event) => {
   } catch (err) {
     origError.call(console, "[status-update error]", err);
     dbg("STATUS UPDATE ERROR:", err?.message || String(err));
+  }
+});
+
+// ── FOCUS LOSS AUTO-PAUSE (Smart Guard) ──────────────────────────
+// The Rust click loop stopped the run because the foreground app changed
+// mid-run (Alt+Tab, click-away, Win key, system toast). The final
+// status-update (active=false) already flipped the UI to idle — this
+// listener only explains WHY. Payload = the exe that took focus (or null).
+listen("focus-loss-paused", (event) => {
+  try {
+    const exe = typeof event?.payload === "string" && event.payload ? event.payload : null;
+    const base = getI18nText("focus_loss_paused_notify", {}, "Auto-paused: window focus changed");
+    showToast("⏸ " + base + (exe ? ` → ${exe}` : ""), "warn");
+  } catch (err) {
+    dbg("focus-loss-paused handler error:", err?.message || String(err));
   }
 });
 

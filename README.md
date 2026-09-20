@@ -4,7 +4,7 @@
 
 Built with **Tauri 2 + Rust + vanilla JS**. No Electron, no bundler, no bloat: the production installer is **~3.5 MB**.
 
-![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue) ![Tests](https://img.shields.io/badge/tests-146%2F146-brightgreen) ![i18n](https://img.shields.io/badge/i18n-UA%20%7C%20RU%20%7C%20EN-blue) ![Tauri](https://img.shields.io/badge/Tauri-2.x-FFC131) ![Rust](https://img.shields.io/badge/rust-stable--msvc-DEA584)
+![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue) ![Tests](https://img.shields.io/badge/tests-169%2F169-brightgreen) ![i18n](https://img.shields.io/badge/i18n-UA%20%7C%20RU%20%7C%20EN-blue) ![Tauri](https://img.shields.io/badge/Tauri-2.x-FFC131) ![Rust](https://img.shields.io/badge/rust-stable--msvc-DEA584)
 
 ---
 
@@ -18,7 +18,7 @@ Built with **Tauri 2 + Rust + vanilla JS**. No Electron, no bundler, no bloat: t
 
 ### 🖱️ Click Engine
 - **Single / Double / Hold** click modes with configurable press & pause durations
-- **Gaussian Timing & Coordinate Variance** — statistical timing jitter (±0–30%) and spatial micro-dispersion (±0–50 px) within configurable variance thresholds
+- **Gaussian Timing & Coordinate Variance** — Bates B3 human tremor (±0–35%, mean-of-3 bell concentrated near target CPS, strict bounds, no clamp) and spatial micro-dispersion (±0–50 px) within configurable variance thresholds
 - **Position picker** — bind clicks to a fixed screen point or follow the cursor
 - **Precise CPS control** (0.1–160 CPS) with live hotkey speed adjustment and real-time telemetry
 - **Hover/Flyout Unit Switchers** — seamlessly toggle between CPS (Clicks/sec) and ms (Interval) directly from the dashboard
@@ -54,7 +54,9 @@ Built with **Tauri 2 + Rust + vanilla JS**. No Electron, no bundler, no bloat: t
 
 ### 🛡️ Safety, Reliability & Self-Healing
 - **Smart Typing Guard (Default ON)** — auto-stops clicking when typing real text and locks out hotkeys (600ms default); features a 2-second intentional safety cooldown before disarming
-- **Self-Healing Configuration Engine** — intelligent syntax repair (trailing commas, unclosed braces) and smart patcher that preserves valid user hotkeys, custom presets, and stats
+- **Auto-Pause on Focus Loss (FocusGuard)** — opt-in guard that stops the clicker the moment the foreground app changes mid-run (Alt+Tab, click-away, Win key, system toast); session baseline via the 300ms `ForegroundCache`, fail-open on unresolvable focus, UI toast explains the pause
+- **Remember Window Position** — restores the last main-window position on launch; coordinates persist in the same atomic config save and are sanitized against the virtual screen (off-screen → auto-center)
+- **Self-Healing Configuration Engine** — Last Known Good snapshots (`config.last_good.json` / `macros.last_good.json`, hardened readonly+hidden "black box"), timestamped quarantine (`*.broken-<epoch>`, visible), Deadbolt Modal queue (mandatory OK, no X/backdrop/Esc), and an observer watcher (1s poll, debounce, runtime toasts only — never rewrites files)
 - **Factory Reset with 5-Second Cooldown** — safe reset button with auto-backup (`config.json.bak`) and "Think (5)" confirmation modal
 - **Always on Top Window Toggle** — keeps the interface floating during full-screen games or workflows
 - **Zero-Latency Stop & Fast Double-Tap** — stops clicking instantly on keypress (0ms) without debounce blocking
@@ -119,13 +121,14 @@ cargo tauri build --bundles nsis
 ```bash
 cd src-tauri
 cargo test -- --skip physical_
-# → 146 passed; 0 failed (138 unit + 8 integration)
+# → 158 passed; 0 failed (148 unit + 10 integration)
 ```
 
 The test suite covers:
-- **i18n Key Symmetry & DOM Validation** — 100% 3-way synchronization across UA, RU, and EN (337 keys)
+- **i18n Key Symmetry & DOM Validation** — 100% 3-way synchronization across UA, RU, and EN (337 keys + 18 notice keys × 3 locales)
 - **Windows UIPI & Elevation Integration** — token privilege checks and app manifests
 - **Stats Triple-Redundancy** — `config.json` + `stats.json` + `localStorage` fallback
+- **Stats Session Lifecycle** — exactly-once finalize (no double-flush twins), junk-run filter (`<5 clicks & <1s` skipped from chart), dirty-flag 5s flush (zero disk writes in idle), ring-capped history (50 entries, ~6 KB ceiling)
 - **Modal Scrollability & Trap Immunity** — Escape handlers and backdrop closes across all overlays
 - **Win32 Hook routing** & physical input matching (`SendInput`, Numpad, Mouse X-Buttons)
 - **Normalizer 5-phase pipeline** & RDP mouse trajectory simplification
@@ -153,6 +156,9 @@ The test suite covers:
 ```
 
 - **All timing runs on a Rust worker thread** — UI never drives the click loop
+- **Exactly-once session finalize** — `stats.js` writes one history entry per run: the `active→idle` transition is the single entry point, late 66ms worker echoes are no-ops (`!activeNow` early return + monotonic guard), so no more timestamp twins 7–40ms apart
+- **Junk-run filter** — accidental hotkey taps (`<5 clicks` and `<1s`) grow the counters but never pollute the history chart
+- **Dirty-flag stats flush** — disk writes only when clicks happened (START, STOP-finalize, 5s flush while dirty); idle app performs zero disk writes, `history` ring-capped at 50 entries (~6 KB ceiling)
 - **Lazy secondary WebViews** — cold boot creates only the `main` window (`tauri.conf.json` declares no `overlay`/`hud`). The fullscreen ripple overlay and floating HUD are built on demand via `WebviewWindowBuilder` (`ensure_overlay_window` / `ensure_hud_window`), shown only after their transparent DOM renders (Zero-Flash), and fully `destroy()`ed when toggled off — idle RAM holds zero secondary WebViews
 - **66 ms (15 FPS) IPC telemetry** — click counter & status updates come from a dedicated background worker reading lock-free atomics, keeping IPC overhead negligible even at 160 CPS
 - **No extra Chromium flags** — `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` is deliberately unset: in-process GPU mode would merge Chromium's GPU into our process and hang the click/hook thread on a DirectX reset (see `docs/ZERO_JITTER_ISOLATION_PLAN.md`); RAM is saved by lazy windows instead
