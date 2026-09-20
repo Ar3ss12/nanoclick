@@ -715,7 +715,12 @@ pub fn run() {
                             let (vw, vh) = platform::get_screen_size();
                             if x >= 0 && y >= 0 && x < vw && y < vh {
                                 use tauri::PhysicalPosition;
+                                // A live-window move can make WebView2 reload the
+                                // page; the page's beforeunload handler must not
+                                // treat that as "user closed the app".
+                                let _ = win.eval("window.__NANOCLICK_RELOADING__ = true;");
                                 let _ = win.set_position(PhysicalPosition::new(x, y));
+                                let _ = win.eval("window.__NANOCLICK_RELOADING__ = false;");
                                 debug_log_internal(
                                     "info",
                                     &format!("[Startup] restored window position to ({x},{y})"),

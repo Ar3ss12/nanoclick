@@ -5094,8 +5094,20 @@ onDomReady(() => {
   }
 });
 
-// Clean process termination hook on window unload
-window.addEventListener("beforeunload", () => {
+// Clean process termination hook on REAL app close.
+// v1.1.0 fix: was a bare `beforeunload` — which fires on EVERY page reload,
+// including the benign WebView2 reload triggered by win.set_position() at
+// boot (remember-window-position restore). Result: the restore moved the
+// window -> page reloaded -> JS called exit_app -> full backend shutdown ->
+// "frontend alive, backend dead". Now the kill only happens when the window
+// is actually being torn down for good, not on internal reloads.
+window.addEventListener("beforeunload", (e) => {
+  // Webview2 fires beforeunload for internal reloads with no trusted user
+  // intent; the app's own CloseRequested path in Rust (RunEvent::WindowEvent)
+  // already performs the full shutdown, so a JS-initiated exit here is only
+  // needed as a last-resort fallback. Gate it behind the same flag the
+  // updater relaunch uses: a page that is being swapped out must NOT kill us.
+  if (window.__NANOCLICK_RELOADING__) return;
   if (typeof invoke === "function") {
     invoke("exit_app").catch(() => {});
   }
