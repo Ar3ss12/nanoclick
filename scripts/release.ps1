@@ -102,7 +102,7 @@ if (-not $Notes) {
     $Notes = @"
 ## ⚡ NanoClick $Tag
 
-Welcome to the first public beta release of **NanoClick**!
+Welcome to NanoClick $Tag.
 
 ### Key Highlights
 - **Ultra-lightweight & High Performance**: Built with Tauri 2 and pure Rust. Production setup is only ~3.7 MB and runs with ~15 MB RAM usage.
@@ -321,8 +321,13 @@ if ($Action -in @("all", "build")) {
         $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = $KeyPassword
     }
 
-    Write-StepLog "Configuring build concurrency" "CARGO_BUILD_JOBS=2 (safe memory footprint)"
-    $env:CARGO_BUILD_JOBS = "2"
+    # Build concurrency: same memory rule as the preflight — the release profile is
+    # LTO + codegen-units=1, and a 2-job run has already died with "rustc-LLVM ERROR:
+    # out of memory". Default to 1; raise it on a machine with headroom via
+    # `set CARGO_BUILD_JOBS=4` before running this script.
+    $buildJobs = if ($env:CARGO_BUILD_JOBS -and $env:CARGO_BUILD_JOBS -match '^\d+$') { $env:CARGO_BUILD_JOBS } else { "1" }
+    Write-StepLog "Configuring build concurrency" "CARGO_BUILD_JOBS=$buildJobs"
+    $env:CARGO_BUILD_JOBS = $buildJobs
 
     Write-StepLog "Executing Tauri release build" "cargo tauri build --bundles nsis"
     Write-StepInfo "Detail" "Compiling Rust core backend, bundling web UI, and generating NSIS installer..."
