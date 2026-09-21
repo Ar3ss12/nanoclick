@@ -253,12 +253,13 @@ if ($preflightRuns) {
     }
 
     # 2. Broad lint tripwire (oxlint — a Rust binary, no node_modules needed).
-    #    GATE = zero ERRORS. Warnings (currently ~53, mostly `no-empty` on the
-    #    deliberate `catch (_) {}` idiom) are a documented baseline: fail only on
-    #    errors so the gate is not turned off after its first run.
+    #    GATE = zero errors AND zero warnings (--deny-warnings). The 53 warnings
+    #    that used to be "the baseline" were dead code, shadowed identifiers and
+    #    empty catches — all resolved in the source or silenced by a documented,
+    #    justified exception. See AGENTS.md.
     $lintScript = Join-Path $repoRoot "scripts\check-js-lint.ps1"
     if (Test-Path -LiteralPath $lintScript) {
-        Write-StepLog "Linting the frontend" "oxlint; errors fail the gate, warnings are baseline"
+        Write-StepLog "Linting the frontend" "oxlint; 0 errors / 0 warnings required (--deny-warnings)"
         & powershell -NoProfile -ExecutionPolicy Bypass -File $lintScript
         if ($LASTEXITCODE -eq 1) {
             Write-StepError "Frontend lint FAILED - fix the reported errors before shipping"
@@ -266,7 +267,7 @@ if ($preflightRuns) {
         } elseif ($LASTEXITCODE -ne 0) {
             Write-StepWarn "Lint tooling unavailable (exit $LASTEXITCODE) - lint step skipped"
         } else {
-            Write-StepDone "Frontend lint clean (0 errors)"
+            Write-StepDone "Frontend lint clean (0 errors / 0 warnings)"
         }
     } else {
         Write-StepWarn "scripts\check-js-lint.ps1 not found - lint gate skipped"
@@ -275,13 +276,18 @@ if ($preflightRuns) {
     # 3. Rust gates (JS syntax + boot-guard wiring live in tests/test_assets.rs).
     Push-Location $repoRoot
     try {
-        $env:CARGO_BUILD_JOBS = "2"
+        # Job count: the release profile is built with LTO + codegen-units=1, which is
+        # memory-hungry — a 2-job run has already died with "rustc-LLVM ERROR: out of
+        # memory". Default to 1 (the repo's documented "after cargo clean" rule) and let
+        # a machine with headroom raise it: `set CARGO_BUILD_JOBS=4` before the script.
+        $jobs = if ($env:CARGO_BUILD_JOBS -and $env:CARGO_BUILD_JOBS -match '^\d+$') { $env:CARGO_BUILD_JOBS } else { "1" }
+        $env:CARGO_BUILD_JOBS = $jobs
         if ($FullTests) {
-            Write-StepLog "Running the full test suite" "cargo test --release -j 2 -- --skip physical_"
-            cargo test --release -j 2 -- --skip physical_
+            Write-StepLog "Running the full test suite" "cargo test --release -j $jobs -- --skip physical_"
+            cargo test --release -j $jobs -- --skip physical_
         } else {
-            Write-StepLog "Running frontend-gate tests" "cargo test --release -j 2 --test test_assets (use -FullTests for all)"
-            cargo test --release -j 2 --test test_assets
+            Write-StepLog "Running frontend-gate tests" "cargo test --release -j $jobs --test test_assets (use -FullTests for all)"
+            cargo test --release -j $jobs --test test_assets
         }
         if ($LASTEXITCODE -ne 0) {
             Write-StepError "Test gate FAILED (exit code $LASTEXITCODE)"

@@ -45,13 +45,24 @@
       "varsIgnorePattern": "^_"
     }],
     "no-constant-condition": "warn",
-    "no-empty": "warn",
+    // 27 of the src/ warnings were empty CATCH blocks — the deliberate "a logger
+    // must never throw" idiom (boot_guard.js 5, sequence_editor.js 8, main.js 6,
+    // stats.js 3, uipi_manager.js 2, plus 3 bare `catch {}`). This silences exactly
+    // those while keeping a genuinely empty `if {}` / loop body reviewable.
+    // Preferred over 27 `/* ignore */` comments: same information, no churn.
+    "no-empty": ["warn", { "allowEmptyCatch": true }],
     "no-useless-escape": "warn",
     // Off: the UI boot sequence intentionally awaits inside loops/promises, and
     // `require-await` would fire on the async Tauri wrappers.
     "require-await": "off",
     "no-await-in-loop": "off",
     "no-underscore-dangle": "off"
+  },
+  // The justified `// oxlint-disable-next-line` comments in main.js
+  // (unicorn/prefer-add-event-listener, 3 sites) must not outlive their reason:
+  // this reports a suppression that no longer suppresses anything.
+  "options": {
+    "reportUnusedDisableDirectives": "warn"
   },
   "ignorePatterns": [
     "locales/**",

@@ -199,7 +199,7 @@ const StatsEngine = {
     const tc = document.getElementById("statTotalClicks");
     const ta = document.getElementById("statTotalActiveTime");
     const mc = document.getElementById("statMaxCps");
-    const ts = document.getElementById("statTotalSessions");
+    const statTotalSessionsEl = document.getElementById("statTotalSessions");
     const pa = document.getElementById("statPresetsApplied");
 
     if (sc) sc.textContent = this.fmtNum(this.state.sessionClicks);
@@ -214,7 +214,7 @@ const StatsEngine = {
     if (tc) tc.textContent = this.fmtNum(st.total_clicks);
     if (ta) ta.textContent = this.fmtDuration(st.total_active_ms);
     if (mc) mc.textContent = (Number(st.max_cps || 0)).toFixed(1);
-    if (ts) ts.textContent = this.fmtNum(st.total_sessions);
+    if (statTotalSessionsEl) statTotalSessionsEl.textContent = this.fmtNum(st.total_sessions);
     if (pa) pa.textContent = this.fmtNum(st.presets_applied);
 
     this.drawStatsChart();

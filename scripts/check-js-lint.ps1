@@ -17,9 +17,13 @@
       object keys, shady conditions, missing `await` on already-resolved chains.
 
   EXIT CODES
-    0 - no ERRORS (warnings are allowed; they are the documented baseline)
-    1 - oxlint reported errors (the release preflight treats this as a failure)
+    0 - clean: no errors and no warnings (the gate passes --deny-warnings)
+    1 - findings: oxlint reported errors or warnings
     2 - tooling unavailable (no node/npx) — not a code failure
+
+  Use -AllowWarnings only while triaging a warning: the historical "errors only"
+  mode. The 53-warning baseline was burned down to zero on 2026-09-21 (AGENTS.md),
+  so a warning is a regression, not noise.
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts\check-js-lint.ps1
@@ -33,7 +37,9 @@ param(
   # Override per-run with -Version or the NANOCLICK_OXLINT_VERSION env var.
   [string]$Version = $env:NANOCLICK_OXLINT_VERSION,
   [string]$Config = ".oxlintrc.json",
-  [switch]$Fix
+  [switch]$Fix,
+  # Emergency escape hatch for triaging: go back to "errors only".
+  [switch]$AllowWarnings
 )
 
 $ErrorActionPreference = 'Stop'
@@ -66,6 +72,9 @@ if (-not $npx) {
 
 $oxlintArgs = @('-y', "oxlint@$Version", '--config', $Config, '-f', 'default')
 if ($Fix) { $oxlintArgs += '--fix' }
+# Warnings are treated as findings: the ~53-item baseline was burned down to zero
+# on 2026-09-21 (see AGENTS.md), so anything reported here is new.
+if (-not $AllowWarnings) { $oxlintArgs += '--deny-warnings' }
 
 Push-Location $runDir
 try {
@@ -78,11 +87,9 @@ try {
 
 Write-Host ''
 if ($code -eq 0) {
-  # Exit 0 means "no ERRORS". Warnings (the ~53-item documented baseline, mostly
-  # `no-empty` on the deliberate `catch (_) {}` idiom) do NOT fail this gate; the
-  # exact counts are printed by oxlint above. See AGENTS.md.
-  Write-Host 'OK: oxlint reports no errors (warnings are the documented baseline).' -ForegroundColor Green
+  # Exit 0 means "clean": no errors and no warnings (unless -AllowWarnings was used).
+  Write-Host 'OK: oxlint reports no errors and no warnings.' -ForegroundColor Green
   exit 0
 }
-Write-Host "FAILED: oxlint reported errors (exit $code) - fix them, or pass -SkipChecks at release time." -ForegroundColor Red
+Write-Host "FAILED: oxlint reported findings (exit $code) - fix them, or pass -SkipChecks at release time." -ForegroundColor Red
 exit 1

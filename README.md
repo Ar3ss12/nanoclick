@@ -146,8 +146,8 @@ the whole Rust suite stays green. These gates exist for exactly that class:
 | Gate | Command | What it catches |
 |---|---|---|
 | Grammar (browser-accurate) | `powershell -ExecutionPolicy Bypass -File scripts\check-js-syntax.ps1` | module-mode `SyntaxError`s (checked as `.mjs`), 404 script refs |
-| Lint (broad tripwire) | `powershell -ExecutionPolicy Bypass -File scripts\check-js-lint.ps1` | undefined/unused identifiers, dead code, duplicate keys — oxlint (Rust binary, no `node_modules` required) |
-| Rust gates | `cd src-tauri && cargo test --release -j 2 --test test_assets` | grammar + duplicate-declaration scan + boot-guard wiring, run as part of `cargo test` |
+| Lint (broad tripwire) | `powershell -ExecutionPolicy Bypass -File scripts\check-js-lint.ps1` | undefined/unused identifiers, dead code, duplicate keys — oxlint (Rust binary, no `node_modules` required). Gate = **0 errors / 0 warnings** |
+| Rust gates | `cd src-tauri && cargo test --release -j 1 --test test_assets` | grammar + duplicate-declaration scan + boot-guard wiring, run as part of `cargo test` |
 | Release preflight | `scripts\release.ps1` → Stage 0 (PREFLIGHT) | runs the gates **before** `cargo tauri build`, which never runs tests |
 
 Runtime trap: `src/boot_guard.js` is a **classic** script loaded first on every page. It

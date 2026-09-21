@@ -15,10 +15,10 @@ const TAURI = (typeof window !== "undefined" && window.__TAURI__) || null;
 // finished). This canary is sent at "warn" level, which the backend always
 // writes (see `debug_log_internal`), so the next boot tells us exactly how
 // far the frontend got and which step failed.
-function bootCanary(stage) {
+function bootCanary(label) {
   try {
     const inv = window.__TAURI__?.core?.invoke;
-    if (inv) { inv("debug_log", { level: "warn", message: `[BOOT] ${stage}` }).catch(() => {}); }
+    if (inv) { inv("debug_log", { level: "warn", message: `[BOOT] ${label}` }).catch(() => {}); }
   } catch (_) { /* the canary must never break the page */ }
 }
 bootCanary("main.js evaluated");
@@ -295,10 +295,10 @@ function stage(name) {
   const start = performance.now();
   let stepNum = 0;
   const log = (icon, label, detail = "") => {
-    const ms = (performance.now() - start).toFixed(1);
+    const elapsedMs = (performance.now() - start).toFixed(1);
     const safeDetail = String(detail || "").slice(0, 80);
     const tag = icon === "✓" ? "→STAGE✓" : icon === "✗" ? "→STAGE✗" : "→STAGE•";
-    logCall(tag, `[${name}] #${++stepNum} ${label}`, safeDetail);
+    logCall(tag, `[${name}] #${++stepNum} ${label} (+${elapsedMs}ms)`, safeDetail);
   };
   return {
     // fn may return: undefined (no result), boolean (false=stage fails),
@@ -368,6 +368,10 @@ function showUpdateBar(version, notes) {
   const btn = document.getElementById("updateInstallBtn");
   btn.disabled = false;
   btn.textContent = "Download & install";
+  // Re-binding on every update check is intentional: this is a REPLACEMENT slot,
+  // so a handler from a previous version must not survive. addEventListener would
+  // stack handlers and could fire several installs.
+  // oxlint-disable-next-line unicorn/prefer-add-event-listener
   btn.onclick = async () => {
     btn.disabled = true;
     try {
@@ -394,6 +398,10 @@ function showUpdateBar(version, notes) {
       btn.disabled = false;
     }
   };
+  // Same replacement-slot reasoning as the install button above, plus this closure
+  // captures `version`: with addEventListener + a one-time guard it would keep the
+  // FIRST version and store a stale dismissal key.
+  // oxlint-disable-next-line unicorn/prefer-add-event-listener
   document.getElementById("updateDismissBtn").onclick = () => {
     bar.classList.add("hidden");
     try { localStorage.setItem(UPDATE_DISMISS_KEY, version); } catch {}
@@ -525,9 +533,9 @@ const rippleCheckbox     = document.getElementById("rippleCheckbox");
 const hudCheckbox        = document.getElementById("hudCheckbox");
 const footerModeShortcut = document.getElementById("footerModeShortcut");
 
-// Modal
+// Modal — the START button inside it is re-queried on demand by the onboarding
+// flow (see initOnboarding), so no module-level handle is kept for it.
 const onboardingModal = document.getElementById("onboardingModal");
-const onboardingBtn   = document.getElementById("onboardingBtn");
 
 const limitBadge        = document.getElementById("limitBadge");
 const holdSubSettings   = document.getElementById("holdSubSettings");
@@ -925,10 +933,11 @@ function updateUiFromConfig(config) {
   if (holdIntervalInput) holdIntervalInput.value = config.engine.hold_interval_ms ?? 1000;
   if (repeatIntervalInput) repeatIntervalInput.value = config.engine.repeat_interval_ms ?? 1000;
 
-  const startDelayInput = document.getElementById("startDelayInput");
   const stopDurationInput = document.getElementById("stopDurationInput");
   const stopTimeInput = document.getElementById("stopTimeInput");
 
+  // start_delay_ms is rendered by updateStartDelayDisplay(), which queries the
+  // field itself and also switches its min/max/step per the active delay unit.
   updateStartDelayDisplay(config.engine.start_delay_ms || 0);
   if (stopDurationInput) stopDurationInput.value = config.engine.stop_duration_min || 0;
   if (stopTimeInput) stopTimeInput.value = config.engine.stop_time_str || "";
@@ -1280,7 +1289,7 @@ async function loadConfig() {
     try {
       const notices = await invoke("get_startup_notices");
       if (Array.isArray(notices) && notices.length) showDeadboltQueue(notices);
-    } catch (e) { /* notices are best-effort, never block boot */ }
+    } catch { /* notices are best-effort, never block boot */ }
     try { startFileToastPolling(); } catch (_) {}
   } catch (err) {
     console.error("Failed to load app config:", err);
@@ -1421,18 +1430,23 @@ function showToast(message, level) {
   }
 }
 
+// Module scope on purpose: this closes over nothing but module-level helpers, so
+// building it inside startFileToastPolling() only allocated a fresh closure each
+// call (oxlint: unicorn/consistent-function-scoping). The literal call text
+// `everyVisible(3000, tick)` below is pinned by a Rust wiring test — keep it.
+const tick = async () => {
+  try {
+    const inv = getRawInvoke();
+    const toasts = inv ? await inv("poll_file_toasts") : [];
+    if (Array.isArray(toasts)) {
+      for (const t of toasts) showFileToast(t);
+    }
+  } catch (_) { /* watcher toasts are best-effort */ }
+};
+
 function startFileToastPolling() {
   if (startFileToastPolling._started) return;
   startFileToastPolling._started = true;
-  const tick = async () => {
-    try {
-      const inv = getRawInvoke();
-      const toasts = inv ? await inv("poll_file_toasts") : [];
-      if (Array.isArray(toasts)) {
-        for (const t of toasts) showFileToast(t);
-      }
-    } catch (_) { /* watcher toasts are best-effort */ }
-  };
   everyVisible(3000, tick);
 }
 
@@ -2425,6 +2439,9 @@ async function reRecordMacro(macro, onChange) {
     // Schedule auto-stop after macro closes: we don't know when user stops,
     // so we just close the editor; user must click stop after.
     closeEditor();
+    // Hand control back to the caller: openVisualEditor passes renderMacroList,
+    // so the list refreshes as soon as the re-record flow takes over.
+    if (typeof onChange === "function") onChange();
   } catch (e) { console.error("re-record failed:", e); }
 }
 
@@ -2591,6 +2608,10 @@ function inspectPreset(presetId) {
   }
 
   if (applyBtn) {
+    // Runs on EVERY modal open with a different `p.id`, so the handler must be
+    // replaced rather than appended — addEventListener would stack handlers and
+    // make a single click apply several presets.
+    // oxlint-disable-next-line unicorn/prefer-add-event-listener
     applyBtn.onclick = () => {
       modal.classList.add("hidden");
       void applyPreset(p.id);
@@ -2685,13 +2706,18 @@ function openPresetEditModal(p = null) {
   const editIdInput = document.getElementById("presetEditId");
   const nameInput = document.getElementById("presetNameInput");
   const iconSelect = document.getElementById("presetIconSelect");
-  const cpsRange = document.getElementById("presetCpsRange");
+  // These six element handles carry the `preset` prefix because the dashboard
+  // declares identical identifiers at module scope (cpsRange, clickTypeSelect,
+  // holdDurationInput, holdIntervalInput, repeatCountInput, repeatIntervalInput).
+  // Shadowing them is legal but a trap: code moved between the modal and the
+  // dashboard would silently retarget the wrong widget. (oxlint: no-shadow)
+  const presetCpsRangeEl = document.getElementById("presetCpsRange");
   const cpsVal = document.getElementById("presetCpsVal");
   const jitterRange = document.getElementById("presetJitterRange");
   const jitterVal = document.getElementById("presetJitterVal");
-  const clickTypeSelect = document.getElementById("presetClickTypeSelect");
-  const holdDurationInput = document.getElementById("presetHoldDuration");
-  const holdIntervalInput = document.getElementById("presetHoldInterval");
+  const presetClickTypeSelectEl = document.getElementById("presetClickTypeSelect");
+  const presetHoldDurationEl = document.getElementById("presetHoldDuration");
+  const presetHoldIntervalEl = document.getElementById("presetHoldInterval");
   const buttonSelect = document.getElementById("presetButtonSelect");
   const positionSelect = document.getElementById("presetPositionSelect");
   const fixedXInput = document.getElementById("presetFixedX");
@@ -2701,8 +2727,8 @@ function openPresetEditModal(p = null) {
   const stopDurationInput = document.getElementById("presetStopDurationMin");
   const stopTimeInput = document.getElementById("presetStopTime");
   const repeatModeSelect = document.getElementById("presetRepeatModeSelect");
-  const repeatCountInput = document.getElementById("presetRepeatCount");
-  const repeatIntervalInput = document.getElementById("presetRepeatInterval");
+  const presetRepeatCountEl = document.getElementById("presetRepeatCount");
+  const presetRepeatIntervalEl = document.getElementById("presetRepeatInterval");
   const coordRow = document.getElementById("presetFixedCoordRow");
   const modalTitle = document.getElementById("presetModalTitle");
 
@@ -2712,17 +2738,17 @@ function openPresetEditModal(p = null) {
     if (editIdInput) editIdInput.value = p.id;
     if (nameInput) nameInput.value = p.name || "";
     if (iconSelect) iconSelect.value = p.icon || "⚡";
-    if (cpsRange) {
-      cpsRange.value = p.target_cps || 29;
+    if (presetCpsRangeEl) {
+      presetCpsRangeEl.value = p.target_cps || 29;
       if (cpsVal) cpsVal.textContent = p.target_cps || 29;
     }
     if (jitterRange) {
       jitterRange.value = p.jitter_percent || 7.5;
       if (jitterVal) jitterVal.textContent = p.jitter_percent || 7.5;
     }
-    if (clickTypeSelect) clickTypeSelect.value = p.click_type || "single";
-    if (holdDurationInput) holdDurationInput.value = p.hold_duration_ms ?? 500;
-    if (holdIntervalInput) holdIntervalInput.value = p.hold_interval_ms ?? 1000;
+    if (presetClickTypeSelectEl) presetClickTypeSelectEl.value = p.click_type || "single";
+    if (presetHoldDurationEl) presetHoldDurationEl.value = p.hold_duration_ms ?? 500;
+    if (presetHoldIntervalEl) presetHoldIntervalEl.value = p.hold_interval_ms ?? 1000;
     if (buttonSelect) buttonSelect.value = p.button || "left";
     if (positionSelect) positionSelect.value = p.position_mode || "cursor";
     if (fixedXInput) fixedXInput.value = p.fixed_x ?? 100;
@@ -2732,24 +2758,24 @@ function openPresetEditModal(p = null) {
     if (stopDurationInput) stopDurationInput.value = p.stop_duration_min || 0;
     if (stopTimeInput) stopTimeInput.value = p.stop_time_str || "";
     if (repeatModeSelect) repeatModeSelect.value = p.repeat_mode || "unlimited";
-    if (repeatCountInput) repeatCountInput.value = p.repeat_count || 0;
-    if (repeatIntervalInput) repeatIntervalInput.value = p.repeat_interval_ms ?? 1000;
+    if (presetRepeatCountEl) presetRepeatCountEl.value = p.repeat_count || 0;
+    if (presetRepeatIntervalEl) presetRepeatIntervalEl.value = p.repeat_interval_ms ?? 1000;
   } else {
     if (modalTitle) modalTitle.textContent = "✨ New Preset";
     if (editIdInput) editIdInput.value = "";
     if (nameInput) nameInput.value = "New Preset";
     if (iconSelect) iconSelect.value = "⚡";
-    if (cpsRange) {
-      cpsRange.value = currentConfig.engine.target_cps || 29;
+    if (presetCpsRangeEl) {
+      presetCpsRangeEl.value = currentConfig.engine.target_cps || 29;
       if (cpsVal) cpsVal.textContent = currentConfig.engine.target_cps || 29;
     }
     if (jitterRange) {
       jitterRange.value = currentConfig.engine.jitter_percent || 7.5;
       if (jitterVal) jitterVal.textContent = currentConfig.engine.jitter_percent || 7.5;
     }
-    if (clickTypeSelect) clickTypeSelect.value = currentConfig.engine.click_type || "single";
-    if (holdDurationInput) holdDurationInput.value = currentConfig.engine.hold_duration_ms ?? 500;
-    if (holdIntervalInput) holdIntervalInput.value = currentConfig.engine.hold_interval_ms ?? 1000;
+    if (presetClickTypeSelectEl) presetClickTypeSelectEl.value = currentConfig.engine.click_type || "single";
+    if (presetHoldDurationEl) presetHoldDurationEl.value = currentConfig.engine.hold_duration_ms ?? 500;
+    if (presetHoldIntervalEl) presetHoldIntervalEl.value = currentConfig.engine.hold_interval_ms ?? 1000;
     if (buttonSelect) buttonSelect.value = currentConfig.engine.button || "left";
     if (positionSelect) positionSelect.value = currentConfig.engine.position_mode || "cursor";
     if (fixedXInput) fixedXInput.value = currentConfig.engine.fixed_x ?? 100;
@@ -2759,8 +2785,8 @@ function openPresetEditModal(p = null) {
     if (stopDurationInput) stopDurationInput.value = currentConfig.engine.stop_duration_min || 0;
     if (stopTimeInput) stopTimeInput.value = currentConfig.engine.stop_time_str || "";
     if (repeatModeSelect) repeatModeSelect.value = currentConfig.engine.repeat_mode || "unlimited";
-    if (repeatCountInput) repeatCountInput.value = currentConfig.engine.repeat_count || 0;
-    if (repeatIntervalInput) repeatIntervalInput.value = currentConfig.engine.repeat_interval_ms ?? 1000;
+    if (presetRepeatCountEl) presetRepeatCountEl.value = currentConfig.engine.repeat_count || 0;
+    if (presetRepeatIntervalEl) presetRepeatIntervalEl.value = currentConfig.engine.repeat_interval_ms ?? 1000;
   }
 
   if (p && p.points && Array.isArray(p.points)) {
@@ -2869,18 +2895,39 @@ async function deletePreset(presetId) {
   await saveConfig();
 }
 
+// Hoisted out of setupPresetListeners(): it touches only `document`, so nesting
+// it just re-allocated the closure on every setup pass (oxlint:
+// unicorn/consistent-function-scoping). The call sites are pinned by a Rust
+// wiring test — keep them verbatim.
+const bindBackdropClose = (modalId) => {
+  const overlay = document.getElementById(modalId);
+  if (!overlay || overlay.dataset.backdropBound === "1") return;
+  overlay.dataset.backdropBound = "1";
+  overlay.addEventListener("click", (e) => {
+    // Only close when clicking on the overlay itself, not on children (the card)
+    if (e.target === overlay) overlay.classList.add("hidden");
+  });
+};
+
+// Hoisted out of setupPresetListeners() for the same reason as bindBackdropClose
+// above: it captures nothing from its parent scope, so nesting it re-allocated the
+// closure on every setup pass (oxlint: unicorn/consistent-function-scoping).
+// `presetBound` keeps each binding idempotent across rerenders. Named explicitly
+// rather than `on`: a bare two-letter module-level binding is flagged by no-shadow
+// and reads badly next to the DOM event-handler globals.
+const bindPresetControl = (id, event, handler) => {
+  const element = document.getElementById(id);
+  if (!element || element.dataset.presetBound === "1") return;
+  element.addEventListener(event, handler);
+  element.dataset.presetBound = "1";
+};
+
 // Preset listeners setup. Keep all controls in one idempotent setup so a
 // rerender or a delayed WebView DOM cannot leave only some buttons active.
 function setupPresetListeners() {
-  const on = (id, event, handler) => {
-    const element = document.getElementById(id);
-    if (!element || element.dataset.presetBound === "1") return;
-    element.addEventListener(event, handler);
-    element.dataset.presetBound = "1";
-  };
 
-  on("createNewPresetBtn", "click", () => openPresetEditModal(null));
-  on("saveCurrentAsPresetBtn", "click", () => {
+  bindPresetControl("createNewPresetBtn", "click", () => openPresetEditModal(null));
+  bindPresetControl("saveCurrentAsPresetBtn", "click", () => {
     openPresetEditModal({
       id: "",
       name: "My Config",
@@ -2904,11 +2951,11 @@ function setupPresetListeners() {
       points: Array.isArray(currentConfig.engine.sequence_points) ? JSON.parse(JSON.stringify(currentConfig.engine.sequence_points)) : []
     });
   });
-  on("presetSaveBtn", "click", () => void savePresetFromModal());
-  on("presetCancelBtn", "click", () => {
+  bindPresetControl("presetSaveBtn", "click", () => void savePresetFromModal());
+  bindPresetControl("presetCancelBtn", "click", () => {
     document.getElementById("presetEditModal")?.classList.add("hidden");
   });
-  on("inspectCloseBtn", "click", () => {
+  bindPresetControl("inspectCloseBtn", "click", () => {
     document.getElementById("presetInspectModal")?.classList.add("hidden");
   });
 
@@ -2928,19 +2975,11 @@ function setupPresetListeners() {
   }
 
   // --- Backdrop click: click on the overlay dim area (not the card) to close ---
-  const bindBackdropClose = (modalId) => {
-    const overlay = document.getElementById(modalId);
-    if (!overlay || overlay.dataset.backdropBound === "1") return;
-    overlay.dataset.backdropBound = "1";
-    overlay.addEventListener("click", (e) => {
-      // Only close when clicking on the overlay itself, not on children (the card)
-      if (e.target === overlay) overlay.classList.add("hidden");
-    });
-  };
+  // (bindBackdropClose itself lives at module scope — see above.)
   bindBackdropClose("presetEditModal");
   bindBackdropClose("presetInspectModal");
 
-  on("exportPresetsBtn", "click", () => {
+  bindPresetControl("exportPresetsBtn", "click", () => {
     try {
       ensurePresetsExist();
       const json = JSON.stringify(currentConfig.presets, null, 2);
@@ -2961,7 +3000,7 @@ function setupPresetListeners() {
     }
   });
 
-  on("importPresetsBtn", "click", () => {
+  bindPresetControl("importPresetsBtn", "click", () => {
     const fileInput = document.createElement("input");
     fileInput.type = "file";
     fileInput.accept = ".json,application/json";
@@ -3190,9 +3229,7 @@ if (toggleBtn) {
   toggleBtn.addEventListener("click", async () => {
     dbg("toggleBtn CLICKED — isRunning:", isRunning, "isButtonLocked:", isButtonLocked, "toggleBusy:", toggleBusy);
     const clickOp = stage("Click");
-    let clickTime;
     try {
-      clickTime = performance.now();
 
       // ── STAGE 1: Was the click delivered to the right element? ────────
       await clickOp.run("click-registered", () => {
@@ -3632,6 +3669,12 @@ function setupClickTooltip() {
  * Refreshes values inside the tooltip popup instantaneously.
  * Uses _currentRunClicks, StatsEngine session clicks, and _runsThisSettings.
  */
+/** Thousands separator for the click tooltip. Module scope → allocated once. */
+const formatCount = (n) => {
+  const v = Number(n) || 0;
+  return v > 999 ? v.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",") : String(v);
+};
+
 function updateClickTooltipValues(runClicks = null) {
   if (typeof runClicks === "number") {
     _currentRunClicks = runClicks;
@@ -3640,10 +3683,6 @@ function updateClickTooltipValues(runClicks = null) {
     return;
   }
   const eng = window.StatsEngine;
-  const fmt = (n) => {
-    const v = Number(n) || 0;
-    return v > 999 ? v.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",") : String(v);
-  };
   const activeRun = typeof _currentRunClicks === "number" ? _currentRunClicks : 0;
   // Session clicks must NEVER be less than the current run clicks.
   const rawSessionClicks = Number(eng?.state?.sessionClicks) || 0;
@@ -3654,10 +3693,10 @@ function updateClickTooltipValues(runClicks = null) {
   const effectiveSettingsClicks = !_hasChangedSettings ? sessionClicksVal : _clicksThisSettings;
   const settingsClicksVal = Math.max(activeRun, effectiveSettingsClicks);
 
-  if (tooltipRunClicks)        tooltipRunClicks.textContent        = fmt(activeRun);
-  if (tooltipSessionClicks)    tooltipSessionClicks.textContent    = fmt(sessionClicksVal);
-  if (tooltipSettingsClicks)   tooltipSettingsClicks.textContent   = fmt(settingsClicksVal);
-  if (tooltipSettingsRuns)     tooltipSettingsRuns.textContent     = fmt(_runsThisSettings);
+  if (tooltipRunClicks)        tooltipRunClicks.textContent        = formatCount(activeRun);
+  if (tooltipSessionClicks)    tooltipSessionClicks.textContent    = formatCount(sessionClicksVal);
+  if (tooltipSettingsClicks)   tooltipSettingsClicks.textContent   = formatCount(settingsClicksVal);
+  if (tooltipSettingsRuns)     tooltipSettingsRuns.textContent     = formatCount(_runsThisSettings);
 }
 
 // ── VISUAL CLICK RIPPLE (DELEGATED TO MODULAR OVERLAY) ────────────────────────
@@ -4806,26 +4845,13 @@ onDomReady(() => {
 });
 
 // ── STATISTICS VIEW & ANALYTICS ENGINE ─────────────────────────
-const _stats = {
-  sessionClicks: 0,
-  sessionActiveMs: 0,
-  lastUpdate: null,
-  activeNow: false,
-  lastClicksDone: 0,
-  lastDiskSave: 0,
-  liveCpsHistory: [], // Max 60 rolling points
-};
-
-let _lastCpsRecordMs = 0;
-function recordCpsHistoryPoint(cps, active) {
-  const now = Date.now();
-  if (now - _lastCpsRecordMs < 1000 && _stats.liveCpsHistory.length > 0) return;
-  _lastCpsRecordMs = now;
-  _stats.liveCpsHistory.push({ time: now, cps: active ? (cps || 0) : 0 });
-  if (_stats.liveCpsHistory.length > 60) {
-    _stats.liveCpsHistory.shift();
-  }
-}
+// The live engine is stats.js (window.StatsEngine). main.js used to carry a
+// parallel copy of the same bookkeeping — its own `_stats` object plus
+// recordCpsHistoryPoint/renderStats-DOM-writer/drawStatsChart. Nothing ever fed
+// that copy on the recording path (the status tick delegates to StatsEngine with
+// no `else` branch), so its CPS history stayed empty and its chart could only
+// ever paint the "start autoclicker" placeholder. Removed; ensureStatsConfig()
+// stays because the preset flow calls it directly.
 
 function ensureStatsConfig() {
   if (!currentConfig.stats || typeof currentConfig.stats !== "object") {
@@ -4847,181 +4873,24 @@ function ensureStatsConfig() {
   return currentConfig.stats;
 }
 
-function fmtDuration(ms) {
-  const sec = Math.floor(ms / 1000);
-  if (sec < 60) return `${sec}s`;
-  const min = Math.floor(sec / 60);
-  if (min < 60) return `${min}m ${sec % 60}s`;
-  const h = Math.floor(min / 60);
-  return `${h}h ${min % 60}m`;
-}
-
+/**
+ * Thin delegator. StatsEngine (stats.js) is the only stats writer in this build;
+ * keeping the signature means the two call sites (navigation + the 1 Hz
+ * everyVisible tick below) stay untouched.
+ */
 function renderStats() {
-  if (window.StatsEngine) {
-    window.StatsEngine.renderStats(currentConfig);
-    return;
-  }
-  const viewStats = document.getElementById("viewStats");
-  if (!viewStats || !viewStats.classList.contains("active")) return;
-
-  const fmtNum = (n) => {
-    const v = Number(n) || 0;
-    return v > 999 ? v.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",") : String(v);
-  };
-
-  const sc = document.getElementById("statSessionClicks");
-  const at = document.getElementById("statActiveTime");
-  const ac = document.getElementById("statAvgCps");
-  const tc = document.getElementById("statTotalClicks");
-  const ta = document.getElementById("statTotalActiveTime");
-  const mc = document.getElementById("statMaxCps");
-  const ts = document.getElementById("statTotalSessions");
-  const pa = document.getElementById("statPresetsApplied");
-
-  if (sc) sc.textContent = fmtNum(_stats.sessionClicks);
-  if (at) at.textContent = fmtDuration(_stats.sessionActiveMs);
-  if (ac) ac.textContent = _stats.sessionActiveMs > 500 ? (_stats.sessionClicks / (_stats.sessionActiveMs / 1000)).toFixed(1) : "—";
-
-  const st = ensureStatsConfig();
-  if (tc) tc.textContent = fmtNum(st.total_clicks);
-  if (ta) ta.textContent = fmtDuration(st.total_active_ms);
-  if (mc) mc.textContent = (Number(st.max_cps || 0)).toFixed(1);
-  if (ts) ts.textContent = fmtNum(st.total_sessions);
-  if (pa) pa.textContent = fmtNum(st.presets_applied);
-
-  drawStatsChart();
+  window.StatsEngine?.renderStats(currentConfig);
 }
 
-function drawStatsChart() {
-  const canvas = document.getElementById("statsChart");
-  if (!canvas) return;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
-
-  const rect = canvas.getBoundingClientRect();
-  if (rect.width === 0 || rect.height === 0) return;
-
-  const dpr = window.devicePixelRatio || 1;
-  const targetW = Math.floor(rect.width * dpr);
-  const targetH = Math.floor(rect.height * dpr);
-  if (canvas.width !== targetW || canvas.height !== targetH) {
-    canvas.width = targetW;
-    canvas.height = targetH;
-  }
-
-  ctx.save();
-  ctx.scale(dpr, dpr);
-  const displayW = rect.width;
-  const displayH = rect.height;
-
-  ctx.clearRect(0, 0, displayW, displayH);
-
-  // Background Grid Lines
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.06)";
-  ctx.lineWidth = 1;
-  for (let y = 20; y < displayH; y += 35) {
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(displayW, y);
-    ctx.stroke();
-  }
-
-  const history = _stats.liveCpsHistory;
-  if (!history || history.length < 2) {
-    ctx.fillStyle = "rgba(255, 255, 255, 0.35)";
-    ctx.font = "12px sans-serif";
-    ctx.textAlign = "center";
-    ctx.fillText("Start autoclicker to record & plot real-time CPS timeline", displayW / 2, displayH / 2);
-    ctx.restore();
-    return;
-  }
-
-  let maxCps = 20;
-  for (const p of history) {
-    if (p.cps > maxCps) maxCps = p.cps;
-  }
-  maxCps *= 1.15;
-
-  const paddingBottom = 20;
-  const paddingTop = 15;
-  const chartH = displayH - paddingTop - paddingBottom;
-  const stepX = displayW / (Math.max(60, history.length) - 1);
-  const startX = (60 - history.length) * stepX;
-
-  // Gradient Area Fill
-  const gradient = ctx.createLinearGradient(0, paddingTop, 0, displayH - paddingBottom);
-  gradient.addColorStop(0, "rgba(6, 182, 212, 0.35)");
-  gradient.addColorStop(1, "rgba(6, 182, 212, 0.0)");
-
-  ctx.beginPath();
-  ctx.moveTo(startX, displayH - paddingBottom);
-
-  for (let i = 0; i < history.length; i++) {
-    const x = startX + i * stepX;
-    const y = displayH - paddingBottom - (history[i].cps / maxCps) * chartH;
-    ctx.lineTo(x, y);
-  }
-
-  ctx.lineTo(startX + (history.length - 1) * stepX, displayH - paddingBottom);
-  ctx.closePath();
-  ctx.fillStyle = gradient;
-  ctx.fill();
-
-  // Glowing Line Path
-  ctx.shadowColor = "#06b6d4";
-  ctx.shadowBlur = 8;
-  ctx.strokeStyle = "#06b6d4";
-  ctx.lineWidth = 2.5;
-
-  ctx.beginPath();
-  for (let i = 0; i < history.length; i++) {
-    const x = startX + i * stepX;
-    const y = displayH - paddingBottom - (history[i].cps / maxCps) * chartH;
-    if (i === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  }
-  ctx.stroke();
-
-  ctx.shadowBlur = 0;
-
-  // Current CPS Dot & Label
-  const lastPoint = history[history.length - 1];
-  const lastX = startX + (history.length - 1) * stepX;
-  const lastY = displayH - paddingBottom - (lastPoint.cps / maxCps) * chartH;
-
-  ctx.fillStyle = "#22d3ee";
-  ctx.beginPath();
-  ctx.arc(lastX, lastY, 4, 0, Math.PI * 2);
-  ctx.fill();
-
-  ctx.fillStyle = "#ffffff";
-  ctx.font = "bold 11px 'Fira Code', monospace";
-  ctx.textAlign = "right";
-  ctx.fillText(`${lastPoint.cps.toFixed(1)} CPS`, displayW - 10, paddingTop + 10);
-
-  ctx.restore();
-}
+// The legacy canvas painter that used to live here read `_stats.liveCpsHistory`,
+// which the recording path never filled — see the note above ensureStatsConfig().
+// StatsEngine.drawStatsChart() (stats.js) owns the chart now.
 
 onDomReady(() => {
   const resetBtn = document.getElementById("statsResetBtn");
   if (resetBtn) resetBtn.addEventListener("click", () => {
     if (confirm(getI18nText("dialog_confirm_reset_stats", {}, "Are you sure you want to reset all saved statistics?"))) {
-      if (window.StatsEngine) {
-        window.StatsEngine.resetStats(currentConfig, saveConfig);
-      } else {
-        currentConfig.stats = {
-          total_clicks: 0,
-          total_active_ms: 0,
-          total_sessions: 0,
-          presets_applied: 0,
-          max_cps: 0.0,
-          history: []
-        };
-        _stats.sessionClicks = 0;
-        _stats.sessionActiveMs = 0;
-        saveConfig();
-        renderStats();
-      }
+      window.StatsEngine.resetStats(currentConfig, saveConfig);
     }
   });
   everyVisible(1000, renderStats);
@@ -5192,7 +5061,7 @@ onDomReady(() => {
 // window -> page reloaded -> JS called exit_app -> full backend shutdown ->
 // "frontend alive, backend dead". Now the kill only happens when the window
 // is actually being torn down for good, not on internal reloads.
-window.addEventListener("beforeunload", (e) => {
+window.addEventListener("beforeunload", () => {
   // Webview2 fires beforeunload for internal reloads with no trusted user
   // intent; the app's own CloseRequested path in Rust (RunEvent::WindowEvent)
   // already performs the full shutdown, so a JS-initiated exit here is only

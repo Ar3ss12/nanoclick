@@ -2,6 +2,11 @@
 // Independent module for handling Windows UIPI (User Interface Privilege Isolation),
 // UAC elevation checks, audio warning chimes, window focusing, and admin restart.
 
+// Locale lookup with an English fallback. Module scope on purpose: it captures
+// nothing (window.I18nEngine is read lazily at call time), so rebuilding it on
+// every badge update only allocated garbage — oxlint: consistent-function-scoping.
+const tI18n = (k, fb) => (window.I18nEngine ? window.I18nEngine.t(k, {}, fb) : fb);
+
 const UipiManager = {
   isElevated: false,
   alwaysAdmin: false,
@@ -34,16 +39,14 @@ const UipiManager = {
     const text = document.getElementById("adminBadgeText");
     if (!badge || !text) return;
 
-    const t = (k, fb) => (window.I18nEngine ? window.I18nEngine.t(k, {}, fb) : fb);
-
     if (this.isElevated) {
       badge.className = "admin-status-badge elevated";
-      badge.title = t("admin_badge_title_elevated", "nanoclick is running as Administrator (no UIPI restrictions)");
-      text.textContent = t("admin_badge_admin", "Admin 🛡️");
+      badge.title = tI18n("admin_badge_title_elevated", "nanoclick is running as Administrator (no UIPI restrictions)");
+      text.textContent = tI18n("admin_badge_admin", "Admin 🛡️");
     } else {
       badge.className = "admin-status-badge standard";
-      badge.title = t("admin_badge_title_standard", "Standard mode. Click to restart as Administrator");
-      text.textContent = t("admin_badge_standard", "Standard");
+      badge.title = tI18n("admin_badge_title_standard", "Standard mode. Click to restart as Administrator");
+      text.textContent = tI18n("admin_badge_standard", "Standard");
     }
   },
 
@@ -128,7 +131,9 @@ const UipiManager = {
     });
   },
 
-  handleUipiBlocked(payload) {
+  // The payload carries the blocked window's details; today the chime + modal is
+  // the whole UX, hence the underscore on the otherwise unused parameter.
+  handleUipiBlocked(_payload) {
     this.playAlertChime();
     this.focusWindow();
     this.showModal();
