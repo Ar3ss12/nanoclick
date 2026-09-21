@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-/// RAM-reduction for the WebView2 layer (v1.1.0).
+/// RAM policy for the WebView2 layer (v1.1.0).
 ///
 /// Why an env var instead of `additionalBrowserArgs` in `tauri.conf.json`:
 /// the conf entry only covers the window declared there, while NanoClick
@@ -9,30 +9,36 @@
 /// `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` for EVERY environment it creates,
 /// so all three webviews get the same policy.
 ///
-/// These flags are chosen to stay inside the Zero-Jitter Mandate
-/// (`docs/ZERO_JITTER_ISOLATION_PLAN.md` §2) — the native click loop and the
-/// `WH_KEYBOARD_LL` hook live in Rust threads and are never affected:
-/// * `--renderer-process-limit=1` — one renderer for main + HUD + overlay
-///   instead of one per webview: the biggest single win, and it removes
-///   duplicated V8/Blink heaps.
-/// * `--disable-features=…` — drops UI subsystems we never use (WebOOUI,
-///   PdfOOUI, SmartScreen) instead of letting them allocate at boot.
-/// * `--js-flags=--max-old-space-size=128 --max-semi-space-size=2` — caps the
-///   V8 heap. The UI is a form + one canvas; the old default lets the heap
-///   grow into the hundreds of MB before collecting.
-/// * `--disable-background-networking` — no background network services.
-/// * `--disk-cache-size=…` — keeps the `EBWebView` cache on disk bounded.
+/// MEASURED RESULT (2026-09-21, `scripts/measure-ram.ps1`, whole process tree):
+/// BEFORE 346.45 MB / 7 processes  →  AFTER 344.65 MB / 7 processes.
+/// The footprint is dominated by Chromium's core helper processes (browser,
+/// GPU, network, storage, crashpad), which these safe switches cannot remove.
 ///
-/// FORBIDDEN here on purpose (see the mandate): `--single-process` and
-/// `--in-process-gpu` collapse the GPU/renderer into the host process, so a
-/// driver reset or a fullscreen DirectX switch would freeze the Win32 thread
-/// that also runs the clicker. `--no-sandbox` is likewise never acceptable.
+/// Both of the "big" levers were tried and REMOVED on purpose:
+/// * `--renderer-process-limit=1` — measured zero difference (a single-page
+///   app already runs one renderer) while it would couple the HUD and the
+///   overlay into the main window's renderer.
+/// * `--js-flags=--max-old-space-size=…` — the value contains a space, and
+///   WebView2 splits this env var on spaces, so it was never applied
+///   correctly; capping the V8 heap also risks an OOM *inside* the renderer
+///   during init, which is precisely the "interface does nothing" class of
+///   bug. Removed rather than risked for no gain.
+///
+/// What remains is genuinely safe and slightly beneficial — it removes
+/// subsystems we never use and stops background services we never need:
+/// * `--disable-features=…` — no WebOOUI / PdfOOUI / SmartScreen clients.
+/// * `--disable-background-networking` — no background network services.
+/// * `--disk-cache-size=…` — bounds the `EBWebView` cache on disk.
+///
+/// FORBIDDEN here on purpose (see `docs/ZERO_JITTER_ISOLATION_PLAN.md` §2):
+/// `--single-process` and `--in-process-gpu` collapse the GPU/renderer into
+/// the host process, so a driver reset or a fullscreen DirectX switch would
+/// freeze the Win32 thread that also runs the clicker. `--no-sandbox` is
+/// likewise never acceptable. A regression test locks this in.
 ///
 /// An explicit user-provided value wins: power users keep full control.
 fn apply_webview_memory_policy() {
-    const POLICY: &str = "--renderer-process-limit=1 \
---disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
---js-flags=--max-old-space-size=128 --max-semi-space-size=2 \
+    const POLICY: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
 --disable-background-networking \
 --disk-cache-size=33554432";
     if std::env::var_os("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").is_none() {

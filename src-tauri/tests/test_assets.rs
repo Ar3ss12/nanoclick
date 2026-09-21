@@ -422,14 +422,17 @@ fn test_focus_loss_guard_wiring() {
 
 /// Background-memory guard wiring (v1.1.0).
 ///
-/// Two rules are locked here:
+/// Locks in three lessons:
 /// 1. the WebView2 policy must be applied for EVERY webview (env var, not the
-///    conf entry — HUD/overlay are built at runtime), and
-/// 2. it must never use the flags the Zero-Jitter Mandate forbids, because
-///    they collapse the GPU/renderer into the process that runs the clicker.
+///    conf entry — HUD/overlay are built at runtime);
+/// 2. it must never use the flags the Zero-Jitter Mandate forbids;
+/// 3. it must never re-introduce a V8 heap cap (`--js-flags`) or a single
+///    renderer — both were measured to change nothing (346 MB → 345 MB) while
+///    risking an OOM inside the renderer, which shows up to the user as
+///    "the interface does nothing".
 ///
-/// The UI side must suspend its periodic work while the window is hidden —
-/// an ungated 1 s stats interval keeps a minimized renderer awake forever.
+/// The UI side must suspend its periodic work while the window is hidden, and
+/// boot progress must be visible in the log even with debug switched off.
 #[test]
 fn test_background_memory_guard_wiring() {
     let main_rs = include_str!("../src/main.rs");
@@ -439,17 +442,12 @@ fn test_background_memory_guard_wiring() {
         "the WebView2 memory policy must be applied at boot (env var covers HUD+overlay too)"
     );
     assert!(
-        main_rs.contains("--renderer-process-limit=1"),
-        "one renderer for main + HUD + overlay is the main RAM lever"
-    );
-    assert!(
-        main_rs.contains("--max-old-space-size"),
-        "the V8 heap must be capped for the UI"
+        main_rs.contains("--disable-background-networking"),
+        "background network services are pure overhead for a clicker"
     );
 
-    // Red lines from docs/ZERO_JITTER_ISOLATION_PLAN.md §2 — never reintroduce.
-    // The check must look at the POLICY string only: the doc comment above it
-    // names these flags on purpose, to explain why they are banned.
+    // Policy string only: the doc comment above it names the banned flags on
+    // purpose, to explain why they are banned.
     let policy_start = main_rs
         .find("const POLICY: &str = \"")
         .expect("the webview policy constant must exist");
@@ -465,6 +463,14 @@ fn test_background_memory_guard_wiring() {
             "{forbidden} violates the Zero-Jitter Mandate (GPU/renderer must stay out of process)"
         );
     }
+    assert!(
+        !policy.contains("--js-flags"),
+        "a V8 heap cap risks a renderer OOM (\"interface does nothing\") for zero measured gain"
+    );
+    assert!(
+        !policy.contains("--renderer-process-limit"),
+        "a single renderer couples HUD/overlay to the main window for zero measured gain"
+    );
 
     let main_js = {
         let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
@@ -473,6 +479,14 @@ fn test_background_memory_guard_wiring() {
         String::from_utf8_lossy(&bytes).into_owned()
     };
 
+    assert!(
+        main_js.contains("function bootCanary"),
+        "boot progress must be reportable without the debug flag"
+    );
+    assert!(
+        main_js.contains("step FAILED: ${name}"),
+        "a failed init step must always reach the log"
+    );
     assert!(
         main_js.contains("function everyVisible"),
         "the visibility gate helper must exist"
@@ -488,6 +502,61 @@ fn test_background_memory_guard_wiring() {
     assert!(
         main_js.contains("everyVisible(3000, tick)"),
         "the toast polling must be gated by visibility too"
+    );
+}
+
+/// `main.js` is loaded as an ES module (`<script type="module">`).
+///
+/// In a module a **duplicate top-level declaration is a fatal SyntaxError**:
+/// the module never executes at all, so the entire UI dies silently — the
+/// window still renders, but no handler is ever attached, no IPC call is ever
+/// made and the hotkey UI is dead. The very same duplicate is perfectly legal
+/// in a classic script, which is why `node --check main.js` (script mode) and
+/// every existing test passed while the app was completely unusable.
+///
+/// This test is that missing check. It only looks at column-zero declarations,
+/// so indented (function-local) code cannot produce a false positive.
+#[test]
+fn test_main_js_has_no_duplicate_top_level_declarations() {
+    let js = {
+        let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
+        let key = tauri::utils::assets::AssetKey::from("main.js");
+        let bytes = ctx.assets().get(&key).expect("main.js must be embedded");
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for line in js.lines() {
+        if line.starts_with(' ') || line.starts_with('\t') {
+            continue; // nested: cannot collide with a top-level binding
+        }
+        let rest = line
+            .strip_prefix("async function ")
+            .or_else(|| line.strip_prefix("function "))
+            .or_else(|| line.strip_prefix("const "))
+            .or_else(|| line.strip_prefix("let "))
+            .or_else(|| line.strip_prefix("var "))
+            .or_else(|| line.strip_prefix("class "));
+        let Some(rest) = rest else { continue };
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '$')
+            .collect();
+        if name.is_empty() {
+            continue;
+        }
+        *counts.entry(name).or_insert(0) += 1;
+    }
+
+    let mut dupes: Vec<String> = counts
+        .iter()
+        .filter(|(_, n)| **n > 1)
+        .map(|(k, n)| format!("{k} x{n}"))
+        .collect();
+    dupes.sort();
+    assert!(
+        dupes.is_empty(),
+        "duplicate top-level declarations are a fatal ES-module SyntaxError and kill the whole UI: {dupes:?}"
     );
 }
 

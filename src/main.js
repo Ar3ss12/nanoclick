@@ -8,6 +8,21 @@
 // Tauri 2.x internals.
 const TAURI = (typeof window !== "undefined" && window.__TAURI__) || null;
 
+// ── BOOT CANARY (v1.1.0) ──────────────────────────────────────────
+// WHY: when the UI "does nothing", the release log used to stay silent —
+// frontend diagnostics are sent through the debug-gated logger, so a JS
+// failure at boot left NO trace at all (we could only see that PageLoad
+// finished). This canary is sent at "warn" level, which the backend always
+// writes (see `debug_log_internal`), so the next boot tells us exactly how
+// far the frontend got and which step failed.
+function bootCanary(stage) {
+  try {
+    const inv = window.__TAURI__?.core?.invoke;
+    if (inv) { inv("debug_log", { level: "warn", message: `[BOOT] ${stage}` }).catch(() => {}); }
+  } catch (_) { /* the canary must never break the page */ }
+}
+bootCanary("main.js evaluated");
+
 // ── DEBUG MODE INFRASTRUCTURE ────────────────────────────────────
 // Verbose UI & IPC logs are generated ONLY when DEBUG_UI is true.
 // Toggled via config or setDebugMode().
@@ -2249,15 +2264,6 @@ function renderPresetsGrid() {
     });
     container.dataset.bound = "1";
   }
-}
-
-// Minimal HTML escaper to prevent XSS when preset names contain <, >, &.
-function escapeHtml(s) {
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
 }
 
 // ── VISUAL EDITOR HELPERS ─────────────────────────────────────────────────
@@ -4639,11 +4645,13 @@ function makeAction(type) {
 // child processes. Now each step is independently guarded so a single
 // failed step cannot take down the whole UI.
 onDomReady(() => {
+  bootCanary("dom-ready");
   // Honour the persisted debug flag instead of forcing it on every launch.
   invoke("get_debug_mode")
     .then((d) => {
       DEBUG_UI = !!d;
       setDebugMode(DEBUG_UI);
+      bootCanary(`debug-mode=${DEBUG_UI}`);
     })
     .catch(() => {
       // Backend not ready yet — keep DEBUG_UI at its module-load default
@@ -4653,7 +4661,12 @@ onDomReady(() => {
   const safeStep = (name, fn) => {
     try {
       fn();
+      bootCanary(`step ok: ${name}`);
     } catch (e) {
+      // ALWAYS visible: a failed init step is the difference between a working
+      // UI and "the interface does nothing", so it must not depend on the
+      // debug flag.
+      bootCanary(`step FAILED: ${name} — ${e && e.message ? e.message : String(e)}`);
       try { console.error(`[init] step '${name}' failed:`, e); } catch (_) { /* never throw from a logger */ }
     }
   };
