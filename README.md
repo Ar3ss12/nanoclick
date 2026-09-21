@@ -4,7 +4,7 @@
 
 Built with **Tauri 2 + Rust + vanilla JS**. No Electron, no bundler, no bloat: the production installer is **~3.5 MB**.
 
-![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue) ![Tests](https://img.shields.io/badge/tests-189%2F189-brightgreen) ![i18n](https://img.shields.io/badge/i18n-UA%20%7C%20RU%20%7C%20EN-blue) ![Tauri](https://img.shields.io/badge/Tauri-2.x-FFC131) ![Rust](https://img.shields.io/badge/rust-stable--msvc-DEA584)
+![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue) ![Tests](https://img.shields.io/badge/tests-194%2F194-brightgreen) ![i18n](https://img.shields.io/badge/i18n-UA%20%7C%20RU%20%7C%20EN-blue) ![Tauri](https://img.shields.io/badge/Tauri-2.x-FFC131) ![Rust](https://img.shields.io/badge/rust-stable--msvc-DEA584)
 
 ---
 
@@ -121,7 +121,7 @@ cargo tauri build --bundles nsis
 ```bash
 cd src-tauri
 cargo test -- --skip physical_
-# → 158 passed; 0 failed (148 unit + 10 integration)
+# → 194 passed; 0 failed (177 unit + 17 integration; 7 `physical_` tests filtered out)
 ```
 
 The test suite covers:
@@ -134,6 +134,28 @@ The test suite covers:
 - **Normalizer 5-phase pipeline** & RDP mouse trajectory simplification
 - **Recorder handle idempotency** & thread safety
 - **Hotkey debouncing** & config persistence
+
+---
+
+### 🛡️ Frontend safety net (gates, not vibes)
+
+`main.js` is an ES module compiled by nothing: one duplicate top-level declaration is a
+fatal `SyntaxError` that leaves the window painted with every handler unattached — while
+the whole Rust suite stays green. These gates exist for exactly that class:
+
+| Gate | Command | What it catches |
+|---|---|---|
+| Grammar (browser-accurate) | `powershell -ExecutionPolicy Bypass -File scripts\check-js-syntax.ps1` | module-mode `SyntaxError`s (checked as `.mjs`), 404 script refs |
+| Lint (broad tripwire) | `powershell -ExecutionPolicy Bypass -File scripts\check-js-lint.ps1` | undefined/unused identifiers, dead code, duplicate keys — oxlint (Rust binary, no `node_modules` required) |
+| Rust gates | `cd src-tauri && cargo test --release -j 2 --test test_assets` | grammar + duplicate-declaration scan + boot-guard wiring, run as part of `cargo test` |
+| Release preflight | `scripts\release.ps1` → Stage 0 (PREFLIGHT) | runs the gates **before** `cargo tauri build`, which never runs tests |
+
+Runtime trap: `src/boot_guard.js` is a **classic** script loaded first on every page. It
+traps uncaught errors, unhandled rejections and 404 assets, forwards them to
+`%TEMP%\nanoclick_web.log` (level `error` — written even in release builds), and if a page
+never raises its boot flag within ~3 s it reports
+`[BOOT] MODULE DID NOT EXECUTE (SyntaxError class)` and shows a visible banner. That
+watchdog is the only detection that survives a module which cannot execute at all.
 
 ---
 
@@ -174,6 +196,7 @@ The test suite covers:
 nanoclick/
 ├── src/                  # Frontend (no bundler):
 │   ├── locales/          #   i18n JSON dictionaries: ua.json, ru.json, en.json (337 keys)
+│   ├── boot_guard.js     #   CLASSIC-script crash trap + boot watchdog (must load first)
 │   ├── i18n.js           #   Zero-dependency lightweight lazy-loading i18n engine
 │   ├── stats.js          #   Modular analytics & live Canvas CPS chart engine
 │   ├── uipi_manager.js   #   Windows UIPI detection, audio chime & elevation UI
@@ -191,7 +214,7 @@ nanoclick/
 │   ├── build.rs          # Windows application manifest (ComCtl32 v6.0 + PerMonitorV2)
 │   ├── capabilities/     # Tauri 2 permission manifests
 │   └── tauri.conf.json
-└── scripts/              # release.ps1 (automated build, sign and GitHub release)
+└── scripts/              # check-js-syntax.ps1 / check-js-lint.ps1 / release.ps1 (build, sign, publish)
 ```
 
 ---

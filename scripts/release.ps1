@@ -21,6 +21,8 @@ param(
     [switch]$Draft,
     [switch]$Prerelease,
     [switch]$Gui,
+    [switch]$SkipChecks,
+    [switch]$FullTests,
     [string]$KeyPath = "$env:USERPROFILE\.tauri\nanoclick.key",
     [string]$KeyPassword = $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD,
     [string]$Token = $env:GITHUB_TOKEN,
@@ -209,7 +211,12 @@ if (-not $KeyPassword) {
     }
 }
 
-$totalSteps = if ($Action -eq "all") { "3" } else { "1" }
+$preflightRuns = ($Action -in @("all", "build")) -and (-not $SkipChecks)
+$totalSteps = if ($Action -eq "all") {
+    if ($preflightRuns) { "4" } else { "3" }
+} else {
+    if ($preflightRuns) { "2" } else { "1" }
+}
 
 Write-Host ""
 Write-Host "╔════════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
@@ -219,6 +226,76 @@ Write-Host "║  Target Version : $($Tag.PadRight(46)) ║" -ForegroundColor Whi
 Write-Host "║  Pipeline Mode  : $($Action.ToUpper().PadRight(46)) ║" -ForegroundColor White
 Write-Host "║  Repository     : $("$Owner/$Repo".PadRight(46)) ║" -ForegroundColor White
 Write-Host "╚════════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+
+# ── 0. PREFLIGHT GATE ─────────────────────────────────────────────────────────
+# The fence that was missing when a release shipped with a dead frontend:
+# `main.js` is an ES module, and a duplicate top-level declaration is a FATAL
+# SyntaxError — the module never executes, the window still renders, and every
+# Rust test stays green while the UI is 100% dead (see tech.md §Lessons Learned).
+# `cargo tauri build` does NOT run tests, so the gate has to live here.
+# Override deliberately with -SkipChecks (emergency hotfix only).
+if ($preflightRuns) {
+    $preflightTimer = [System.Diagnostics.Stopwatch]::StartNew()
+    Write-StageHeader "0" $totalSteps "PREFLIGHT - Frontend & Rust gates (fail fast)"
+
+    # 1. JavaScript grammar, parsed in the SAME mode the browser will use.
+    $syntaxScript = Join-Path $repoRoot "scripts\check-js-syntax.ps1"
+    if (Test-Path -LiteralPath $syntaxScript) {
+        Write-StepLog "Checking frontend JavaScript grammar" "type=module as .mjs, classic as .js (node --check)"
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $syntaxScript
+        if ($LASTEXITCODE -ne 0) {
+            Write-StepError "JS grammar check FAILED - a module SyntaxError would ship as a rendered-but-dead UI"
+            throw "Frontend JS grammar check failed (exit code $LASTEXITCODE). Fix it, or pass -SkipChecks to override."
+        }
+        Write-StepDone "Frontend JavaScript grammar clean"
+    } else {
+        Write-StepWarn "scripts\check-js-syntax.ps1 not found - grammar gate skipped"
+    }
+
+    # 2. Broad lint tripwire (oxlint — a Rust binary, no node_modules needed).
+    #    GATE = zero ERRORS. Warnings (currently ~53, mostly `no-empty` on the
+    #    deliberate `catch (_) {}` idiom) are a documented baseline: fail only on
+    #    errors so the gate is not turned off after its first run.
+    $lintScript = Join-Path $repoRoot "scripts\check-js-lint.ps1"
+    if (Test-Path -LiteralPath $lintScript) {
+        Write-StepLog "Linting the frontend" "oxlint; errors fail the gate, warnings are baseline"
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $lintScript
+        if ($LASTEXITCODE -eq 1) {
+            Write-StepError "Frontend lint FAILED - fix the reported errors before shipping"
+            throw "Frontend lint failed. Fix it, or pass -SkipChecks to override."
+        } elseif ($LASTEXITCODE -ne 0) {
+            Write-StepWarn "Lint tooling unavailable (exit $LASTEXITCODE) - lint step skipped"
+        } else {
+            Write-StepDone "Frontend lint clean (0 errors)"
+        }
+    } else {
+        Write-StepWarn "scripts\check-js-lint.ps1 not found - lint gate skipped"
+    }
+
+    # 3. Rust gates (JS syntax + boot-guard wiring live in tests/test_assets.rs).
+    Push-Location $repoRoot
+    try {
+        $env:CARGO_BUILD_JOBS = "2"
+        if ($FullTests) {
+            Write-StepLog "Running the full test suite" "cargo test --release -j 2 -- --skip physical_"
+            cargo test --release -j 2 -- --skip physical_
+        } else {
+            Write-StepLog "Running frontend-gate tests" "cargo test --release -j 2 --test test_assets (use -FullTests for all)"
+            cargo test --release -j 2 --test test_assets
+        }
+        if ($LASTEXITCODE -ne 0) {
+            Write-StepError "Test gate FAILED (exit code $LASTEXITCODE)"
+            throw "Test gate failed. Fix the tests, or pass -SkipChecks to override."
+        }
+        Write-StepDone "Rust test gate green"
+    } finally {
+        Pop-Location
+    }
+
+    $preflightTimer.Stop()
+    $preflightElapsed = [math]::Round($preflightTimer.Elapsed.TotalSeconds, 1)
+    Write-StepDone "Stage 0 (PREFLIGHT) complete" "${preflightElapsed}s"
+}
 
 # ── 1. BUILD STEP ─────────────────────────────────────────────────────────────
 if ($Action -in @("all", "build")) {

@@ -1,0 +1,60 @@
+{
+  // NanoClick — oxlint configuration (Stage 2 of the frontend safety net).
+  //
+  // WHY oxlint and not ESLint: the project has NO package.json and NO
+  // node_modules by design (installer ~3.5 MB, no bundler). oxlint is a single
+  // Rust binary (run through `npx oxlint@<pin>` or a prebuilt binary) that reads
+  // this file without any npm project around it.
+  //
+  // SCOPE: this linter is a broad TRIPWIRE, not the authority. The authoritative
+  // grammar gate stays `node --check` on a `.mjs` copy (module mode), because a
+  // duplicate top-level declaration is fatal in a module and legal in a classic
+  // script — see scripts/check-js-syntax.ps1 and src/boot_guard.js.
+  //
+  // Measured 2026-09-21 with oxlint 1.84.0:
+  //   * `no-redeclare` DOES flag the module-level duplicate that killed the UI
+  //     (both locations), so the tripwire covers the post-mortem bug class;
+  //   * without `env.browser` the run produced ~7.8k `no-undef` lines for
+  //     window/document/console/fetch — pure noise, hence the env block below.
+  "env": {
+    "browser": true,
+    "es2024": true
+  },
+  "categories": {
+    "correctness": "error",
+    "suspicious": "warn"
+  },
+  "rules": {
+    "no-undef": "error",
+    "no-redeclare": "error",
+    "no-dupe-keys": "error",
+    "no-dupe-class-members": "error",
+    "no-dupe-else-if": "error",
+    "no-unsafe-negation": "error",
+    "no-cond-assign": "error",
+    "no-self-assign": "error",
+    "no-self-compare": "error",
+    "no-unreachable": "error",
+    "no-fallthrough": "error",
+    "no-async-promise-executor": "error",
+    // `catch (_) {}` is a deliberate idiom throughout this frontend (a logger
+    // must never throw), so `_` must not be reported as an unused binding.
+    "no-unused-vars": ["warn", {
+      "argsIgnorePattern": "^_",
+      "caughtErrorsIgnorePattern": "^_",
+      "varsIgnorePattern": "^_"
+    }],
+    "no-constant-condition": "warn",
+    "no-empty": "warn",
+    "no-useless-escape": "warn",
+    // Off: the UI boot sequence intentionally awaits inside loops/promises, and
+    // `require-await` would fire on the async Tauri wrappers.
+    "require-await": "off",
+    "no-await-in-loop": "off",
+    "no-underscore-dangle": "off"
+  },
+  "ignorePatterns": [
+    "locales/**",
+    "**/*.min.js"
+  ]
+}

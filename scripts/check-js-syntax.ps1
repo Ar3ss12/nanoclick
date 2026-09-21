@@ -68,8 +68,22 @@ foreach ($html in $htmlFiles) {
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("nanoclick_syntax_" + [IO.Path]::GetFileNameWithoutExtension($file) + $(if ($isModule) { '.mjs' } else { '.js' }))
     Copy-Item -Path $path -Destination $tmp -Force
 
-    $out = & node --check $tmp 2>&1
-    $ok = $LASTEXITCODE -eq 0
+    # Windows PowerShell 5.1 quirk: with `$ErrorActionPreference = 'Stop'`, a
+    # native command that writes to stderr is turned into a terminating
+    # NativeCommandError, which SWALLOWS the very `SyntaxError` line this checker
+    # exists to print (verified: a `2>&1` pipe or redirect does not help — the
+    # error is raised before the pipeline sees the text). Routing the call
+    # through `cmd /c` merges both streams into stdout for us, so PowerShell
+    # never sees a native stderr write at all.
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $out = (& cmd /c "node --check `"$tmp`" 2>&1") -join "`n"
+        $nodeExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+    $ok = $nodeExit -eq 0
     Remove-Item $tmp -Force -ErrorAction SilentlyContinue
 
     $mode = if ($isModule) { 'module' } else { 'classic' }
