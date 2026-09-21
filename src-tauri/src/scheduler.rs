@@ -168,6 +168,60 @@ pub struct ClickScheduler {
     focus_guard: Arc<FocusGuard>,
 }
 
+/// What a single toggle press must do, resolved **without side effects**.
+///
+/// This enum is the contract the low-level keyboard hook relies on: the hook
+/// only decides *what* to do (it has no access to worker state beyond the
+/// scheduler), and `ClickScheduler` applies it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToggleOutcome {
+    /// Idle → start clicking.
+    Start,
+    /// Running → stop clicking. Always honoured (see `decide_toggle`).
+    Stop,
+    /// Work Mode is engaged: the toggle is deliberately inert.
+    IgnoredWorkMode,
+    /// Start refused: the user is still typing (`go rush B` and the `r` key).
+    BlockedByTyping,
+    /// Start refused: an accepted toggle happened moments ago (fast double tap).
+    BlockedByDebounce,
+}
+
+/// Gate order for one toggle press. This is the *only* place where the rules
+/// live, so the hook thread, the UI button and the tests cannot drift apart.
+///
+/// 1. **STOP absolute:** when the clicker runs, the press stops it. Not
+///    debounced, not typing-gated, not mode-gated. A user who wants the
+///    clicking to stop must never be refused — this is exactly the rule that
+///    was broken in the "still clicking after the second tap" reports.
+/// 2. **Work Mode:** refuses to start (safety lock).
+/// 3. **Typing lockout:** refuses to start (letter inside a word).
+/// 4. **Debounce:** refuses to start (the second tap of a double tap).
+/// 5. Otherwise: start.
+///
+/// Pure by construction — no atomics, no locks, no emits, no worker spawn,
+/// so the whole decision matrix is unit-testable.
+pub fn decide_toggle(
+    active: bool,
+    work_mode: bool,
+    typing_locked: bool,
+    debounce_ok: bool,
+) -> ToggleOutcome {
+    if active {
+        return ToggleOutcome::Stop;
+    }
+    if work_mode {
+        return ToggleOutcome::IgnoredWorkMode;
+    }
+    if typing_locked {
+        return ToggleOutcome::BlockedByTyping;
+    }
+    if !debounce_ok {
+        return ToggleOutcome::BlockedByDebounce;
+    }
+    ToggleOutcome::Start
+}
+
 impl ClickScheduler {
     pub fn new() -> Self {
         let initial_cfg = Config::default();
@@ -418,58 +472,63 @@ impl ClickScheduler {
         is_in_held && !physically_down
     }
     pub fn hotkey_toggle(&self, app_handle: Option<&AppHandle>) -> String {
-        // ── Fast double-tap & stop safety ─────────────────────────────
-        // STOP is NEVER suppressed by debounce! When clicking is active,
-        // stopping must succeed on the first attempt even during ultra-fast
-        // double-taps. Debounce only applies to starting from an idle state.
-        let currently_active = self.is_active();
-        if !currently_active
-            && !Self::toggle_debounce_check(
+        // ── One pure decision, then apply it ──────────────────────────────
+        // The whole gate order lives in `decide_toggle` and is unit-tested:
+        // STOP absolute → Work Mode → typing lockout → debounce → start.
+        let was_active = self.is_active();
+        let work_mode = !self.is_autoclicker_mode();
+        let typing_locked = !self.typing_allows_start();
+        // The debounce window is consulted ONLY on the start path: stopping
+        // must never touch it ("stop always wins").
+        let debounce_ok = was_active
+            || Self::toggle_debounce_check(
                 &self.last_toggle_instant,
                 self.hotkey_debounce_ms.load(Ordering::Relaxed),
-            )
-        {
-            return if self.is_autoclicker_mode() {
-                "autoclicker"
-            } else {
-                "work"
+            );
+        let outcome = decide_toggle(was_active, work_mode, typing_locked, debounce_ok);
+        let mode_str = if work_mode { "work" } else { "autoclicker" };
+
+        match outcome {
+            ToggleOutcome::BlockedByDebounce => {
+                toggle_diag_push("[Hotkeys] toggle ignored: debounce window open");
+                return mode_str.into();
             }
-            .into();
+            ToggleOutcome::BlockedByTyping => {
+                toggle_diag_push("[Hotkeys] toggle ignored: user is typing");
+                return mode_str.into();
+            }
+            ToggleOutcome::IgnoredWorkMode => {
+                toggle_diag_push("[Hotkeys] toggle ignored: work mode active");
+                self.set_active(false, app_handle);
+                if let Some(ref app) = app_handle {
+                    let _ = app.emit(
+                        "status-update",
+                        StatusUpdate {
+                            active: false,
+                            mode: "work".into(),
+                            clicks_done: self.get_clicks_done(),
+                            cps: f64::from_bits(self.cps_raw.load(Ordering::Relaxed)),
+                            status_text: "WORK MODE (PAUSED)".into(),
+                        },
+                    );
+                }
+                return "work".into();
+            }
+            // START and STOP fall through to the single apply point below.
+            ToggleOutcome::Start | ToggleOutcome::Stop => {}
         }
 
-        // State-based decision (not blind inversion): resolve the action
-        // from live atomics so a duplicated event can never flip twice.
-        let prev_mode = self.mode_autoclicker.load(Ordering::Relaxed);
-        let was_active = self.is_active();
-        if !prev_mode {
-            toggle_diag_push("[Hotkeys] toggle ignored: work mode active");
-            self.set_active(false, app_handle);
-            if let Some(ref app) = app_handle {
-                let _ = app.emit(
-                    "status-update",
-                    StatusUpdate {
-                        active: false,
-                        mode: "work".into(),
-                        clicks_done: self.get_clicks_done(),
-                        cps: f64::from_bits(self.cps_raw.load(Ordering::Relaxed)),
-                        status_text: "WORK MODE (PAUSED)".into(),
-                    },
-                );
-            }
-            return "work".into();
-        }
-
-        let new_mode = true;
-        let new_active = !was_active;
+        // State-based application (not blind inversion): the action was
+        // resolved from live atomics, so a duplicated event can never flip
+        // the clicker twice.
+        let new_active = outcome == ToggleOutcome::Start;
 
         toggle_diag_push(format!(
-            "[Hotkeys] toggle prev_mode={prev_mode} prev_active={was_active}              new_mode={new_mode} new_active={new_active}"
+            "[Hotkeys] toggle prev_active={was_active} new_active={new_active}"
         ));
 
-        self.mode_autoclicker.store(new_mode, Ordering::Relaxed);
         self.set_active(new_active, app_handle);
 
-        let mode_str = if new_mode { "autoclicker" } else { "work" };
         if let Some(ref app) = app_handle {
             let _ = app.emit(
                 "status-update",
@@ -480,10 +539,8 @@ impl ClickScheduler {
                     cps: f64::from_bits(self.cps_raw.load(Ordering::Relaxed)),
                     status_text: if new_active {
                         "RUNNING".into()
-                    } else if new_mode {
-                        "IDLE".into()
                     } else {
-                        "WORK MODE (PAUSED)".into()
+                        "IDLE".into()
                     },
                 },
             );
@@ -498,17 +555,26 @@ impl ClickScheduler {
     }
 
     pub fn set_active(&self, active: bool, app_handle: Option<&AppHandle>) {
-        // TYPING KILL-SWITCH: starting the clicker while the user is typing
-        // is forbidden. A single-key toggle sitting inside a word (the `r`
-        // in `go rush B`) must never switch the clicker on — central choke
-        // point so every activation path (hotkey, UI button, mode restores)
-        // inherits the block. Stopping always succeeds.
-        if active && !self.typing_allows_start() {
-            toggle_diag_push("[Hotkeys] start blocked: user is typing");
-            return;
-        }
-        if active && !self.is_autoclicker_mode() {
-            return;
+        // TYPING KILL-SWITCH + WORK MODE: starting the clicker while the user
+        // is typing (the `r` in `go rush B`) or while Work Mode is engaged is
+        // forbidden — central choke point so every activation path (hotkey,
+        // UI button, preset restore, mode switch) inherits the block.
+        // Stopping ALWAYS succeeds.
+        if active {
+            let outcome = decide_toggle(
+                false,
+                !self.is_autoclicker_mode(),
+                !self.typing_allows_start(),
+                true,
+            );
+            if outcome != ToggleOutcome::Start {
+                toggle_diag_push(match outcome {
+                    ToggleOutcome::BlockedByTyping => "[Hotkeys] start blocked: user is typing",
+                    ToggleOutcome::IgnoredWorkMode => "[Hotkeys] start blocked: work mode active",
+                    _ => "[Hotkeys] start blocked",
+                });
+                return;
+            }
         }
 
         let was_active = self.active.swap(active, Ordering::Relaxed);
@@ -1488,6 +1554,265 @@ mod focus_guard_tests {
         assert!(
             arm_off < loop_off,
             "arm() must happen before the click loop starts"
+        );
+    }
+}
+
+/// ── Hotkey stop-path regression suite ────────────────────────────────
+/// Covers the field reports where the toggle "kept clicking" or "switched
+/// itself off": a fast double tap, a tap 300 ms apart, and a tap while the
+/// typing lockout was armed.
+///
+/// The suite drives the REAL `decide_toggle` gates and the REAL debounce
+/// bookkeeping through [`ToggleSim`], but never calls
+/// `ClickScheduler::set_active(true)` — that would spawn a live click worker
+/// and actually press the developer's mouse buttons.
+#[cfg(test)]
+mod hotkey_stop_path_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use std::time::{Duration, Instant};
+
+    /// Deterministic mirror of the hook → scheduler toggle path.
+    struct ToggleSim {
+        active: bool,
+        work_mode: bool,
+        typing_locked: bool,
+        debounce_ms: u32,
+        last_toggle: Arc<StdMutex<Option<Instant>>>,
+    }
+
+    impl ToggleSim {
+        fn new(debounce_ms: u32) -> Self {
+            ToggleSim {
+                active: false,
+                work_mode: false,
+                typing_locked: false,
+                debounce_ms,
+                last_toggle: Arc::new(StdMutex::new(None)),
+            }
+        }
+
+        /// One hook press: a key-down that matched the toggle combo.
+        fn press(&mut self) -> ToggleOutcome {
+            // Production rule: the debounce window is consulted ONLY on the
+            // start path — a stop must never be refusable.
+            let debounce_ok = self.active
+                || ClickScheduler::toggle_debounce_check(&self.last_toggle, self.debounce_ms);
+            let outcome = decide_toggle(
+                self.active,
+                self.work_mode,
+                self.typing_locked,
+                debounce_ok,
+            );
+            match outcome {
+                ToggleOutcome::Start => self.active = true,
+                ToggleOutcome::Stop => self.active = false,
+                _ => {}
+            }
+            outcome
+        }
+    }
+
+    #[test]
+    fn press_from_idle_starts_the_clicker() {
+        let mut sim = ToggleSim::new(80);
+        assert_eq!(sim.press(), ToggleOutcome::Start);
+        assert!(sim.active, "the first press must start clicking");
+    }
+
+    /// The exact user scenario: start, then press again 300 ms later to stop.
+    #[test]
+    fn press_again_300_ms_later_stops_the_clicker() {
+        let mut sim = ToggleSim::new(80);
+        assert_eq!(sim.press(), ToggleOutcome::Start);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(sim.press(), ToggleOutcome::Stop);
+        assert!(!sim.active, "300 ms later the second press must stop clicking");
+    }
+
+    /// Debounce must never swallow a stop, even on an ultra-fast second tap.
+    #[test]
+    fn press_within_debounce_window_still_stops_the_clicker() {
+        let mut sim = ToggleSim::new(5000); // absurdly long window, on purpose
+        assert_eq!(sim.press(), ToggleOutcome::Start);
+        std::thread::sleep(Duration::from_millis(10));
+        assert_eq!(sim.press(), ToggleOutcome::Stop, "a stop is never debounced");
+        assert!(!sim.active);
+    }
+
+    #[test]
+    fn stop_is_never_gated_by_the_typing_lockout() {
+        let mut sim = ToggleSim::new(80);
+        assert_eq!(sim.press(), ToggleOutcome::Start);
+        // A text key landed mid-run: the clicker is stopped by the kill-switch
+        // and the lockout is armed.
+        sim.typing_locked = true;
+        assert_eq!(
+            sim.press(),
+            ToggleOutcome::Stop,
+            "the user must always be able to stop the clicker"
+        );
+        assert!(!sim.active);
+    }
+
+    #[test]
+    fn stop_wins_even_while_work_mode_is_engaged() {
+        let mut sim = ToggleSim::new(80);
+        assert_eq!(sim.press(), ToggleOutcome::Start);
+        sim.work_mode = true; // switching to Work Mode must not block the stop
+        assert_eq!(sim.press(), ToggleOutcome::Stop);
+        assert!(!sim.active);
+    }
+
+    #[test]
+    fn idle_press_in_work_mode_is_ignored() {
+        let mut sim = ToggleSim::new(80);
+        sim.work_mode = true;
+        assert_eq!(sim.press(), ToggleOutcome::IgnoredWorkMode);
+        assert!(!sim.active, "Work Mode is a safety lock: never start there");
+    }
+
+    #[test]
+    fn typing_lockout_blocks_the_start() {
+        let mut sim = ToggleSim::new(80);
+        sim.typing_locked = true;
+        assert_eq!(sim.press(), ToggleOutcome::BlockedByTyping);
+        assert!(!sim.active, "`r` inside a word must not start clicking");
+    }
+
+    #[test]
+    fn start_right_after_a_stop_is_debounced() {
+        let mut sim = ToggleSim::new(200);
+        assert_eq!(sim.press(), ToggleOutcome::Start);
+        assert_eq!(sim.press(), ToggleOutcome::Stop);
+        // The window was armed by the START, so a third tap cannot flip the
+        // clicker back on right after the stop.
+        assert_eq!(sim.press(), ToggleOutcome::BlockedByDebounce);
+        assert!(!sim.active);
+    }
+
+    #[test]
+    fn start_is_allowed_once_the_debounce_window_elapses() {
+        let mut sim = ToggleSim::new(40);
+        assert_eq!(sim.press(), ToggleOutcome::Start);
+        assert_eq!(sim.press(), ToggleOutcome::Stop);
+        std::thread::sleep(Duration::from_millis(60));
+        assert_eq!(sim.press(), ToggleOutcome::Start);
+        assert!(sim.active);
+    }
+
+    /// Regression for the field reports: a burst of fast taps must never
+    /// leave the clicker running when the user's last intent was "stop".
+    #[test]
+    fn rapid_taps_never_leave_the_clicker_inverted() {
+        let mut sim = ToggleSim::new(80);
+        assert_eq!(sim.press(), ToggleOutcome::Start);
+        assert_eq!(sim.press(), ToggleOutcome::Stop);
+        for _ in 0..5 {
+            assert_eq!(sim.press(), ToggleOutcome::BlockedByDebounce);
+        }
+        assert!(
+            !sim.active,
+            "the clicker must stay stopped — an inverted toggle is the bug we fix"
+        );
+    }
+
+    #[test]
+    fn blocked_start_does_not_consume_the_debounce_window() {
+        let mut sim = ToggleSim::new(500);
+        assert_eq!(sim.press(), ToggleOutcome::Start);
+        assert_eq!(sim.press(), ToggleOutcome::Stop);
+
+        let before = *sim.last_toggle.lock().unwrap();
+        assert_eq!(sim.press(), ToggleOutcome::BlockedByDebounce);
+        let after = *sim.last_toggle.lock().unwrap();
+        assert_eq!(before, after, "a refused start must not extend the window");
+
+        std::thread::sleep(Duration::from_millis(520));
+        assert_eq!(sim.press(), ToggleOutcome::Start);
+    }
+
+    /// Locks the documented gate order so a future refactor cannot reorder it:
+    /// STOP is absolute, then Work Mode, then typing, then debounce.
+    #[test]
+    fn every_gate_combination_follows_the_documented_order() {
+        use ToggleOutcome::*;
+        let cases: [(bool, bool, bool, bool, ToggleOutcome); 16] = [
+            (true, false, false, true, Stop),
+            (true, false, false, false, Stop),
+            (true, false, true, true, Stop),
+            (true, false, true, false, Stop),
+            (true, true, false, true, Stop),
+            (true, true, false, false, Stop),
+            (true, true, true, true, Stop),
+            (true, true, true, false, Stop),
+            (false, true, false, true, IgnoredWorkMode),
+            (false, true, true, true, IgnoredWorkMode),
+            (false, true, false, false, IgnoredWorkMode),
+            (false, true, true, false, IgnoredWorkMode),
+            (false, false, true, true, BlockedByTyping),
+            (false, false, true, false, BlockedByTyping),
+            (false, false, false, false, BlockedByDebounce),
+            (false, false, false, true, Start),
+        ];
+        for (active, work, typing, debounce, expected) in cases {
+            assert_eq!(
+                decide_toggle(active, work, typing, debounce),
+                expected,
+                "active={active} work={work} typing={typing} debounce={debounce}"
+            );
+        }
+    }
+
+    /// A refused start must leave no trace: once the user stops typing, the
+    /// clicker starts normally on the next press.
+    #[test]
+    fn typing_blocked_press_leaves_the_clicker_idle_and_recoverable() {
+        let mut sim = ToggleSim::new(80);
+        sim.typing_locked = true;
+        assert_eq!(sim.press(), ToggleOutcome::BlockedByTyping);
+        assert!(!sim.active);
+
+        sim.typing_locked = false;
+        // The refused press consumed the window (production behaviour); wait
+        // it out, then the clicker starts on the first press.
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(sim.press(), ToggleOutcome::Start);
+        assert!(sim.active);
+    }
+
+    /// The real scheduler must delegate its start gate to the same pure
+    /// decision the simulator uses — otherwise the tests could pass while
+    /// production drifts. Never calls `set_active(true)` (no worker spawn).
+    #[test]
+    fn scheduler_start_gate_matches_the_pure_decision() {
+        let scheduler = ClickScheduler::new();
+        scheduler.typing_guard().note();
+        assert!(scheduler.typing_guard().hotkeys_locked());
+
+        // What `set_active(true)` consults while the lockout is armed:
+        assert_eq!(
+            decide_toggle(
+                false,
+                !scheduler.is_autoclicker_mode(),
+                !scheduler.typing_allows_start(),
+                true,
+            ),
+            ToggleOutcome::BlockedByTyping
+        );
+
+        // …and the stop gate stays wide open for a running clicker.
+        assert_eq!(
+            decide_toggle(true, !scheduler.is_autoclicker_mode(), true, true),
+            ToggleOutcome::Stop
+        );
+
+        // Work Mode refuses to start even when nothing is typed.
+        let idle = ClickScheduler::new();
+        assert_eq!(
+            decide_toggle(false, true, !idle.typing_allows_start(), true),
+            ToggleOutcome::IgnoredWorkMode
         );
     }
 }

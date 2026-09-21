@@ -475,10 +475,18 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
                 // `held`, which would swallow every later press of the same
                 // key (fast double-tap bug). If the physical key is actually
                 // up, this DOWN is a fresh press: clean stale state first.
-                let mut stale_cleaned = false;
-                if was_held && !key_down(event.vk) {
+                //
+                // `classify_press` also filters OS auto-repeat: a second DOWN
+                // while the key is still physically down is NOT a new press,
+                // so one long hold can never fire the toggle repeatedly.
+                //
+                // `&&` short-circuit keeps the hook path syscall-free for the
+                // common case: when the key was not tracked as held this is
+                // always a fresh press, so `GetAsyncKeyState` is never called.
+                let held_and_down = was_held && key_down(event.vk);
+                let fresh_press = classify_press(was_held, held_and_down) == PressKind::Fresh;
+                if was_held && fresh_press {
                     held.retain(|&key| !key_code_matches(event.vk, key));
-                    stale_cleaned = true;
                     hotkey_diag_push(format!("stale-held cleaned vk=0x{:02X}", event.vk));
                 }
                 held.insert(event.vk);
@@ -486,7 +494,7 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
                 // applied to the TOGGLE group only (see the block after the
                 // hotkey dispatch) so it can never lock out the emergency
                 // stop or the mode switch.
-                if !was_held || stale_cleaned {
+                if fresh_press {
                     // ── TYPING GUARD: TOGGLE GATE ────────────────────────
                     // Two layers, because a single check is not enough:
                     //
@@ -730,6 +738,27 @@ pub fn hotkey_diag_dump() -> Vec<String> {
 static GLOBAL_HOTKEY_TX: OnceLock<StdMutex<Option<Sender<GlobalKeyEvent>>>> = OnceLock::new();
 static GLOBAL_HOTKEY_STOP: AtomicBool = AtomicBool::new(false);
 static GLOBAL_HOTKEY_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// Classification of a key-down for the hook loop.
+///
+/// Extracted so the two field bugs — a missed key-up swallowing the next
+/// press, and OS auto-repeat firing a hotkey many times per press — are
+/// unit-testable with an injected physical key state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PressKind {
+    /// A brand-new press: hotkey groups must be evaluated.
+    Fresh,
+    /// The key was already held and is still physically down: OS auto-repeat.
+    Repeat,
+}
+
+fn classify_press(was_held: bool, physically_down: bool) -> PressKind {
+    if was_held && physically_down {
+        PressKind::Repeat
+    } else {
+        PressKind::Fresh
+    }
+}
 
 /// Fire `fire` when `vk` matches a combo in `group`.
 ///
@@ -1142,6 +1171,161 @@ mod hotkey_tests {
         let (combos, invalid) = combos_from_label("R / NotARealKey / K");
         assert_eq!(combos.len(), 2);
         assert_eq!(invalid, 1);
+    }
+}
+
+/// ── Hotkey stream regression suite ──────────────────────────────────
+/// Feeds synthetic key streams (missed key-ups, OS auto-repeat, the 300 ms
+/// double tap from the field reports) through the REAL press classifier and
+/// the REAL combo matcher used by the hook loop.
+#[cfg(test)]
+mod hotkey_stream_tests {
+    use super::*;
+
+    /// Mirror of the hook loop's per-key bookkeeping. `physically_down` is
+    /// injected so a test can pretend the OS dropped a key-up, or that the
+    /// key is still physically held (auto-repeat).
+    fn count_fires(
+        combo: &HotkeyCombo,
+        stream: &[(u16, bool)],
+        physically_down: impl Fn(u16) -> bool,
+    ) -> usize {
+        let mut held = HashSet::<u16>::new();
+        let mut fired = 0usize;
+        for (vk, is_down) in stream {
+            let was_held = held.iter().any(|&key| key_code_matches(*vk, key));
+            if *is_down {
+                let fresh = classify_press(was_held, physically_down(*vk)) == PressKind::Fresh;
+                if was_held && fresh {
+                    held.retain(|&key| !key_code_matches(*vk, key));
+                }
+                held.insert(*vk);
+                if fresh && combo_matches(combo, *vk, &held, |_| false) {
+                    fired += 1;
+                }
+            } else {
+                held.retain(|&key| !key_code_matches(*vk, key));
+            }
+        }
+        fired
+    }
+
+    /// Default toggle key.
+    const R: u16 = 0x52;
+
+    /// A lost key-up used to swallow every later press of the same key —
+    /// the "toggle does nothing" half of the field reports.
+    #[test]
+    fn stream_missed_keyup_does_not_swallow_next_press() {
+        let combo = parse_hotkey_combo("R").expect("R parses");
+        // down, (key-up lost), down, up — physically the key is up each time.
+        let fired = count_fires(&combo, &[(R, true), (R, true), (R, false)], |_| false);
+        assert_eq!(
+            fired, 2,
+            "both presses must fire; a stuck `held` entry eats the second"
+        );
+    }
+
+    /// OS auto-repeat must not turn one long hold into a burst of toggles.
+    #[test]
+    fn stream_autorepeat_down_fires_toggle_exactly_once() {
+        let combo = parse_hotkey_combo("R").expect("R parses");
+        let fired = count_fires(
+            &combo,
+            &[(R, true), (R, true), (R, true), (R, true), (R, false)],
+            |_| true, // physically still held: extra DOWNs are auto-repeat
+        );
+        assert_eq!(fired, 1, "holding the key must not toggle repeatedly");
+    }
+
+    #[test]
+    fn stream_duplicate_up_is_harmless() {
+        let combo = parse_hotkey_combo("R").expect("R parses");
+        let fired = count_fires(&combo, &[(R, true), (R, false), (R, false)], |_| false);
+        assert_eq!(fired, 1, "a duplicate key-up must not confuse the tracker");
+    }
+
+    /// The exact field scenario end-to-end through the matcher AND the
+    /// decision: press → start, wait 300 ms, press → stop.
+    #[test]
+    fn stream_fast_double_tap_start_then_stop() {
+        use crate::scheduler::{decide_toggle, ToggleOutcome};
+        let combo = parse_hotkey_combo("R").expect("R parses");
+
+        // Press #1: the matcher fires once, and the decision (idle, free)
+        // resolves to Start.
+        assert_eq!(count_fires(&combo, &[(R, true), (R, false)], |_| false), 1);
+        assert_eq!(
+            decide_toggle(false, false, false, true),
+            ToggleOutcome::Start
+        );
+
+        std::thread::sleep(Duration::from_millis(300));
+
+        // Press #2: the matcher fires once again, and the decision (running)
+        // resolves to Stop — never debounced, never refused.
+        assert_eq!(count_fires(&combo, &[(R, true), (R, false)], |_| false), 1);
+        assert_eq!(
+            decide_toggle(true, false, false, false),
+            ToggleOutcome::Stop,
+            "the stop must never be blocked by a stale debounce window"
+        );
+    }
+
+    /// Guards the wiring: the hook path must resolve the action through the
+    /// shared pure decision, not through inline rules that can drift.
+    #[test]
+    fn hotkey_toggle_routes_through_the_pure_decision() {
+        let src = include_str!("../../scheduler.rs");
+        let toggle_off = src
+            .find("pub fn hotkey_toggle")
+            .expect("hotkey_toggle must exist");
+        let tail = &src[toggle_off..];
+        let decide_off = tail
+            .find("decide_toggle(")
+            .expect("hotkey_toggle must delegate to decide_toggle");
+        assert!(
+            decide_off < 2000,
+            "the decision must be the first thing the toggle does"
+        );
+        assert!(
+            tail.contains("let new_active = outcome == ToggleOutcome::Start;"),
+            "Start/Stop must be applied from the resolved outcome"
+        );
+        assert!(
+            tail.contains("let debounce_ok = was_active"),
+            "the debounce window may only be consulted on the start path"
+        );
+    }
+
+    /// The listener re-parses bindings ONLY when `hotkeys_version` changes.
+    /// A config save that fails to bump it leaves the user's new hotkey
+    /// unusable — which the user experiences as "my hotkey reset back".
+    #[test]
+    fn config_save_bumps_hotkeys_version_so_bindings_reparse() {
+        let scheduler = ClickScheduler::new();
+        let before = scheduler.hotkeys_version();
+
+        let mut cfg = scheduler.get_config();
+        cfg.hotkey_toggle = "T".into();
+        scheduler.set_config(cfg);
+
+        assert!(
+            scheduler.hotkeys_version() > before,
+            "a config save must bump hotkeys_version or the listener never re-reads"
+        );
+
+        let snapshot = HotkeySnapshot::from_scheduler(&scheduler);
+        assert_eq!(snapshot.toggle, "T");
+        let bindings = HotkeyBindings::from_snapshot(&snapshot);
+        assert!(
+            bindings.toggle.iter().any(|c| c.trigger == 0x54),
+            "the saved key must be bound"
+        );
+        assert!(
+            !bindings.toggle.iter().any(|c| c.trigger == 0x52),
+            "the previous key must be released"
+        );
     }
 }
 
