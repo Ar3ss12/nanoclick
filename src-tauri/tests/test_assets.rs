@@ -560,6 +560,120 @@ fn test_main_js_has_no_duplicate_top_level_declarations() {
     );
 }
 
+/// MANDATORY JavaScript grammar check (v1.1.0).
+///
+/// This is the check that was missing while a duplicate top-level declaration
+/// in `main.js` kept the entire UI dead: the file is loaded as an ES module,
+/// and in module mode a duplicate declaration is a fatal SyntaxError. It is
+/// perfectly legal in a classic script, which is exactly why `node --check
+/// main.js` (script mode) and the whole test suite stayed green on a completely
+/// unusable build.
+///
+/// Strategy: extract every `<script src="…">` from the embedded HTML, then
+/// syntax-check each file with Node using the SAME parse mode the browser will
+/// use — `.mjs` for `type="module"` scripts, `.js` for classic ones. This is
+/// V8's own parser, so it catches everything the renderer would reject:
+/// duplicate declarations, reserved words, bad regex, unbalanced braces.
+///
+/// Node is mandatory (it is what the product already ships a web UI for, and
+/// CI has it via the Tauri action). For a machine without Node, set
+/// `NANOCLICK_JS_SYNTAX_STRICT=0` to downgrade to a warning.
+#[test]
+fn test_frontend_js_syntax_is_valid() {
+    let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
+    let read_asset = |name: &str| -> Option<String> {
+        let key = tauri::utils::assets::AssetKey::from(name);
+        ctx.assets()
+            .get(&key)
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+    };
+
+    // ── 1. Discover the scripts and their parse mode from the HTML ──────
+    let mut scripts: Vec<(String, bool)> = Vec::new(); // (file, is_module)
+    for page in ["index.html", "hud.html", "overlay.html"] {
+        let Some(html) = read_asset(page) else { continue };
+        for tag in html.split("<script").skip(1) {
+            let Some(end) = tag.find('>') else { continue };
+            let attrs = &tag[..end];
+            let Some(src_at) = attrs.find("src=") else { continue };
+            let rest = attrs[src_at + 4..].trim_start();
+            let Some(quote) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else {
+                continue;
+            };
+            let rest = &rest[quote.len_utf8()..];
+            let Some(close) = rest.find(quote) else { continue };
+            let file = rest[..close].trim().to_string();
+            if !file.ends_with(".js") {
+                continue;
+            }
+            let is_module = attrs.contains("type=\"module\"") || attrs.contains("type='module'");
+            if !scripts.iter().any(|(f, _)| *f == file) {
+                scripts.push((file, is_module));
+            }
+        }
+    }
+    assert!(
+        scripts.iter().any(|(f, _)| f == "main.js"),
+        "index.html must load main.js — the discovery scan found: {scripts:?}"
+    );
+
+    // ── 2. Node availability ───────────────────────────────────────────
+    let strict = std::env::var("NANOCLICK_JS_SYNTAX_STRICT")
+        .map(|v| v != "0")
+        .unwrap_or(true);
+    let node_works = std::process::Command::new("node")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !node_works {
+        assert!(
+            !strict,
+            "Node.js is required for the mandatory JS grammar check. \
+             Install Node.js, or set NANOCLICK_JS_SYNTAX_STRICT=0 to skip it."
+        );
+        eprintln!("[js-syntax] Node.js not found — check skipped (strict mode off)");
+        return;
+    }
+
+    // ── 3. Parse every script in the mode the browser will use ─────────
+    let tmp_dir = std::env::temp_dir().join(format!("nanoclick_js_syntax_{}", std::process::id()));
+    std::fs::create_dir_all(&tmp_dir).expect("temp dir for the syntax check");
+
+    let mut failures: Vec<String> = Vec::new();
+    for (file, is_module) in &scripts {
+        let Some(source) = read_asset(file) else {
+            failures.push(format!("{file}: listed in HTML but NOT embedded in the build"));
+            continue;
+        };
+        // `.mjs` forces module mode; `.js` in a bare temp dir is a classic
+        // script — exactly matching how the HTML loads each file.
+        let path = tmp_dir.join(format!("{}.{}", file.replace('/', "_"), if *is_module { "mjs" } else { "js" }));
+        std::fs::write(&path, &source).expect("write temp script");
+        let out = std::process::Command::new("node")
+            .arg("--check")
+            .arg(&path)
+            .output()
+            .expect("run node --check");
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr).into_owned();
+            failures.push(format!(
+                "{file} ({}):\n{}",
+                if *is_module { "module" } else { "classic" },
+                err.trim()
+            ));
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    assert!(
+        failures.is_empty(),
+        "JavaScript grammar check failed — the browser would refuse to run these files:\n\n{}",
+        failures.join("\n\n")
+    );
+}
+
 /// i18n symmetry: every notice key used by Rust/JS must exist in all 3 locales.
 #[test]
 fn test_notice_i18n_symmetry() {
