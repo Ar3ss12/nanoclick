@@ -39,6 +39,21 @@ const origLog = console.log;
 const origError = console.error;
 const origWarn = console.warn;
 
+// ── BACKGROUND MEMORY GUARD (v1.1.0) ──────────────────────────────
+// A hidden WebView2 window keeps its renderer alive, and page timers stop it
+// from going idle — pure RAM/CPU burn for a clicker that spends most of its
+// life minimized to tray while it works. `everyVisible` keeps the periodic UI
+// work (stats render, toast polling) suspended while the window is hidden and
+// resumes it automatically on show. The Rust click loop and the LL hooks are
+// untouched: this gates the UI layer only (Zero-Jitter Mandate §2 explicitly
+// allows UI-side savings; the hot path stays syscall-free).
+function uiVisible() {
+  try { return document.visibilityState !== "hidden"; } catch (_) { return true; }
+}
+function everyVisible(ms, fn) {
+  return setInterval(() => { if (uiVisible()) fn(); }, ms);
+}
+
 const logBuffer = [];
 let isFlushingLogs = false;
 
@@ -1348,7 +1363,7 @@ function startFileToastPolling() {
       }
     } catch (_) { /* watcher toasts are best-effort */ }
   };
-  setInterval(tick, 3000);
+  everyVisible(3000, tick);
 }
 
 function escapeHtml(s) {
@@ -4933,7 +4948,7 @@ onDomReady(() => {
       }
     }
   });
-  setInterval(renderStats, 1000);
+  everyVisible(1000, renderStats);
 });
 
 

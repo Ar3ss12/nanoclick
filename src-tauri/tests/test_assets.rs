@@ -420,6 +420,77 @@ fn test_focus_loss_guard_wiring() {
     assert!(main_js.contains("focus-loss-paused"), "main.js must toast the auto-pause reason");
 }
 
+/// Background-memory guard wiring (v1.1.0).
+///
+/// Two rules are locked here:
+/// 1. the WebView2 policy must be applied for EVERY webview (env var, not the
+///    conf entry — HUD/overlay are built at runtime), and
+/// 2. it must never use the flags the Zero-Jitter Mandate forbids, because
+///    they collapse the GPU/renderer into the process that runs the clicker.
+///
+/// The UI side must suspend its periodic work while the window is hidden —
+/// an ungated 1 s stats interval keeps a minimized renderer awake forever.
+#[test]
+fn test_background_memory_guard_wiring() {
+    let main_rs = include_str!("../src/main.rs");
+
+    assert!(
+        main_rs.contains("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"),
+        "the WebView2 memory policy must be applied at boot (env var covers HUD+overlay too)"
+    );
+    assert!(
+        main_rs.contains("--renderer-process-limit=1"),
+        "one renderer for main + HUD + overlay is the main RAM lever"
+    );
+    assert!(
+        main_rs.contains("--max-old-space-size"),
+        "the V8 heap must be capped for the UI"
+    );
+
+    // Red lines from docs/ZERO_JITTER_ISOLATION_PLAN.md §2 — never reintroduce.
+    // The check must look at the POLICY string only: the doc comment above it
+    // names these flags on purpose, to explain why they are banned.
+    let policy_start = main_rs
+        .find("const POLICY: &str = \"")
+        .expect("the webview policy constant must exist");
+    let policy_end = main_rs[policy_start..]
+        .find("\";")
+        .map(|off| policy_start + off)
+        .expect("the policy string must be terminated");
+    let policy = &main_rs[policy_start..policy_end];
+
+    for forbidden in ["--single-process", "--in-process-gpu", "--no-sandbox"] {
+        assert!(
+            !policy.contains(forbidden),
+            "{forbidden} violates the Zero-Jitter Mandate (GPU/renderer must stay out of process)"
+        );
+    }
+
+    let main_js = {
+        let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
+        let key = tauri::utils::assets::AssetKey::from("main.js");
+        let bytes = ctx.assets().get(&key).expect("main.js must be embedded");
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+
+    assert!(
+        main_js.contains("function everyVisible"),
+        "the visibility gate helper must exist"
+    );
+    assert!(
+        main_js.contains("everyVisible(1000, renderStats)"),
+        "the stats render must be gated by visibility"
+    );
+    assert!(
+        !main_js.contains("setInterval(renderStats, 1000)"),
+        "an ungated 1 s stats interval keeps a hidden renderer awake"
+    );
+    assert!(
+        main_js.contains("everyVisible(3000, tick)"),
+        "the toast polling must be gated by visibility too"
+    );
+}
+
 /// i18n symmetry: every notice key used by Rust/JS must exist in all 3 locales.
 #[test]
 fn test_notice_i18n_symmetry() {
