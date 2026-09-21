@@ -120,7 +120,7 @@ cargo tauri build --bundles nsis
 
 ```bash
 cd src-tauri
-cargo test -- --skip physical_
+cargo test --release -j 1 -- --skip physical_
 # → 194 passed; 0 failed (177 unit + 17 integration; 7 `physical_` tests filtered out)
 ```
 
@@ -149,6 +149,11 @@ the whole Rust suite stays green. These gates exist for exactly that class:
 | Lint (broad tripwire) | `powershell -ExecutionPolicy Bypass -File scripts\check-js-lint.ps1` | undefined/unused identifiers, dead code, duplicate keys — oxlint (Rust binary, no `node_modules` required). Gate = **0 errors / 0 warnings** |
 | Rust gates | `cd src-tauri && cargo test --release -j 1 --test test_assets` | grammar + duplicate-declaration scan + boot-guard wiring, run as part of `cargo test` |
 | Release preflight | `scripts\release.ps1` → Stage 0 (PREFLIGHT) | runs the gates **before** `cargo tauri build`, which never runs tests |
+
+> **Copy these commands verbatim.** `cmd.exe` has no `#` comments: a trailing `# …`
+> is passed to the test harness as extra filters and silently runs a fraction of the
+> suite (a 194-test run once reported `11 passed; 173 filtered out`). Use PowerShell
+> if you want comments, or keep the command on its own line.
 
 Runtime trap: `src/boot_guard.js` is a **classic** script loaded first on every page. It
 traps uncaught errors, unhandled rejections and 404 assets, forwards them to
