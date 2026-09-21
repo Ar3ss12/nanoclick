@@ -1,7 +1,7 @@
-# ── GitHub Release Uploader для NanoClick ───────────────────────────────────
-# Завантажує артефакти релізу на GitHub Release через REST API.
-# Запуск: powershell -ExecutionPolicy Bypass -File scripts\upload_release.ps1 -Tag "v1.0.0-beta"
-# Потрібен GitHub Personal Access Token з правами "repo".
+# ── GitHub Release Uploader for NanoClick ──────────────────────────────────
+# Uploads release artifacts to GitHub Release via REST API.
+# Run: powershell -ExecutionPolicy Bypass -File scripts\upload_release.ps1 -Tag "v1.0.0-beta"
+# Requires a GitHub Personal Access Token with "repo" scope.
 
 param(
     [string]$Token = $env:GITHUB_TOKEN,
@@ -76,7 +76,7 @@ Write-Host "║  Target Version : $($TAG.PadRight(46)) ║" -ForegroundColor Whi
 Write-Host "║  Repository     : $("$OWNER/$REPO".PadRight(46)) ║" -ForegroundColor White
 Write-Host "╚════════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
 
-# Збираємо список файлів для завантаження
+# Collect the files to upload
 $setupExe = Join-Path $BUNDLE "NanoClick_${VER}_x64-setup.exe"
 $setupSig = Join-Path $BUNDLE "NanoClick_${VER}_x64-setup.exe.sig"
 $latestJson = Join-Path $BUNDLE "latest.json"
@@ -90,14 +90,14 @@ $FILES = @(
 if (Test-Path -LiteralPath $PORTABLE) {
     $FILES += @{ Path = $PORTABLE; Name = "NanoClick-portable.exe"; Mime = "application/vnd.microsoft.portable-executable" }
 } else {
-    Write-StepWarn "Портативний бінарник не знайдено ($PORTABLE); завантажується лише NSIS інсталятор."
+    Write-StepWarn "Portable binary not found ($PORTABLE); uploading the NSIS installer only."
 }
 
-# ── 1. Авторизація та пошук релізу ──────────────────────────────────────────
-Write-StageHeader "1" "4" "AUTH & QUERY - Пошук та валідація релізу $TAG"
+# ── 1. Auth and release lookup ──────────────────────────────────────────
+Write-StageHeader "1" "4" "AUTH & QUERY - Finding and validating release $TAG"
 
 if (-not $Token) {
-    Write-StepLog "Шукаємо токен у файлах конфігурації (.env)..."
+    Write-StepLog "Looking for a token in the configuration files (.env)..."
     foreach ($envPath in @("$PSScriptRoot\.env", "$repoRoot\.env")) {
         if (Test-Path -LiteralPath $envPath) {
             Get-Content -LiteralPath $envPath | ForEach-Object {
@@ -106,7 +106,7 @@ if (-not $Token) {
                 }
             }
             if ($Token) { 
-                Write-StepDone "Токен зчитано з $envPath"
+                Write-StepDone "Token read from $envPath"
                 break 
             }
         }
@@ -118,13 +118,13 @@ if (-not $Token) {
         $pyToken = python -c "import subprocess; p=subprocess.Popen(['git','credential','fill'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True); out,_=p.communicate('protocol=https\nhost=github.com\n\n'); print([l[9:] for l in out.splitlines() if l.startswith('password=')][0])" 2>$null
         if ($pyToken) {
             $Token = $pyToken.Trim()
-            Write-StepDone "Токен знайдено у Git Credential Manager"
+            Write-StepDone "Token found in Windows Credential Manager"
         }
     } catch {}
 }
 
 if (-not $Token) {
-    Write-StepWarn "Токен не знайдено автоматично. Введіть токен вручну:"
+    Write-StepWarn "No token found automatically. Enter the token manually:"
     $secureToken = Read-Host -Prompt "GitHub Personal Access Token (repo scope)" -AsSecureString
     $bstr  = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureToken)
     $Token = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
@@ -132,7 +132,7 @@ if (-not $Token) {
 }
 
 if (-not $Token) {
-    Write-StepError "Токен GitHub обов'язковий для виконання операції."
+    Write-StepError "A GitHub token is mandatory for this operation."
     throw "GitHub Token is required to upload release assets."
 }
 
@@ -142,14 +142,14 @@ $headers = @{
     "X-GitHub-Api-Version" = "2022-11-28"
 }
 
-Write-StepLog "Перевіряємо існування релізу $TAG на GitHub..."
+Write-StepLog "Checking whether release $TAG exists on GitHub..."
 $release = $null
 try {
     $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$OWNER/$REPO/releases/tags/$TAG" `
                -Headers $headers -Method Get
-    Write-StepDone "Знайдено існуючий реліз" "ID: $($release.id), Назва: '$($release.name)'"
+    Write-StepDone "Found the existing release" "ID: $($release.id), Name: '$($release.name)'"
 } catch {
-    Write-StepWarn "Реліз $TAG ще не існує. Створюємо новий реліз на GitHub..."
+    Write-StepWarn "Release $TAG does not exist yet. Creating a new release on GitHub..."
     $createBody = @{
         tag_name   = $TAG
         name       = "NanoClick $TAG"
@@ -160,9 +160,9 @@ try {
     try {
         $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$OWNER/$REPO/releases" `
                    -Headers $headers -Method Post -Body $createBody
-        Write-StepDone "Створено новий публічний реліз" "ID: $($release.id)"
+        Write-StepDone "Created a new public release" "ID: $($release.id)"
     } catch {
-        Write-StepError "Помилка при створенні релізу: $($_.Exception.Message)"
+        Write-StepError "Failed to create the release: $($_.Exception.Message)"
         throw $_
     }
 }
@@ -170,32 +170,32 @@ try {
 $releaseId = $release.id
 $uploadBase = "https://uploads.github.com/repos/$OWNER/$REPO/releases/$releaseId/assets"
 
-# ── 2. Очищення старих ассетів (запобігання колізії 422 Unprocessable) ────────
-Write-StageHeader "2" "4" "CLEANUP - Перевірка та видалення дублікатів ассетів"
+# ── 2. Cleaning up old assets (preventing 422 Unprocessable collisions) ────────
+Write-StageHeader "2" "4" "CLEANUP - Check and delete duplicate assets"
 
-Write-StepLog "Отримуємо список уже завантажених ассетів для release_id=$releaseId..."
+Write-StepLog "Fetching the already uploaded assets for release_id=$releaseId..."
 $existingAssets = Invoke-RestMethod -Uri "https://api.github.com/repos/$OWNER/$REPO/releases/$releaseId/assets" `
                  -Headers $headers -Method Get
-Write-StepInfo "Знайдено існуючих ассетів" "$($existingAssets.Count) шт."
+Write-StepInfo "Existing assets found" "$($existingAssets.Count) items."
 
 $targetNames = ($FILES | ForEach-Object { $_.Name })
 $cleanedCount = 0
 
 foreach ($asset in $existingAssets) {
     if ($asset.name -in $targetNames) {
-        Write-StepLog "Видалення застарілого файлу з GitHub" "$($asset.name) (Asset ID: $($asset.id))"
+        Write-StepLog "Deleting the stale file from GitHub" "$($asset.name) (Asset ID: $($asset.id))"
         Invoke-RestMethod -Uri "https://api.github.com/repos/$OWNER/$REPO/releases/assets/$($asset.id)" `
                           -Headers $headers -Method Delete | Out-Null
-        Write-StepDone "Видалено" "$($asset.name)"
+        Write-StepDone "Deleted" "$($asset.name)"
         $cleanedCount++
     }
 }
 if ($cleanedCount -eq 0) {
-    Write-StepInfo "Очищення" "Дублікатів не виявлено. Усі слоти готові до чистого завантаження."
+    Write-StepInfo "Cleanup" "No duplicates detected. All slots are ready for a clean upload."
 }
 
-# ── 3. Завантаження нових файлів ─────────────────────────────────────────────
-Write-StageHeader "3" "4" "UPLOAD - Потокове завантаження артефактів"
+# ── 3. Uploading the new files ─────────────────────────────────────────────
+Write-StageHeader "3" "4" "UPLOAD - Streaming artifact upload"
 
 $uploadIndex = 0
 $totalUploads = $FILES.Count
@@ -206,7 +206,7 @@ foreach ($item in $FILES) {
     $fileName = $item.Name
 
     if (-not (Test-Path -LiteralPath $filePath)) {
-        Write-StepWarn "[$uploadIndex/$totalUploads] Файл не знайдено локально: $filePath (ПРОПУСК)"
+        Write-StepWarn "[$uploadIndex/$totalUploads] File not found locally: $filePath (SKIP)"
         continue
     }
 
@@ -217,7 +217,7 @@ foreach ($item in $FILES) {
         "$([math]::Round($fileSize / 1KB, 1)) KB"
     }
 
-    Write-StepLog "[$uploadIndex/$totalUploads] Завантажуємо $fileName ($sizeFormatted)..." "Передача даних на GitHub"
+    Write-StepLog "[$uploadIndex/$totalUploads] Uploading $fileName ($sizeFormatted)..." "Streaming to GitHub"
     $fileTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
     $fileBytes = [System.IO.File]::ReadAllBytes($filePath)
@@ -233,25 +233,25 @@ foreach ($item in $FILES) {
                                   -Method Post -Body $fileBytes
         $fileTimer.Stop()
         $fileElapsed = [math]::Round($fileTimer.Elapsed.TotalSeconds, 1)
-        Write-StepDone "[$uploadIndex/$totalUploads] Завантажено $fileName ($sizeFormatted)" "Час: ${fileElapsed}с"
+        Write-StepDone "[$uploadIndex/$totalUploads] Uploaded $fileName ($sizeFormatted)" "Time: ${fileElapsed}s"
     } catch {
         $fileTimer.Stop()
-        Write-StepError "[$uploadIndex/$totalUploads] Помилка завантаження $fileName : $($_.Exception.Message)"
+        Write-StepError "[$uploadIndex/$totalUploads] Upload failed $fileName : $($_.Exception.Message)"
         throw $_
     }
 }
 
-# ── 4. Підсумок релізу ──────────────────────────────────────────────────────
+# ── 4. Release summary ──────────────────────────────────────────────────────
 $Stopwatch.Stop()
 $totalElapsed = [math]::Round($Stopwatch.Elapsed.TotalSeconds, 1)
 
-Write-StageHeader "4" "4" "COMPLETE - Реліз успішно опубліковано!"
+Write-StageHeader "4" "4" "COMPLETE - Release published successfully!"
 
 Write-Host ""
 Write-Host "╔════════════════════════════════════════════════════════════════╗" -ForegroundColor Green
-Write-Host "║              РЕЗУЛЬТАТ ЗАВАНТАЖЕННЯ АРТЕФАКТІВ                 ║" -ForegroundColor Green
+Write-Host "║              ARTIFACT UPLOAD RESULT                 ║" -ForegroundColor Green
 Write-Host "╠════════════════════════════════════════════════════════════════╣" -ForegroundColor Green
-Write-Host "║  Тег версії  : $($TAG.PadRight(47)) ║" -ForegroundColor White
-Write-Host "║  Загальний час: $(("${totalElapsed} с").PadRight(46)) ║" -ForegroundColor White
-Write-Host "║  Посилання   : $($release.html_url.PadRight(47)) ║" -ForegroundColor Cyan
+Write-Host "║  Version tag  : $($TAG.PadRight(47)) ║" -ForegroundColor White
+Write-Host "║  Total time: $(("${totalElapsed} s").PadRight(46)) ║" -ForegroundColor White
+Write-Host "║  URL   : $($release.html_url.PadRight(47)) ║" -ForegroundColor Cyan
 Write-Host "╚════════════════════════════════════════════════════════════════╝" -ForegroundColor Green
