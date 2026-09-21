@@ -71,7 +71,12 @@ Invoke-Step "build" {
         # Passwordless key: explicitly UNSET the password so the CLI never
         # waits on an interactive stdin prompt in automated shells.
         Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY_PASSWORD -ErrorAction SilentlyContinue
-        $env:CARGO_BUILD_JOBS = "2"
+        # Same memory rule as release.ps1 Stage 0: the release profile is LTO +
+        # codegen-units=1, and a 2-job build has already died with
+        # "rustc-LLVM ERROR: out of memory" on a 16 GB host.
+        $buildJobs = if ($env:CARGO_BUILD_JOBS -and $env:CARGO_BUILD_JOBS -match '^\d+$') { $env:CARGO_BUILD_JOBS } else { "1" }
+        $env:CARGO_BUILD_JOBS = $buildJobs
+        Write-Host "Building with CARGO_BUILD_JOBS=$buildJobs" -ForegroundColor DarkGray
         cargo tauri build --bundles nsis
         if ($LASTEXITCODE -ne 0) { throw "tauri build failed (exit $LASTEXITCODE)" }
     } finally { Pop-Location }

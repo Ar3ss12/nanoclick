@@ -99,8 +99,3 @@ if (Test-Path -LiteralPath $sig) {
 } else {
     throw "Signing reported success but $sig was not created"
 }
-#
-# Typical full run (fresh key, no password on it):
-#   powershell -ExecutionPolicy Bypass -File scripts\make_release.ps1
-#
-# Step-by-step (resume at any point):

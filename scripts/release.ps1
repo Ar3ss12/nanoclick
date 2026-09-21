@@ -94,8 +94,27 @@ if (-not $Title) {
 }
 
 # Default release notes template (clean, simple, professional)
+# Read notes as UTF-8 explicitly: Windows PowerShell 5.1 defaults to the ANSI
+# codepage when a file has no BOM, which turns every emoji / em dash in the
+# release notes into mojibake on GitHub. See AGENTS.md.
 if (-not $Notes -and $NotesFile -and (Test-Path -LiteralPath $NotesFile)) {
-    $Notes = Get-Content -LiteralPath $NotesFile -Raw
+    $Notes = [IO.File]::ReadAllText($NotesFile, [Text.UTF8Encoding]::new($false))
+}
+
+# GitHub's API decodes a request body as UTF-8. Passing a .NET string as -Body
+# makes Windows PowerShell 5.1 encode it as Latin-1 and every non-ASCII character
+# arrives as '?'. Always send explicitly UTF-8-encoded JSON bytes with a charset.
+function Send-GitHubJson {
+    param(
+        [Parameter(Mandatory = $true)][string]$Uri,
+        [Parameter(Mandatory = $true)][hashtable]$Headers,
+        [Parameter(Mandatory = $true)][string]$Method,
+        [Parameter(Mandatory = $true)][hashtable]$Payload
+    )
+    $json = $Payload | ConvertTo-Json -Depth 8
+    $bytes = [Text.Encoding]::UTF8.GetBytes($json)
+    return Invoke-RestMethod -Uri $Uri -Headers $Headers -Method $Method `
+        -Body $bytes -ContentType 'application/json; charset=utf-8'
 }
 
 if (-not $Notes) {
@@ -505,30 +524,28 @@ if ($Action -in @("all", "upload")) {
 
         # Update title/notes if requested
         Write-StepLog "Updating release metadata on GitHub..."
-        $updateBody = @{
-            name        = $Title
-            body        = $Notes
-            draft       = $isDraft
-            prerelease  = [bool]$Prerelease.IsPresent
-            make_latest = if ($Prerelease.IsPresent) { "false" } else { "true" }
-        } | ConvertTo-Json
-
-        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Owner/$Repo/releases/$($release.id)" `
-                   -Headers $headers -Method Patch -Body $updateBody
+        $release = Send-GitHubJson `
+            -Uri "https://api.github.com/repos/$Owner/$Repo/releases/$($release.id)" `
+            -Headers $headers -Method Patch -Payload @{
+                name        = $Title
+                body        = $Notes
+                draft       = $isDraft
+                prerelease  = [bool]$Prerelease.IsPresent
+                make_latest = if ($Prerelease.IsPresent) { "false" } else { "true" }
+            }
         Write-StepDone "Release metadata updated successfully"
     } catch {
         Write-StepWarn "Release $Tag not found. Creating new release..."
-        $body = @{
-            tag_name    = $Tag
-            name        = $Title
-            body        = $Notes
-            draft       = $isDraft
-            prerelease  = [bool]$Prerelease.IsPresent
-            make_latest = if ($Prerelease.IsPresent) { "false" } else { "true" }
-        } | ConvertTo-Json
-
-        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Owner/$Repo/releases" `
-                   -Headers $headers -Method Post -Body $body
+        $release = Send-GitHubJson `
+            -Uri "https://api.github.com/repos/$Owner/$Repo/releases" `
+            -Headers $headers -Method Post -Payload @{
+                tag_name    = $Tag
+                name        = $Title
+                body        = $Notes
+                draft       = $isDraft
+                prerelease  = [bool]$Prerelease.IsPresent
+                make_latest = if ($Prerelease.IsPresent) { "false" } else { "true" }
+            }
         Write-StepDone "New release created on GitHub" "ID: $($release.id)"
     }
 
