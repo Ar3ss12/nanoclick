@@ -21,10 +21,22 @@
 #>
 [CmdletBinding()]
 param(
-  [string]$SrcDir = (Join-Path $PSScriptRoot '..\src')
+  [string]$SrcDir
 )
 
 $ErrorActionPreference = 'Stop'
+
+# `$PSScriptRoot` is NOT reliably populated inside a `param()` default on
+# Windows PowerShell 5.1 — resolve it in the body instead.
+if ([string]::IsNullOrWhiteSpace($SrcDir)) {
+  $scriptRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+  $SrcDir = Join-Path $scriptRoot '..\src'
+}
+
+if (-not (Test-Path $SrcDir)) {
+  Write-Host "Source directory not found: $SrcDir" -ForegroundColor Red
+  exit 2
+}
 
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
   Write-Host 'Node.js is required for this check (install Node.js, or rely on the Rust test).' -ForegroundColor Yellow
