@@ -6,6 +6,10 @@
   <title>NanoClick</title>
   <link rel="stylesheet" href="style.css">
   <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;600&family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <!-- Boot guard: classic script, MUST stay before main.js. A module-level
+       SyntaxError kills main.js entirely, so a trap written inside main.js could
+       never fire for that class. See src/boot_guard.js for the full rationale. -->
+  <script src="boot_guard.js" data-boot-flag="__nanoclick_boot_ok__" data-boot-label="main"></script>
 </head>
 <body>
   <div class="app-shell">

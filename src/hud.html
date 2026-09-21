@@ -33,6 +33,9 @@
     opacity: 1;
   }
 </style>
+<!-- Boot guard (classic script, see src/boot_guard.js) — reports crashes and a
+     dead script to %TEMP%\nanoclick_web.log instead of dying silently. -->
+<script src="boot_guard.js" data-boot-flag="__nanoclick_hud_boot_ok__" data-boot-label="hud"></script>
 </head>
 <body>
   <div id="hud">0</div>

@@ -118,3 +118,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }
 });
+// Boot guard handshake (see boot_guard.js) — overlay window.
+window.__nanoclick_overlay_boot_ok__ = true;
+

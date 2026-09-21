@@ -23,6 +23,24 @@ function bootCanary(stage) {
 }
 bootCanary("main.js evaluated");
 
+// Forward a client-side crash to the Rust log (%TEMP%\nanoclick_web.log).
+// Level "error" (and "warn") is written even in release builds — the backend
+// filters only "info" when debug mode is off (see `debug_log_internal` in
+// src-tauri/src/lib.rs). Without this, an uncaught error in release builds was
+// visible ONLY in DevTools, and release builds deliberately keep DevTools off.
+function sendClientError(level, message) {
+  try {
+    const inv = getRawInvoke();
+    if (!inv) return;
+    inv("debug_log", {
+      level: level === "warn" ? "warn" : "error",
+      message: String(message).slice(0, 1500),
+    }).catch(() => {});
+  } catch (_) {
+    /* a logger must never throw */
+  }
+}
+
 // ── DEBUG MODE INFRASTRUCTURE ────────────────────────────────────
 // Verbose UI & IPC logs are generated ONLY when DEBUG_UI is true.
 // Toggled via config or setDebugMode().
@@ -140,16 +158,26 @@ console.log = (...args) => { origLog.apply(console, args); if (DEBUG_UI) enqueue
 console.error = (...args) => { origError.apply(console, args); if (DEBUG_UI) enqueueLog("error", args); };
 console.warn = (...args) => { origWarn.apply(console, args); if (DEBUG_UI) enqueueLog("warn", args); };
 
-window.addEventListener("error", (e) => {
-  const msg = `[uncaught-error] ${e.message || "Unknown error"} at ${(e.filename || "main.js")}:${(e.lineno || 0)}:${(e.colno || 0)}`;
-  origError.call(console, msg, e.error?.stack || "");
-  dbg("FATAL EXCEPTION DETECTED:", msg);
-});
-window.addEventListener("unhandledrejection", (e) => {
-  const reasonStr = e.reason instanceof Error ? (e.reason.stack || e.reason.message) : String(e.reason);
-  origError.call(console, "[unhandled-rejection]", reasonStr);
-  dbg("FATAL UNHANDLED PROMISE REJECTION:", reasonStr);
-});
+// ── GLOBAL ERROR TRAPS (fallback only — boot_guard.js owns the real ones) ──
+// `boot_guard.js` is a CLASSIC script loaded before this module, so it is the
+// only trap that can fire for a module-level SyntaxError (when the module dies,
+// nothing in this file ever runs). These listeners stay as a fallback for the
+// case where the guard is missing from the HTML, and they stand down while it
+// is installed so that a single crash is never reported twice.
+if (typeof window !== "undefined" && !window.__nanoclick_boot_guard_installed__) {
+  window.addEventListener("error", (e) => {
+    const msg = `[uncaught-error] ${e.message || "Unknown error"} at ${(e.filename || "main.js")}:${(e.lineno || 0)}:${(e.colno || 0)}`;
+    origError.call(console, msg, e.error?.stack || "");
+    dbg("FATAL EXCEPTION DETECTED:", msg);
+    sendClientError("error", `${msg}${e.error?.stack ? "\n" + e.error.stack : ""}`);
+  });
+  window.addEventListener("unhandledrejection", (e) => {
+    const reasonStr = e.reason instanceof Error ? (e.reason.stack || e.reason.message) : String(e.reason);
+    origError.call(console, "[unhandled-rejection]", reasonStr);
+    dbg("FATAL UNHANDLED PROMISE REJECTION:", reasonStr);
+    sendClientError("error", `[unhandled-rejection] ${reasonStr}`);
+  });
+}
 
 const invoke = async function(cmd, args) {
   if (cmd === "debug_log") {
@@ -248,21 +276,11 @@ const listenSilent = async function(eventName, handler) {
   }
 };
 
-// ── GLOBAL ERROR TRAPS ──────────────────────────────────────
-// Capture synchronous throws (window.onerror) and async promise rejections
-// (window.onunhandledrejection) so they land in the dev log instead of
-// disappearing into the WebView console. Both are no-ops if already installed.
-if (typeof window !== "undefined" && !window.__nanoclick_log_installed__) {
-  window.__nanoclick_log_installed__ = true;
-  window.addEventListener("error", (e) => {
-    logCall("✗ERR", `${e.filename}:${e.lineno}:${e.colno}`, e.message);
-    // Don't preventDefault — let Tauri/devtools see it too.
-  });
-  window.addEventListener("unhandledrejection", (e) => {
-    const reason = e.reason?.message ?? e.reason;
-    logCall("✗REJ", `unhandled promise rejection`, reason);
-  });
-}
+// ── GLOBAL ERROR TRAPS (see the guarded fallback above) ──────────────────
+// The second pair of listeners that used to live here was removed in v1.1.0:
+// it reported through the DEBUG_UI-gated logger, so in release builds an
+// uncaught error never reached the Rust log at all, and it double-subscribed
+// next to the pair above. The authoritative traps now live in boot_guard.js.
 
 // ── STAGE-BASED DIAGNOSTIC LOGGER ──────────────────────────────
 // Compact multi-step logger. Each run() records one stage line; pass=true
@@ -1364,6 +1382,43 @@ function showFileToast(notice) {
     "font-size:13px;line-height:1.4;max-width:340px;box-shadow:0 8px 24px rgba(0,0,0,.45)";
   host.appendChild(el);
   setTimeout(() => { if (el.parentNode) el.parentNode.removeChild(el); }, 6000);
+}
+
+// ── Generic UI toasts (message, level) ─────────────────────────────
+// Found by oxlint `no-undef` (2026-09-21): 13 call sites across the UI called
+// `showToast(message, level)` while the function did not exist anywhere in the
+// frontend. 10 of them were guarded with `typeof showToast === "function"`
+// (i.e. silent no-ops — a knowingly tolerated gap), and 3 called it directly,
+// throwing `ReferenceError` inside the flow (focus-loss pause notice, "template
+// added", macro-list refresh). `showFileToast` above is the watcher-flavoured
+// counterpart; this restores the local notifications with the same look.
+function ensureToastHost() {
+  let host = document.getElementById("toastHost");
+  if (host) return host;
+  host = document.createElement("div");
+  host.id = "toastHost";
+  // Fixed overlay so toasts never shift the layout; clicks pass through.
+  host.style.cssText = "position:fixed;right:16px;bottom:16px;z-index:9999;" +
+    "display:flex;flex-direction:column;align-items:flex-end;pointer-events:none;";
+  (document.body || document.documentElement).appendChild(host);
+  return host;
+}
+
+function showToast(message, level) {
+  try {
+    const host = ensureToastHost();
+    if (!host) return;
+    const el = document.createElement("div");
+    el.className = "toast toast-" + String(level || "info").toLowerCase();
+    el.textContent = String(message == null ? "" : message);
+    el.style.cssText = "pointer-events:auto;margin-top:8px;padding:10px 14px;border-radius:8px;" +
+      "background:rgba(20,24,32,.95);border:1px solid rgba(255,255,255,.12);" +
+      "font-size:13px;line-height:1.4;max-width:340px;box-shadow:0 8px 24px rgba(0,0,0,.45)";
+    host.appendChild(el);
+    setTimeout(() => { if (el.parentNode) el.parentNode.removeChild(el); }, 6000);
+  } catch (_) {
+    /* toasts are best-effort — never break the calling flow */
+  }
 }
 
 function startFileToastPolling() {
@@ -4675,6 +4730,14 @@ onDomReady(() => {
   // Phase 1 (Immediate): Core UI & app config loading
   safeStep("loadConfig", () => loadConfig());
   safeStep("initAutomationTab", () => { void initAutomationTab(); });
+
+  // === BOOT HANDSHAKE (v1.1.0) ===
+  // boot_guard.js (classic script, loaded before this module) starts a ~3 s
+  // watchdog: if this flag is still unset it writes "MODULE DID NOT EXECUTE
+  // (SyntaxError class)" into %TEMP%\nanoclick_web.log and shows a visible
+  // banner. It is the only detection that survives a module-level SyntaxError,
+  // because in that case nothing inside this file — including this line — runs.
+  window.__nanoclick_boot_ok__ = true;
 
   // Phase 2 (Deferred 150ms): Non-critical diagnostic & version checks
   setTimeout(() => {

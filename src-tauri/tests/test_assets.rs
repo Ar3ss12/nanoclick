@@ -575,9 +575,12 @@ fn test_main_js_has_no_duplicate_top_level_declarations() {
 /// V8's own parser, so it catches everything the renderer would reject:
 /// duplicate declarations, reserved words, bad regex, unbalanced braces.
 ///
-/// Node is mandatory (it is what the product already ships a web UI for, and
-/// CI has it via the Tauri action). For a machine without Node, set
-/// `NANOCLICK_JS_SYNTAX_STRICT=0` to downgrade to a warning.
+/// Node is mandatory. There is no GitHub Actions workflow in this repository
+/// (`.github/` holds only images), so the enforcement points are: this test,
+/// `scripts/check-js-syntax.ps1` for a manual run, and Stage 0 (PREFLIGHT) of
+/// `scripts/release.ps1`, which runs both before `cargo tauri build` — because
+/// `cargo tauri build` itself never runs tests. For a machine without Node, set
+/// `NANOCLICK_JS_SYNTAX_STRICT=0` to downgrade to a warning (never for a release).
 #[test]
 fn test_frontend_js_syntax_is_valid() {
     let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
@@ -672,6 +675,239 @@ fn test_frontend_js_syntax_is_valid() {
         "JavaScript grammar check failed — the browser would refuse to run these files:\n\n{}",
         failures.join("\n\n")
     );
+}
+
+/// Boot-integrity wiring (v1.1.0, Stage 0): the runtime crash trap must live in
+/// a CLASSIC script that is loaded BEFORE the module, and the boot watchdog must
+/// have a matching handshake flag in the page script.
+///
+/// Why it matters here: `main.js` is `<script type="module">`, and a module-level
+/// SyntaxError means the module body never executes — so a trap written at the top
+/// of `main.js` can never fire for that class, leaving a rendered-but-dead UI with
+/// zero diagnostics (`tech.md` §Lessons Learned #1, `.notes/ROOT-CAUSE-ANALYSIS.md`).
+#[test]
+fn test_frontend_pages_load_boot_guard_before_modules() {
+    let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
+    let read_asset = |name: &str| -> Option<String> {
+        let key = tauri::utils::assets::AssetKey::from(name);
+        ctx.assets()
+            .get(&key)
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+    };
+
+    // ── 1. The guard is embedded and reports through the Rust log ──────────
+    let guard = read_asset("boot_guard.js").expect("boot_guard.js must be embedded in the frontend");
+    for needle in [
+        "__nanoclick_boot_guard_installed__",
+        "__TAURI_INTERNALS__",
+        "unhandledrejection",
+        "debug_log",
+        "nanoclick-boot-failure",
+    ] {
+        assert!(guard.contains(needle), "boot_guard.js must contain `{needle}`");
+    }
+
+    // ── 2. Every page: classic guard tag, loaded before the first module ────
+    let pages = [
+        ("index.html", "__nanoclick_boot_ok__", "main.js"),
+        ("hud.html", "__nanoclick_hud_boot_ok__", "hud.js"),
+        ("overlay.html", "__nanoclick_overlay_boot_ok__", "overlay.js"),
+    ];
+    for (page, flag, page_script) in pages {
+        let html = read_asset(page).unwrap_or_else(|| panic!("{page} must be embedded"));
+        // NB: search for the TAG attribute, not the bare file name — the HTML
+        // comments above the tag also mention `src/boot_guard.js` (whoever
+        // greps for the file name finds a comment first, and that already broke
+        // this test once).
+        let guard_at = html
+            .find("src=\"boot_guard.js\"")
+            .unwrap_or_else(|| panic!("{page} must load boot_guard.js"));
+        let tag_at = html[..guard_at]
+            .rfind("<script")
+            .unwrap_or_else(|| panic!("{page}: boot_guard.js must sit inside a <script> tag"));
+        assert!(
+            !html[tag_at..guard_at].contains("module"),
+            "{page}: boot_guard.js must be a CLASSIC script — a module cannot trap its own parse failure"
+        );
+        assert!(
+            html.contains(&format!("data-boot-flag=\"{flag}\"")),
+            "{page} must point the guard at its own boot flag `{flag}`"
+        );
+        if let Some(module_at) = html.find("type=\"module\"") {
+            assert!(
+                guard_at < module_at,
+                "{page}: boot_guard.js must be loaded BEFORE the first module script"
+            );
+        }
+        let page_src = read_asset(page_script).unwrap_or_else(|| panic!("{page_script} must be embedded"));
+        assert!(
+            page_src.contains(flag),
+            "{page_script} must raise the boot flag `{flag}` — otherwise the watchdog fires on a healthy boot"
+        );
+    }
+}
+
+/// Harness for `test_boot_guard_behaviour_on_node`: runs the real `boot_guard.js`
+/// inside a minimal DOM/IPC stub on Node (V8) and prints one JSON verdict line.
+/// `process.argv[2]` = "dead" (no handshake flag → watchdog must fire) or
+/// "healthy" (flag raised → watchdog must stay silent).
+const BOOT_GUARD_HARNESS: &str = r#"
+const fs = require("fs");
+const vm = require("vm");
+const path = require("path");
+
+const mode = process.argv[2] || "dead";
+const calls = [];
+const created = [];
+const listeners = {};
+
+const windowStub = {
+  addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
+  console: console,
+  __TAURI_INTERNALS__: {
+    invoke(cmd, args) { calls.push({ cmd: cmd, args: args }); return Promise.resolve(); }
+  }
+};
+
+const documentStub = {
+  currentScript: {
+    getAttribute(name) {
+      if (name === "data-boot-flag") return "__test_boot_ok__";
+      if (name === "data-boot-label") return "test";
+      if (name === "data-boot-timeout-ms") return "60";
+      return null;
+    }
+  },
+  readyState: "complete",
+  getElementById() { return null; },
+  createElement(tag) {
+    const el = { tag: tag, attrs: {}, textContent: "" };
+    el.setAttribute = function (k, v) { el.attrs[k] = v; };
+    created.push(el);
+    return el;
+  },
+  addEventListener() {},
+  body: { appendChild() {} },
+  documentElement: { appendChild() {} }
+};
+
+const sandbox = {
+  window: windowStub,
+  document: documentStub,
+  setTimeout: setTimeout,
+  console: console,
+  Object: Object,
+  String: String,
+  Number: Number,
+  parseInt: parseInt,
+  Promise: Promise,
+  Error: Error
+};
+sandbox.globalThis = sandbox;
+vm.createContext(sandbox);
+vm.runInContext(
+  fs.readFileSync(path.join(__dirname, "boot_guard.js"), "utf8"),
+  sandbox,
+  { filename: "boot_guard.js" }
+);
+
+if (mode === "healthy") { windowStub.__test_boot_ok__ = true; }
+
+// one synchronous crash (sent twice on purpose), one resource 404, one rejection
+const crash = { message: "boom", filename: "main.js", lineno: 42, colno: 7, error: { stack: "at boom" } };
+listeners["error"][0](crash);
+listeners["error"][0](crash);
+listeners["error"][0]({ target: { tagName: "SCRIPT", src: "http://x/missing.js" } });
+listeners["unhandledrejection"][0]({ reason: new Error("nope") });
+
+setTimeout(function () {
+  const lines = calls.map(function (c) { return c.args && c.args.message ? String(c.args.message) : ""; });
+  const levels = {};
+  calls.forEach(function (c) { if (c.args && c.args.level) levels[c.args.level] = true; });
+  console.log(JSON.stringify({
+    crashReports: lines.filter(function (m) { return m.indexOf("[JS CRASH] boom") >= 0; }).length,
+    resourceReports: lines.filter(function (m) { return m.indexOf("[JS RESOURCE FAIL]") >= 0; }).length,
+    rejectReports: lines.filter(function (m) { return m.indexOf("[JS PROMISE REJECT]") >= 0; }).length,
+    bootReports: lines.filter(function (m) { return m.indexOf("[BOOT] MODULE DID NOT EXECUTE") >= 0; }).length,
+    levels: Object.keys(levels).sort(),
+    banner: created.some(function (el) { return el.id === "nanoclick-boot-failure" || el.attrs.id === "nanoclick-boot-failure"; }),
+    guardInstalled: windowStub.__nanoclick_boot_guard_installed__ === true
+  }));
+}, 260);
+"#;
+
+/// Behavioural verification of `boot_guard.js` on a real V8 (Node + the minimal
+/// DOM/IPC stub from BOOT_GUARD_HARNESS above):
+///   * "dead"    — the handshake flag is never raised: the guard must report
+///                 `[BOOT] MODULE DID NOT EXECUTE (SyntaxError class)` exactly
+///                 once AND render the banner. This is the only detection that
+///                 survives a module-level SyntaxError.
+///   * "healthy" — the flag is raised: the watchdog must stay silent (no false
+///                 alarms on a normal boot).
+/// Dedupe is asserted as well: one crash fired twice must produce one report.
+#[test]
+fn test_boot_guard_behaviour_on_node() {
+    let strict = std::env::var("NANOCLICK_JS_SYNTAX_STRICT")
+        .map(|v| v != "0")
+        .unwrap_or(true);
+    let node_works = std::process::Command::new("node")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !node_works {
+        assert!(
+            !strict,
+            "Node.js is required for the boot-guard behavioural check. \
+             Install Node.js, or set NANOCLICK_JS_SYNTAX_STRICT=0 to skip it."
+        );
+        eprintln!("[boot-guard] Node.js not found — check skipped (strict mode off)");
+        return;
+    }
+
+    let guard = {
+        let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
+        let key = tauri::utils::assets::AssetKey::from("boot_guard.js");
+        let bytes = ctx.assets().get(&key).expect("boot_guard.js must be embedded");
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+
+    let tmp_dir = std::env::temp_dir().join(format!("nanoclick_boot_guard_{}", std::process::id()));
+    std::fs::create_dir_all(&tmp_dir).expect("temp dir for the boot-guard harness");
+    std::fs::write(tmp_dir.join("boot_guard.js"), &guard).expect("write boot_guard.js copy");
+    std::fs::write(tmp_dir.join("harness.js"), BOOT_GUARD_HARNESS).expect("write the harness");
+
+    let run = |mode: &str| -> serde_json::Value {
+        let out = std::process::Command::new("node")
+            .arg(tmp_dir.join("harness.js"))
+            .arg(mode)
+            .output()
+            .expect("run the boot-guard harness");
+        assert!(
+            out.status.success(),
+            "boot-guard harness failed ({mode}):\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim())
+            .unwrap_or_else(|e| panic!("harness must print one JSON line ({mode}): {e}"))
+    };
+
+    // ── dead module: the watchdog must fire ───────────────────────────────
+    let dead = run("dead");
+    assert_eq!(dead["guardInstalled"], serde_json::Value::Bool(true), "guard must install itself: {dead}");
+    assert_eq!(dead["bootReports"], 1, "a missing handshake must be reported exactly once: {dead}");
+    assert_eq!(dead["banner"], serde_json::Value::Bool(true), "a dead module must show the banner: {dead}");
+    assert_eq!(dead["crashReports"], 1, "the same crash fired twice must be deduped: {dead}");
+    assert_eq!(dead["resourceReports"], 1, "a 404 script must be reported: {dead}");
+    assert_eq!(dead["rejectReports"], 1, "an unhandled rejection must be reported: {dead}");
+    assert_eq!(dead["levels"], serde_json::json!(["error"]), "every report must be level \"error\": {dead}");
+
+    // ── healthy boot: no false alarm ──────────────────────────────────────
+    let healthy = run("healthy");
+    assert_eq!(healthy["bootReports"], 0, "a healthy boot must not trip the watchdog: {healthy}");
+    assert_eq!(healthy["banner"], serde_json::Value::Bool(false), "no banner on a healthy boot: {healthy}");
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
 }
 
 /// i18n symmetry: every notice key used by Rust/JS must exist in all 3 locales.

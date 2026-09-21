@@ -44,3 +44,8 @@ if (document.readyState === "loading") {
 } else {
   initHud();
 }
+// Boot guard handshake (see boot_guard.js): raised only when this script was
+// parsed AND executed. A 404 or a SyntaxError leaves it unset, and the guard
+// then reports the dead script to %TEMP%\nanoclick_web.log + shows a banner.
+window.__nanoclick_hud_boot_ok__ = true;
+
