@@ -16,9 +16,11 @@
 //!   even a 150 CPS loop pays the 2 syscalls at most ~3 times/second.
 
 pub mod app_filter;
+pub mod focus_watch;
 pub mod typing;
 
 pub use app_filter::{AppFilter, ForegroundCache};
+pub use focus_watch::{spawn_focus_watcher, FocusWatchStop};
 pub use typing::{is_text_keypress_vk, is_typable_vk, TypingGuard, TYPING_FREEZE_MS};
 
 /// Smart Guard default freeze window for the UI checkbox (milliseconds).
@@ -52,6 +54,21 @@ pub(crate) fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Poll interval the click loop sleeps for while a guard is blocking.
-/// Small enough to resume instantly, large enough to stay off the CPU.
+/// Poll-while-blocked interval of the click loop (milliseconds).
+///
+/// Used ONLY when the app filter blocks: freeze the loop cheaply instead of
+/// hammering the foreground lookup. Small enough to resume instantly, large
+/// enough to stay off the CPU. (Focus-loss reaction time is owned by the
+/// watcher thread — [`FOCUS_WATCH_MS`] — not by this constant.)
 pub const GUARD_POLL_MS: u64 = 50;
+
+/// Poll interval of the FocusGuard watcher thread (milliseconds).
+///
+/// The click loop sleeps most of its life inside `wait_until` (up to a full
+/// click interval, ~1000 ms at 1 CPS, plus hold/start-delay sleeps), so a
+/// check that lives only inside the loop reaches the user late. The watcher
+/// polls the foreground directly (no TTL cache) and wakes the sleeper via
+/// the shared stop event: worst-case reaction ≈ this value. 50 ms keeps the
+/// extra syscall rate at ~20/s while the guard is ON; the thread exists only
+/// for the duration of a guarded run.
+pub const FOCUS_WATCH_MS: u64 = 50;

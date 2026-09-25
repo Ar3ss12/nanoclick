@@ -103,8 +103,10 @@ fn is_ignored_key_vk(vk: u16) -> bool {
     }
     matches!(
         vk,
+        // Mouse buttons (never text typing keys).
+        0x01..=0x06
         // Modifiers: generic and left/right variants.
-        0x10 | 0x11 | 0x12 | 0x5B | 0x5C | 0xA0..=0xA5
+        | 0x10 | 0x11 | 0x12 | 0x5B | 0x5C | 0xA0..=0xA5
         // Navigation, locks and system keys.
         | 0x09  // Tab (scoreboard)
         | 0x13  // Pause

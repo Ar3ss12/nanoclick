@@ -214,6 +214,32 @@ pub fn exe_from_display_icon(value: &str) -> Option<String> {
     exe_name_from_path(without_index)
 }
 
+/// Lowercase image name of THIS process (`NanoClick.exe` → `nanoclick.exe`).
+///
+/// Used by the Focus Guard to recognise our own window: returning to
+/// NanoClick mid-run must never pause, while leaving it (even via Alt+Tab
+/// from our own window) must stop. Resolved from `std::env::current_exe()`,
+/// so dev (`nanoclick.exe`) and release (`NanoClick.exe`) builds agree.
+pub fn own_exe_name() -> Option<String> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string())
+        })
+        .as_deref()
+        .and_then(exe_name_from_path)
+}
+
+/// `true` when `name` is our own process image (case-insensitive).
+pub fn is_own_exe(name: &str) -> bool {
+    match own_exe_name() {
+        Some(own) => name.eq_ignore_ascii_case(&own),
+        None => false,
+    }
+}
+
 #[cfg(not(target_os = "windows"))]
 pub fn list_running_apps() -> Vec<AppEntry> { Vec::new() }
 #[cfg(not(target_os = "windows"))]
@@ -271,6 +297,22 @@ mod app_catalog_tests {
             Some("app.exe")
         );
     }
+
+    #[test]
+    fn own_exe_name_resolves_and_matches_itself() {
+        // Must be a lowercase .exe derived from the running binary, and
+        // is_own_exe must accept it case-insensitively but nothing else.
+        let Some(own) = own_exe_name() else {
+            return; // non-UTF8 exe path edge: nothing to assert
+        };
+        assert!(own.ends_with(".exe"), "own exe must be an image name, got {own:?}");
+        assert_eq!(own, own.to_ascii_lowercase());
+        assert!(is_own_exe(&own));
+        assert!(is_own_exe(&own.to_ascii_uppercase()));
+        assert!(!is_own_exe("game.exe"));
+        assert!(!is_own_exe("explorer.exe"));
+        assert!(!is_own_exe(""));
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -291,3 +333,10 @@ pub fn is_always_run_as_admin() -> bool { false }
 pub fn play_warning_sound() {}
 #[cfg(not(target_os = "windows"))]
 pub fn init_dpi_awareness() {}
+/// No input layer to report on other platforms. Windows provides the real
+/// ring buffer (`windows::hotkey_diag_dump`), re-exported through
+/// `pub use windows::*` above; this stub keeps the caller platform-agnostic.
+#[cfg(not(target_os = "windows"))]
+pub fn hotkey_diag_dump() -> Vec<String> {
+    Vec::new()
+}

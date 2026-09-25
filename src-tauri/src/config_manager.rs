@@ -11,6 +11,14 @@ pub struct EngineSettings {
     pub jitter_percent: f64,
     pub click_limit: u32,
     pub jitter_radius_px: u32,
+    /// Rare biological hesitation: probability (0.0 = off, default 0.02)
+    /// that one interval stretches to 2-3x base. Stateless, Zero-Jitter safe.
+    #[serde(default = "default_outlier_prob")]
+    pub outlier_prob: f64,
+    /// Biometric technique hint: "auto" | "single" | "butterfly" | "drag".
+    /// Phase A: UI badge + persistence only, engine stays Single.
+    #[serde(default = "default_technique")]
+    pub technique: String,
     pub button: String,
     #[serde(default = "default_click_type")]
     pub click_type: String, // "single", "double", "hold"
@@ -31,10 +39,34 @@ pub struct EngineSettings {
     #[serde(default = "default_1000")]
     pub repeat_interval_ms: u64,
     pub start_delay_ms: u64,
+    /// Auto-stop after this many milliseconds of RUNNING (the scheduler
+    /// snapshots it at run start). Stored in ms so the unit picker in the UI
+    /// (ms / sec / min / hour) can offer fractional values without a lossy
+    /// round-trip through whole minutes. Hard ceiling:
+    /// `scheduler::MAX_STOP_DURATION_MS` (999 h).
+    #[serde(default)]
+    pub stop_duration_ms: u64,
+    /// The unit the UI used to display/enter `stop_duration_ms`:
+    /// "ms" | "sec" | "min" | "hour". Persisted so "1.5 sec" does not come back
+    /// as "1.5 min" after a restart. Display-only — the engine never reads it.
+    #[serde(default = "default_stop_duration_unit")]
+    pub stop_duration_unit: String,
+    /// LEGACY (pre-1.3): whole minutes, superseded by `stop_duration_ms`.
+    /// Kept ONLY as a migration input read by `Config::from` / the page, which
+    /// convert it to ms; the UI writes 0 here on every save. Removing the field
+    /// would make old configs fail deserialization instead of migrating.
     #[serde(default)]
     pub stop_duration_min: u32,
     #[serde(default)]
     pub stop_time_str: String,
+    /// WHICH auto-stop trigger is armed: "none" | "duration" | "wallclock".
+    ///
+    /// Both values stay in the config, so switching the active trigger restores
+    /// what the user typed in the other field. Without this discriminator the
+    /// backend cannot honour "only one runs at a time": two non-zero values are
+    /// ambiguous and the loop would act on whichever deadline came first.
+    #[serde(default = "default_stop_mode")]
+    pub stop_mode: String,
     pub gui_lock_ms: u64,
     #[serde(default = "default_hotkey_debounce_ms")]
     pub hotkey_debounce_ms: u32,
@@ -48,6 +80,18 @@ pub struct EngineSettings {
 
 fn default_click_type() -> String {
     "single".into()
+}
+fn default_stop_duration_unit() -> String {
+    "sec".into()
+}
+fn default_stop_mode() -> String {
+    "none".into()
+}
+fn default_outlier_prob() -> f64 {
+    0.02
+}
+fn default_technique() -> String {
+    "auto".into()
 }
 fn default_position_mode() -> String {
     "cursor".into()
@@ -72,6 +116,8 @@ impl Default for EngineSettings {
             jitter_percent: 5.0,
             click_limit: 0,
             jitter_radius_px: 0,
+            outlier_prob: default_outlier_prob(),
+            technique: default_technique(),
             button: "left".into(),
             click_type: "single".into(),
             position_mode: "cursor".into(),
@@ -83,8 +129,11 @@ impl Default for EngineSettings {
             hold_interval_ms: 1000,
             repeat_interval_ms: 1000,
             start_delay_ms: 0,
+            stop_duration_ms: 0,
+            stop_duration_unit: default_stop_duration_unit(),
             stop_duration_min: 0,
             stop_time_str: String::new(),
+            stop_mode: default_stop_mode(),
             gui_lock_ms: 1500,
             hotkey_debounce_ms: 80,
             sequence_points: Vec::new(),
@@ -176,8 +225,6 @@ impl Default for HotkeySettings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UiSettings {
     pub always_on_top: bool,
-    pub mode: String,
-    pub sound_feedback: bool,
     pub visual_ripple: bool,
     #[serde(default)]
     pub show_hud: bool,
@@ -187,6 +234,19 @@ pub struct UiSettings {
     pub autostart: bool,
     #[serde(default = "default_true")]
     pub minimize_to_tray: bool,
+    /// Deep sleep in the tray (opt-in, default OFF): instead of merely hiding the
+    /// window, DESTROY the main WebView while the app lives in the tray.
+    /// MEASURED with `scripts/measure-ram.ps1` (private working set = the Task
+    /// Manager metric, Windows 10): the tree with the interface alive weighs
+    /// ~117–123 MB (host `nanoclick.exe` ~5 MB + six `msedgewebview2.exe` helpers);
+    /// deep sleep leaves **4.98 MB** — the host alone, helpers 6 → 0 (−96 %).
+    /// Hiding the window alone changes nothing (122.8 MB, same processes). The window is
+    /// rebuilt on the next tray click and shown only after the fresh page reports
+    /// boot success (Zero-Flash). Unsaved macro-editor drafts live only in the
+    /// page, so they are lost; the backend silently falls back to plain hiding
+    /// while a run, a macro or a recording is in flight.
+    #[serde(default)]
+    pub deep_sleep_to_tray: bool,
     #[serde(default = "default_true")]
     pub show_notifications: bool,
     #[serde(default)]
@@ -202,6 +262,13 @@ pub struct UiSettings {
     pub window_x: Option<i32>,
     #[serde(default)]
     pub window_y: Option<i32>,
+    /// Last known main-window SIZE (physical px), same lifecycle as the position.
+    /// Without it a deep-sleep rebuild would snap back to the geometry from
+    /// `tauri.conf.json` and a resized window would lose its size.
+    #[serde(default)]
+    pub window_w: Option<i32>,
+    #[serde(default)]
+    pub window_h: Option<i32>,
     /// Typing Guard: while the user is typing, a toggle hotkey pressed within
     /// this window is ignored — a single-key hotkey sitting inside a word
     /// ("go rush B" → the `r`) must not switch the clicker on. Gameplay keys
@@ -245,18 +312,19 @@ impl Default for UiSettings {
     fn default() -> Self {
         UiSettings {
             always_on_top: false,
-            mode: "floating_hud".into(),
-            sound_feedback: false,
             visual_ripple: true,
             show_hud: false,
             start_minimized: false,
             autostart: false,
             minimize_to_tray: true,
+            deep_sleep_to_tray: false,
             show_notifications: true,
             pause_on_focus_loss: false,
             remember_window_position: true,
             window_x: None,
             window_y: None,
+            window_w: None,
+            window_h: None,
             typing_pause_ms: 600,
             app_filter_mode: default_app_filter_mode(),
             app_filter_list: Vec::new(),
@@ -341,6 +409,10 @@ pub struct PresetItem {
     pub hold_interval_ms: u64,
     #[serde(default = "default_3")]
     pub jitter_radius_px: u32,
+    #[serde(default = "default_outlier_prob")]
+    pub outlier_prob: f64,
+    #[serde(default = "default_technique")]
+    pub technique: String,
     #[serde(default = "default_repeat_mode")]
     pub repeat_mode: String,
     #[serde(default)]
@@ -349,10 +421,22 @@ pub struct PresetItem {
     pub repeat_interval_ms: u64,
     #[serde(default)]
     pub start_delay_ms: u64,
+    /// Auto-stop this preset after this many ms of running (see
+    /// `EngineSettings::stop_duration_ms`).
+    #[serde(default)]
+    pub stop_duration_ms: u64,
+    /// LEGACY (pre-1.3) whole minutes of `PresetItem::stop_duration_ms`; kept as
+    /// a migration input only.
     #[serde(default)]
     pub stop_duration_min: u32,
     #[serde(default)]
     pub stop_time_str: String,
+    /// WHICH auto-stop trigger this preset arms: "none" | "duration" |
+    /// "wallclock" (see `EngineSettings::stop_mode`). Both values are kept, so
+    /// applying a preset restores what the other field held; this field says
+    /// which of the two the preset actually arms.
+    #[serde(default = "default_stop_mode")]
+    pub stop_mode: String,
     #[serde(default)]
     pub is_default: bool,
     /// Optional multi-point sequence. When this is non-empty the
@@ -361,6 +445,44 @@ pub struct PresetItem {
     /// behaviour (fixed_x/fixed_y + jitter_radius).
     #[serde(default)]
     pub points: Vec<SequencePoint>,
+    /// Global hotkey bound directly to this preset (e.g. "Mouse4", "F7", "Ctrl+Mouse5").
+    #[serde(default)]
+    pub hotkey: String,
+}
+
+impl Default for PresetItem {
+    fn default() -> Self {
+        PresetItem {
+            id: String::new(),
+            name: "Default Preset".into(),
+            description: String::new(),
+            icon: "⚡".into(),
+            target_cps: 10.0,
+            jitter_percent: 5.0,
+            click_limit: 0,
+            button: default_button(),
+            click_type: default_click_type(),
+            position_mode: default_position_mode(),
+            fixed_x: default_100(),
+            fixed_y: default_100(),
+            hold_duration_ms: default_500(),
+            hold_interval_ms: default_1000(),
+            jitter_radius_px: default_3(),
+            outlier_prob: default_outlier_prob(),
+            technique: default_technique(),
+            repeat_mode: default_repeat_mode(),
+            repeat_count: 0,
+            repeat_interval_ms: default_1000(),
+            start_delay_ms: 0,
+            stop_duration_ms: 0,
+            stop_duration_min: 0,
+            stop_time_str: String::new(),
+            stop_mode: default_stop_mode(),
+            is_default: false,
+            points: Vec::new(),
+            hotkey: String::new(),
+        }
+    }
 }
 
 fn default_button() -> String {
@@ -389,14 +511,19 @@ fn default_presets() -> Vec<PresetItem> {
             hold_duration_ms: 500,
             hold_interval_ms: 1000,
             jitter_radius_px: 0,
+            outlier_prob: default_outlier_prob(),
+            technique: default_technique(),
             repeat_mode: "unlimited".into(),
             repeat_count: 0,
             repeat_interval_ms: 1000,
             start_delay_ms: 0,
+            stop_duration_ms: 0,
             stop_duration_min: 0,
             stop_time_str: String::new(),
+            stop_mode: default_stop_mode(),
             is_default: true,
             points: Vec::new(),
+            hotkey: String::new(),
         },
         PresetItem {
             id: "gaming_boost".into(),
@@ -414,14 +541,19 @@ fn default_presets() -> Vec<PresetItem> {
             hold_duration_ms: 500,
             hold_interval_ms: 1000,
             jitter_radius_px: 0,
+            outlier_prob: default_outlier_prob(),
+            technique: default_technique(),
             repeat_mode: "unlimited".into(),
             repeat_count: 0,
             repeat_interval_ms: 1000,
             start_delay_ms: 0,
+            stop_duration_ms: 0,
             stop_duration_min: 0,
             stop_time_str: String::new(),
+            stop_mode: default_stop_mode(),
             is_default: true,
             points: Vec::new(),
+            hotkey: String::new(),
         },
         PresetItem {
             id: "human_emulation".into(),
@@ -439,14 +571,19 @@ fn default_presets() -> Vec<PresetItem> {
             hold_duration_ms: 500,
             hold_interval_ms: 1000,
             jitter_radius_px: 0,
+            outlier_prob: default_outlier_prob(),
+            technique: default_technique(),
             repeat_mode: "unlimited".into(),
             repeat_count: 0,
             repeat_interval_ms: 1000,
             start_delay_ms: 0,
+            stop_duration_ms: 0,
             stop_duration_min: 0,
             stop_time_str: String::new(),
+            stop_mode: default_stop_mode(),
             is_default: true,
             points: Vec::new(),
+            hotkey: String::new(),
         },
         PresetItem {
             id: "afk_farm".into(),
@@ -464,14 +601,19 @@ fn default_presets() -> Vec<PresetItem> {
             hold_duration_ms: 500,
             hold_interval_ms: 1000,
             jitter_radius_px: 0,
+            outlier_prob: default_outlier_prob(),
+            technique: default_technique(),
             repeat_mode: "unlimited".into(),
             repeat_count: 0,
             repeat_interval_ms: 1000,
             start_delay_ms: 0,
+            stop_duration_ms: 0,
             stop_duration_min: 0,
             stop_time_str: String::new(),
+            stop_mode: default_stop_mode(),
             is_default: true,
             points: Vec::new(),
+            hotkey: String::new(),
         },
     ]
 }

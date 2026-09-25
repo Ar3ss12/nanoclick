@@ -11,3 +11,12 @@ lto = true          # Link-Time Optimization across all crates
 codegen-units = 1   # Single code generation unit for maximum LLVM inlining
 panic = "abort"     # Strip panic unwinding tables & landing pads
 strip = true        # Strip all debug and symbol tables from binary
+
+# NOTE: `panic = "abort"` above is what `cargo test --release` also uses — that
+# command selects the release profile, so a failing assertion aborts the whole
+# test process instead of being reported per test. The gate stays valid (a
+# failing run still exits non-zero), but the first failure ends the run. Do not
+# "fix" this by adding `[profile.test] panic = "unwind"`: that profile is only
+# used by `cargo test` WITHOUT `--release`, so the override never reaches the
+# gate. See the `common-controls-v6` note in `src-tauri/Cargo.toml` for the
+# failure that looked like a panic/unwind problem but was a Windows import.

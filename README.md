@@ -4,7 +4,7 @@
 
 Built with **Tauri 2 + Rust + vanilla JS**. No Electron, no bundler, no bloat: the production installer is **~3.5 MB**.
 
-![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue) ![Version](https://img.shields.io/badge/version-1.1.1-brightgreen) ![Tests](https://img.shields.io/badge/tests-194%2F194-brightgreen) ![i18n](https://img.shields.io/badge/i18n-UA%20%7C%20RU%20%7C%20EN-blue) ![Tauri](https://img.shields.io/badge/Tauri-2.x-FFC131) ![Rust](https://img.shields.io/badge/rust-stable--msvc-DEA584)
+![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue) ![Version](https://img.shields.io/badge/version-1.2.0-brightgreen) ![Tests](https://img.shields.io/badge/tests-255%2F255-brightgreen) ![i18n](https://img.shields.io/badge/i18n-UA%20%7C%20RU%20%7C%20EN-blue) ![Tauri](https://img.shields.io/badge/Tauri-2.x-FFC131) ![Rust](https://img.shields.io/badge/rust-stable--msvc-DEA584)
 
 ---
 
@@ -16,8 +16,12 @@ Built with **Tauri 2 + Rust + vanilla JS**. No Electron, no bundler, no bloat: t
 
 ## ✨ Features
 
-### 🖱️ Click Engine
-- **Single / Double / Hold** click modes with configurable press & pause durations
+### 🖱️ Click Engine & Biomechanical Physics
+- **Single / Double / Hold / Butterfly / Drag** click techniques with realistic biomechanical modeling
+- **Dynamic Fadeout (1–160 CPS)** — human physiology (Bates B3 jitter, hold times, fatigue tail, debounce bounce) smoothly fades out at high speeds, providing uninhibited control up to 160 CPS on every mode
+- **Butterfly Click Engine** — alternating two-finger mechanics (Index/Middle) + 35% microswitch debounce bounce
+- **Drag Click Engine** — Debounce=0ms microswitch simulation (90–110 CPS instant burst) with adaptive hand-return deadzone balancing
+- **RAII MouseHoldGuard** — 100% hardware release guarantee on any loop exit, emergency stop or panic (zero stuck mouse buttons in Windows)
 - **Gaussian Timing & Coordinate Variance** — Bates B3 human tremor (±0–35%, mean-of-3 bell concentrated near target CPS, strict bounds, no clamp) and spatial micro-dispersion (±0–50 px) within configurable variance thresholds
 - **Position picker** — bind clicks to a fixed screen point or follow the cursor
 - **Precise CPS control** (0.1–160 CPS) with live hotkey speed adjustment and real-time telemetry
@@ -30,7 +34,9 @@ Built with **Tauri 2 + Rust + vanilla JS**. No Electron, no bundler, no bloat: t
 - **⚡ Optimize** — one-click macro cleanup at three aggressiveness levels (Subtle / Balanced / Aggressive)
 - **Visual editor** — inline edit, rename, drag-to-reorder, context menu (Run from here / Step / Disable / Duplicate)
 
-### 🧠 Control Flow & Smart Hotkeys
+### 🧠 Control Flow, Presets & Smart Hotkeys
+- **Mouse 4 / Mouse 5 / Mouse 3 Global Hotkeys** — Win32 `WH_MOUSE_LL` hook integration with zero latency for gaming mice (1000–8000 Hz)
+- **Lock-Free Preset Preemption** — instant sub-millisecond switching between presets via direct hotkey trigger without message loop freezes
 - **Zero-Lock Win32 Hooks** — thread-local event listeners for sub-millisecond hotkey response with zero interface stuttering
 - **Smart Key Memory** — TTL-based keypress memory (configurable 100–3000ms) for effortless recording of complex hotkeys and modifier combinations (Ctrl, Alt, Shift, Win)
 - **Multi-point Sequence Editor** — high-performance Canvas editor with O(1) transform caching and snap-to-grid
@@ -54,7 +60,7 @@ Built with **Tauri 2 + Rust + vanilla JS**. No Electron, no bundler, no bloat: t
 
 ### 🛡️ Safety, Reliability & Self-Healing
 - **Smart Typing Guard (Default ON)** — auto-stops clicking when typing real text and locks out hotkeys (600ms default); features a 2-second intentional safety cooldown before disarming
-- **Auto-Pause on Focus Loss (FocusGuard)** — opt-in guard that stops the clicker the moment the foreground app changes mid-run (Alt+Tab, click-away, Win key, system toast); session baseline via the 300ms `ForegroundCache`, fail-open on unresolvable focus, UI toast explains the pause
+- **Auto-Pause on Focus Loss (FocusGuard)** — opt-in guard that stops the clicker within ~50 ms of the foreground change (dedicated watcher thread, direct lookup rather than the 300 ms cache — Alt+Tab, click-away, Win key, system toast); the session baseline is the app that owned focus at start, our own window is a real baseline (leaving NanoClick stops the run, returning never pauses), fail-open on unresolvable focus, config saves no longer disarm a live session, and a UI toast names the process that stole focus
 - **Remember Window Position** — restores the last main-window position on launch; coordinates persist in the same atomic config save and are sanitized against the virtual screen (off-screen → auto-center)
 - **Self-Healing Configuration Engine** — Last Known Good snapshots (`config.last_good.json` / `macros.last_good.json`, hardened readonly+hidden "black box"), timestamped quarantine (`*.broken-<epoch>`, visible), Deadbolt Modal queue (mandatory OK, no X/backdrop/Esc), and an observer watcher (1s poll, debounce, runtime toasts only — never rewrites files)
 - **Factory Reset with 5-Second Cooldown** — safe reset button with auto-backup (`config.json.bak`) and "Think (5)" confirmation modal
@@ -63,7 +69,8 @@ Built with **Tauri 2 + Rust + vanilla JS**. No Electron, no bundler, no bloat: t
 - **Work Mode** — suspends global hotkeys while you're using other applications
 - **Auto-pause on navigation**, emergency stop (<kbd>Escape</kbd>), start-delay & auto-stop timers
 - **Floating HUD** overlay for real-time click tracking
-- **Windows autostart + system tray** integration
+- **Windows autostart & native system tray** — a hand-rolled Win32 tray icon (`Shell_NotifyIconW`, no `tray-icon`/`muda` dependency, so the comctl32-v6 import can never come back). Closing the window hides to the tray and the backend keeps clicking; the tray menu offers Open / Start-Stop clicking / Show-Hide HUD / Quit; the icon re-registers itself after an `explorer.exe` restart. Optional **deep sleep** releases the whole interface while the app sits in the tray and rebuilds it on the next click (opt-in, skipped while clicking, a macro or a recording runs). Measured with the fixed `scripts/measure-ram.ps1` (private working set, the Task Manager number): **117–123 MB alive → 4.98 MB in deep sleep (−96 %)**, six `msedgewebview2.exe` helpers going to zero while hooks, scheduler and tray stay alive — hiding the window alone changes nothing (122.8 MB)
+- **Interface failure containment** — the backend never depends on the page: every `emit` is fire-and-forget on a targeted window, zero windows is a legal state (`ExitRequested` is prevented while not shutting down), and a page that never reports `frontend_ready` is logged at error level, reloaded once and then ignored — hooks, scheduler and tray keep running behind a dead UI
 - 🎨 **6 Themes**: Dark Cyberpunk, Neon Grass, Dark Slate, Midnight Blue, Dracula Crimson, Amethyst Purple
 
 ---
@@ -116,16 +123,32 @@ cargo tauri build --bundles nsis
 # → target/release/bundle/nsis/NanoClick_*-setup.exe
 ```
 
+### Bump the version
+
+`release.ps1 -Tag vX.Y.Z` only *reads* the version (installer file name + `latest.json`),
+so the files must already carry it. One command rewrites every place the version lives and
+verifies the result:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\set-version.ps1 -Version 1.2.0
+# add -DryRun to preview, -SkipDocs to touch only the two files tauri reads
+```
+
+It updates `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, the README badge and the
+three "Current version" doc headers; historical version numbers further down those files are
+left alone. The new JSON is parsed *before* it is written, because a malformed
+`tauri.conf.json` makes every cargo command die inside tauri-build.
+
 ### Run tests
 
 ```bash
 cd src-tauri
 cargo test --release -j 1 -- --skip physical_
-# → 194 passed; 0 failed (177 unit + 17 integration; 7 `physical_` tests filtered out)
+# → 232 passed; 0 failed (207 unit + 25 integration; 7 `physical_` tests filtered out)
 ```
 
 The test suite covers:
-- **i18n Key Symmetry & DOM Validation** — 100% 3-way synchronization across UA, RU, and EN (337 keys + 18 notice keys × 3 locales)
+- **i18n Key Symmetry & DOM Validation** — 100% 3-way synchronization across UA, RU, and EN (394 keys × 3 locales, 15 of them notice keys)
 - **Windows UIPI & Elevation Integration** — token privilege checks and app manifests
 - **Stats Triple-Redundancy** — `config.json` + `stats.json` + `localStorage` fallback
 - **Stats Session Lifecycle** — exactly-once finalize (no double-flush twins), junk-run filter (`<5 clicks & <1s` skipped from chart), dirty-flag 5s flush (zero disk writes in idle), ring-capped history (50 entries, ~6 KB ceiling)
@@ -200,7 +223,7 @@ watchdog is the only detection that survives a module which cannot execute at al
 ```
 nanoclick/
 ├── src/                  # Frontend (no bundler):
-│   ├── locales/          #   i18n JSON dictionaries: ua.json, ru.json, en.json (337 keys)
+│   ├── locales/          #   i18n JSON dictionaries: ua.json, ru.json, en.json (394 keys)
 │   ├── boot_guard.js     #   CLASSIC-script crash trap + boot watchdog (must load first)
 │   ├── i18n.js           #   Zero-dependency lightweight lazy-loading i18n engine
 │   ├── stats.js          #   Modular analytics & live Canvas CPS chart engine

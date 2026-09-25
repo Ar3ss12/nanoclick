@@ -128,7 +128,7 @@
                 <div class="config-label-group">
                   <span class="config-label" data-i18n="dash_click_rate">Click Rate (CPS)</span>
                   <div class="unit-toggle-wrapper" id="speedUnitWrapper">
-                    <button type="button" id="speedUnitBtn" class="unit-badge-btn" title="Click or hover to switch unit">
+                    <button type="button" id="speedUnitBtn" class="unit-badge-btn" title="Click to switch unit">
                       <span id="speedUnitBadge">CPS</span> <span class="unit-arrow">▾</span>
                     </button>
                     <div id="speedUnitMenu" class="unit-popover hidden">
@@ -139,6 +139,30 @@
                 </div>
                 <input type="range" id="cpsRange" class="slider" min="0.1" max="160" step="0.5" value="29">
                 <input type="number" id="cpsInput" class="num-input" min="0.1" max="160" step="0.5" value="29">
+              </div>
+              <div class="config-row technique-row">
+                <button type="button" id="techniqueBadge" class="technique-badge" title="Biometric technique hint (Phase A: display only, engine stays Single). Click to pin Auto / Single / Butterfly / Drag.">
+                  <span id="techniqueDot" class="technique-dot">●</span>
+                  <!-- No data-i18n here on purpose: the text is owned by
+                       updateTechniqueBadge() (auto bands + pinned mode) and is
+                       re-rendered on language change. A static data-i18n key
+                       would be overwritten by applyTranslations() and freeze
+                       the badge on "single" after any locale switch. -->
+                  <span id="techniqueLabel">Single — one finger</span>
+                  <span id="techniquePin" class="technique-pin hidden">📌</span>
+                  <span class="unit-arrow">▾</span>
+                </button>
+                <div id="techniqueMenu" class="unit-popover hidden">
+                  <button type="button" class="unit-popover-item active" data-technique="auto" data-i18n="technique_auto">Auto (by CPS)</button>
+                  <button type="button" class="unit-popover-item" data-technique="single" data-i18n="technique_single">Single — one finger</button>
+                  <button type="button" class="unit-popover-item" data-technique="butterfly" data-i18n="technique_butterfly">Butterfly — two fingers</button>
+                  <button type="button" class="unit-popover-item" data-technique="drag" data-i18n="technique_drag">Drag — flick</button>
+                </div>
+              </div>
+              <div class="config-row">
+                <span class="config-label" data-i18n="dash_outlier_prob" title="Rare human hesitation: 2% of intervals stretch to 2-3x base">Hesitation (±%)</span>
+                <input type="range" id="outlierRange" class="slider" min="0" max="10" step="0.5" value="2">
+                <input type="number" id="outlierInput" class="num-input" min="0" max="10" step="0.5" value="2">
               </div>
               <div class="config-row">
                 <span class="config-label" data-i18n="dash_human_jitter" title="Gaussian-like human tremor (concentrated near target CPS)">Human Jitter (±%)</span>
@@ -160,7 +184,7 @@
                 <div class="config-label-group">
                   <span class="config-label" data-i18n="dash_start_delay">Start Delay (sec)</span>
                   <div class="unit-toggle-wrapper" id="delayUnitWrapper">
-                    <button type="button" id="delayUnitBtn" class="unit-badge-btn" title="Click or hover to switch unit">
+                    <button type="button" id="delayUnitBtn" class="unit-badge-btn" title="Click to switch unit">
                       <span id="delayUnitBadge">sec</span> <span class="unit-arrow">▾</span>
                     </button>
                     <div id="delayUnitMenu" class="unit-popover hidden">
@@ -254,21 +278,31 @@
               <span id="timerActiveBadge" class="timer-active-badge hidden" data-i18n="dash_timer_active">ACTIVE</span>
             </div>
             <div class="timer-card-body">
-              <div class="timer-option">
+              <div class="timer-option" id="stopAfterRow">
                 <div class="timer-option-left">
                   <div class="timer-option-icon">⏱️</div>
                   <div class="timer-option-info">
                     <div class="timer-option-title" data-i18n="dash_timer_stop_after_title">Stop after</div>
-                    <div class="timer-option-desc" data-i18n="dash_timer_stop_after_desc">Auto-stop after N minutes of running</div>
+                    <div class="timer-option-desc" data-i18n="dash_timer_stop_after_desc">Auto-stop after the configured duration (pick ms / sec / min / hour)</div>
                   </div>
                 </div>
                 <div class="timer-option-control">
-                  <input type="number" id="stopDurationInput" class="timer-input" min="0" max="1440" step="1" value="0" placeholder="0">
-                  <span class="timer-unit" data-i18n="dash_unit_min">min</span>
+                  <div class="unit-toggle-wrapper" id="stopUnitWrapper">
+                    <button type="button" id="stopUnitBtn" class="unit-badge-btn" data-i18n-title="dash_timer_unit_hint" title="Click to switch the time unit">
+                      <span id="stopUnitBadge">sec</span> <span class="unit-arrow">▾</span>
+                    </button>
+                    <div id="stopUnitMenu" class="unit-popover hidden">
+                      <button type="button" class="unit-popover-item" data-unit="ms" data-i18n="unit_dur_ms_option">ms (Milliseconds)</button>
+                      <button type="button" class="unit-popover-item active" data-unit="sec" data-i18n="unit_dur_sec_option">sec (Seconds)</button>
+                      <button type="button" class="unit-popover-item" data-unit="min" data-i18n="unit_dur_min_option">min (Minutes)</button>
+                      <button type="button" class="unit-popover-item" data-unit="hour" data-i18n="unit_dur_hour_option">hour (Hours)</button>
+                    </div>
+                  </div>
+                  <input type="number" id="stopDurationInput" class="timer-input" min="0" max="86400" step="0.001" value="0" placeholder="0">
                 </div>
               </div>
               <div class="timer-divider"></div>
-              <div class="timer-option">
+              <div class="timer-option" id="stopAtRow">
                 <div class="timer-option-left">
                   <div class="timer-option-icon">🕐</div>
                   <div class="timer-option-info">
@@ -483,12 +517,13 @@
                 <label class="checkbox-row">
                   <input type="checkbox" id="alwaysRunAsAdminCheckbox" class="custom-checkbox">
                   <span class="checkbox-box"></span>
-                  <span data-i18n="settings_always_run_admin">Always Run as Administrator (UAC / UIPI)</span>
+                  <span data-i18n="settings_always_run_admin" data-i18n-title="settings_always_run_admin_hint">Always Run as Administrator (UAC / UIPI)</span>
                 </label>
                 <label class="checkbox-row">
-                  <input type="checkbox" id="minimizeToTrayCheckbox" checked class="custom-checkbox">
+                  <input type="checkbox" id="trayLifeCheckbox" checked class="custom-checkbox">
                   <span class="checkbox-box"></span>
-                  <span data-i18n="settings_minimize_on_close">Minimize to Tray on Close</span>
+                  <span data-i18n="settings_tray_life"
+                        data-i18n-title="settings_tray_life_hint">Live in the Tray (close → tray + deep sleep)</span>
                 </label>
                 <label class="checkbox-row">
                   <input type="checkbox" id="autostartCheckbox" class="custom-checkbox">
@@ -537,6 +572,8 @@
                   <span class="checkbox-box"></span>
                   <span data-i18n="settings_start_minimized">Start Minimized to Tray</span>
                 </label>
+                <!-- Reserved: the Windows-notification settings will land here —
+                     the checkbox is kept as their future on/off switch. -->
                 <label class="checkbox-row">
                   <input type="checkbox" id="notificationsCheckbox" checked class="custom-checkbox">
                   <span class="checkbox-box"></span>
@@ -768,6 +805,13 @@
                 <div class="settings-row-bottom">
                   <span class="settings-hint" data-i18n="hotkeys_response_hint">Lower = faster reaction. Higher = protection against accidental presses.</span>
                 </div>
+              </div>
+              <div class="settings-row">
+                <span class="settings-label" data-i18n="settings_dump_diag">Input diagnostics</span>
+                <button id="dumpInputDiagBtn" class="preset-modal-btn cancel" style="display:flex;align-items:center;justify-content:center;gap:8px;padding:6px 12px;font-size:12px;cursor:pointer;" data-i18n-title="settings_dump_diag_hint" title="Writes which hotkey fired / was suppressed into %TEMP%\nanoclick_web.log">
+                  <span>🧪</span>
+                  <span data-i18n="settings_dump_diag_btn">Dump to log</span>
+                </button>
               </div>
             </div>
           </div>
@@ -1029,6 +1073,7 @@
       </div>
       <div class="modal-body preset-modal-body">
         <input type="hidden" id="presetEditId">
+        <input type="hidden" id="presetHotkeyInput">
         
         <div class="preset-form-grid">
           <div class="preset-form-group">
@@ -1049,6 +1094,17 @@
               <option value="🚀" data-i18n="preset_icon_turbo">🚀 Turbo</option>
             </select>
           </div>
+
+          <div class="preset-form-group">
+            <label data-i18n="preset_field_hotkey">Activation Hotkey</label>
+            <div style="display:flex;gap:6px;align-items:center;">
+              <button type="button" id="presetHotkeyBtn" class="hotkey-btn" style="flex:1;">
+                <span class="hotkey-icon">⌨️</span>
+                <span id="presetHotkeyLabel" data-i18n="preset_hotkey_none">None</span>
+              </button>
+              <button type="button" id="presetHotkeyClearBtn" class="preset-icon-btn danger" data-i18n-title="preset_hotkey_clear" title="Clear" style="height:34px;width:34px;">✕</button>
+            </div>
+          </div>
           
           <div class="preset-form-group">
             <label>Speed (CPS: <span id="presetCpsVal">29.0</span>)</label>
@@ -1064,12 +1120,23 @@
             <input type="number" id="presetStartDelaySec" class="num-input" min="0" max="300" step="1" value="0">
           </div>
 
-          <div class="preset-form-group">
-            <label data-i18n="preset_field_time_limit">Time limit (min)</label>
-            <input type="number" id="presetStopDurationMin" class="num-input" min="0" max="1440" step="1" value="0">
+          <div class="preset-form-group" id="presetStopAfterRow">
+            <label data-i18n="preset_field_time_limit" data-i18n-title="preset_field_time_limit_hint" title="Auto-stop this preset after the configured duration">Time limit</label>
+            <div class="unit-toggle-wrapper" id="presetStopUnitWrapper">
+              <button type="button" id="presetStopUnitBtn" class="unit-badge-btn" data-i18n-title="dash_timer_unit_hint" title="Click to switch the time unit">
+                <span id="presetStopUnitBadge">min</span> <span class="unit-arrow">▾</span>
+              </button>
+              <div id="presetStopUnitMenu" class="unit-popover hidden">
+                <button type="button" class="unit-popover-item" data-unit="ms" data-i18n="unit_dur_ms_option">ms (Milliseconds)</button>
+                <button type="button" class="unit-popover-item" data-unit="sec" data-i18n="unit_dur_sec_option">sec (Seconds)</button>
+                <button type="button" class="unit-popover-item active" data-unit="min" data-i18n="unit_dur_min_option">min (Minutes)</button>
+                <button type="button" class="unit-popover-item" data-unit="hour" data-i18n="unit_dur_hour_option">hour (Hours)</button>
+              </div>
+            </div>
+            <input type="number" id="presetStopDuration" class="num-input" min="0" max="1440" step="0.01" value="0">
           </div>
 
-          <div class="preset-form-group">
+          <div class="preset-form-group" id="presetStopAtRow">
             <label data-i18n="preset_field_stop_at">Stop at</label>
             <input type="time" id="presetStopTime" class="num-input">
           </div>

@@ -305,6 +305,10 @@ input, textarea, [contenteditable="true"] {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
+  /* Reserve the scrollbar track permanently. Any floating menu/modal that grows
+     the scroll height would otherwise make the scrollbar appear and push the
+     whole layout sideways — the "interface jumps" class of bug. */
+  scrollbar-gutter: stable;
   padding: 10px 16px;
   background: var(--bg);
   background-color: #0a0f1e;
@@ -1578,10 +1582,57 @@ button {
   color: var(--cyan);
 }
 
-.timer-unit {
-  font-size: 11px;
+/* ── THE ROW THAT IS NOT THE ARMED TRIGGER ───────────────────
+   Only one auto-stop can end a run (the backend gates on `engine.stop_mode`),
+   so the row that is not armed is greyed. Two rules matter:
+     * it stays CLICKABLE — typing into it is exactly how you switch triggers,
+       so never `disabled` / `pointer-events:none` / `visibility:hidden`;
+     * its value stays readable (dimmed, not hidden) and it must NOT glow cyan
+       like an armed field, or the card would look like both are active. */
+.timer-option {
+  transition: opacity 0.15s ease;
+}
+
+.timer-option--locked {
+  /* A soft dim, not a disappearing act: the row still shows its value and stays
+     clickable/typable, because that is how you arm it again. */
+  opacity: 0.6;
+}
+
+.timer-option--locked .timer-input {
+  /* The dimmed row is STILL the input you type into to make it the armed trigger
+     again, so it keeps the text caret and the native input behaviour; no
+     disabled-ness of any kind is applied here. The lock is painted, not enforced
+     — the enforcement lives in the scheduler gate on `engine.stop_mode`.
+     The dimming is applied UNCONDITIONALLY: an attribute selector cannot work
+     here, because such an attribute never updates while the user types, so a
+     locked row would look armed until the next reload. */
+  border-color: var(--border);
   color: var(--text-dim);
-  min-width: 18px;
+  cursor: text;
+}
+
+/* The duration badge sits in the RIGHT-most control of the timer card and in a
+   narrow grid column in the preset modal: a 130px popover anchored at left:0
+   would hang outside the card / over the neighbouring field. Anchor it to the
+   badge's right edge instead. */
+.preset-form-group .unit-popover {
+  left: auto;
+  right: 0;
+  min-width: 150px;
+}
+
+/* The timer card is the LAST card of the dashboard, so a menu opening downwards
+   extends the scroll area of .views-container (absolutely positioned descendants
+   count towards it), the vertical scrollbar appears and the whole layout shifts
+   sideways. Opening upwards keeps the menu inside the area that is already
+   scrollable — nothing new to scroll, nothing moves. */
+.timer-option-control .unit-popover {
+  left: auto;
+  right: 0;
+  top: auto;
+  bottom: calc(100% + 6px);
+  min-width: 150px;
 }
 
 .timer-divider {
@@ -1769,6 +1820,30 @@ button {
   border-radius: 5px;
   padding: 2px 6px;
   flex-shrink: 0;
+}
+
+.preset-card-hotkey-badge {
+  font-family: 'Fira Code', monospace;
+  font-size: 10px;
+  font-weight: 700;
+  color: #a78bfa;
+  background: rgba(167,139,250,0.12);
+  border: 1px solid rgba(167,139,250,0.25);
+  border-radius: 5px;
+  padding: 2px 6px;
+  flex-shrink: 0;
+}
+
+.preset-card-badges {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.preset-card-new.preset-card--running {
+  border-color: var(--cyan);
+  box-shadow: 0 0 16px rgba(6,182,212,0.3);
 }
 
 .preset-card-tags {
@@ -2949,7 +3024,12 @@ button {
   min-width: 130px;
   backdrop-filter: blur(8px);
 }
-.unit-toggle-wrapper:hover .unit-popover,
+/* Click-only. The badge IS a <button> with a ▾ arrow, so opening on hover was
+   never needed — and it caused an oscillation that read as "the interface jumps
+   around": the menu extended the scroll area of .views-container, the vertical
+   scrollbar appeared, the layout shifted sideways, the badge slid out from under
+   the cursor, the menu closed, the scrollbar vanished, the layout snapped back…
+   A floating menu must never be able to move the thing that opened it. */
 .unit-popover:not(.hidden) {
   display: flex !important;
 }
@@ -2974,6 +3054,41 @@ button {
   background: rgba(6, 182, 212, 0.25);
   color: var(--cyan);
   font-weight: 600;
+}
+
+/* ── BIOMETRIC TECHNIQUE BADGE (Phase A: display only) ── */
+.technique-row {
+  position: relative;
+}
+.technique-badge {
+  background: rgba(6, 182, 212, 0.08);
+  border: 1px solid rgba(6, 182, 212, 0.3);
+  color: var(--text);
+  font-size: 12px;
+  font-family: 'Outfit', sans-serif;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  transition: all 0.15s ease;
+  letter-spacing: 0.02em;
+}
+.technique-badge:hover {
+  background: rgba(6, 182, 212, 0.18);
+  border-color: var(--cyan);
+  box-shadow: 0 0 8px rgba(6, 182, 212, 0.3);
+}
+.technique-dot {
+  font-size: 10px;
+}
+.technique-dot.tech-single { color: #34d399; }
+.technique-dot.tech-butterfly { color: #fbbf24; }
+.technique-dot.tech-drag { color: #f87171; }
+.technique-pin {
+  font-size: 11px;
 }
 
 /* ── ONE-SCREEN WELCOME MATRIX (ONBOARDING) ─────────────── */

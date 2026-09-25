@@ -131,12 +131,20 @@ impl AppFilter {
     }
 
     /// Decision using the current mode + list.
+    ///
+    /// Our own window always fails open (control panel, never a click
+    /// target): a whitelist that does not list us must not freeze the loop
+    /// while the user is pressing buttons in NanoClick.
     pub fn allows(&self, fg_exe: Option<&str>) -> bool {
         let mode = self.mode();
         if mode == FilterMode::Everywhere {
             return true;
         }
-        mode.allows(&self.list(), fg_exe)
+        match fg_exe {
+            None => true, // fail-open: lock screen / elevated
+            Some(exe) if crate::platform::is_own_exe(exe) => true,
+            Some(exe) => mode.allows(&self.list(), Some(exe)),
+        }
     }
 }
 
@@ -291,5 +299,19 @@ mod tests {
         let first = cache.exe();
         let second = cache.exe();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn own_window_always_fails_open() {
+        use crate::platform::own_exe_name;
+        let Some(own) = own_exe_name() else {
+            return;
+        };
+        // A whitelist that does not list us must not freeze the loop while
+        // the user is pressing buttons in NanoClick (control panel).
+        let white = AppFilter::new("whitelist", &["javaw.exe".to_string()]);
+        assert!(white.allows(Some(own.as_str())));
+        let black = AppFilter::new("blacklist", &["discord.exe".to_string()]);
+        assert!(black.allows(Some(own.as_str())));
     }
 }

@@ -15,6 +15,7 @@ const SmartGuard = {
   typingFreezeMs: 600,
   _initialized: false,
   _onChange: null,
+  _onChangeThrottled: null,
   _list: [],
   _captureTimer: null,
   _capturing: false,
@@ -71,15 +72,18 @@ const SmartGuard = {
 
   /**
    * Wire the guard controls once. `onChange` is main.js's saveConfig so
-   * every guard edit persists through the existing config pipeline.
+   * every guard edit persists through the existing config pipeline;
+   * `onChangeThrottled` is the 250 ms-coalesced variant for `input` bursts.
    */
-  async init(onChange) {
+  async init(onChange, onChangeThrottled) {
     if (this._initialized) {
       this._onChange = onChange || this._onChange;
+      this._onChangeThrottled = onChangeThrottled || this._onChangeThrottled;
       return;
     }
     this._initialized = true;
     this._onChange = onChange || null;
+    this._onChangeThrottled = onChangeThrottled || null;
 
     // Pull the freeze window from Rust instead of hardcoding it twice.
     try {
@@ -109,6 +113,11 @@ const SmartGuard = {
 
     const freezeInput = this._el("typingFreezeInput");
     if (freezeInput) {
+      // `change` alone misses spinner clicks (they fire `input` per tick and
+      // `change` only on blur/Enter) — the value must reach the config even
+      // if the user hits Start right after the spinner. `input` is throttled
+      // inside saveConfigThrottled (250 ms), so dragging is still one write.
+      freezeInput.addEventListener("input", () => this._changedThrottled());
       freezeInput.addEventListener("change", () => this._changed());
     }
 
@@ -260,6 +269,19 @@ const SmartGuard = {
   _changed() {
     if (typeof this._onChange === "function") this._onChange();
     else this.render();
+  },
+
+  // Throttled variant for high-frequency `input` events (number spinners).
+  // main.js passes saveConfig as onChange, but saveConfig() is immediate —
+  // bursts of `input` ticks must go through the throttled wrapper, which
+  // coalesces to one disk write per 250 ms with a trailing call, so the
+  // FINAL spinner value always lands on disk even without blur/Enter.
+  _changedThrottled() {
+    if (typeof this._onChangeThrottled === "function") {
+      this._onChangeThrottled();
+      return;
+    }
+    this._changed();
   },
 
   /* ── app picker (running + installed) ──────────────────────── */

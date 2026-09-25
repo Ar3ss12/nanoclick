@@ -448,6 +448,8 @@ let currentConfig = {
     jitter_percent: 7.5,
     click_limit: 0,
     jitter_radius_px: 0,
+    outlier_prob: 0.02,
+    technique: "auto",
     button: "left",
     click_type: "single",
     position_mode: "cursor",
@@ -459,6 +461,8 @@ let currentConfig = {
     hold_interval_ms: 1000,
     repeat_interval_ms: 1000,
     start_delay_ms: 0,
+    stop_duration_ms: 0,
+    stop_duration_unit: "sec",
     stop_duration_min: 0,
     stop_time_str: "",
     gui_lock_ms: 1500,
@@ -475,13 +479,18 @@ let currentConfig = {
   },
   ui: {
     always_on_top: false,
-    mode: "floating_hud",
-    sound_feedback: false,
-    visual_ripple: true
+    visual_ripple: true,
+    window_w: null,
+    window_h: null
   }
 };
 
 let isRunning = false;
+// Set once `updateUiFromConfig()` has hydrated `currentConfig` from the backend.
+// Before that the object is the module default, so anything that reacts to a
+// status payload BEFORE boot finished must not write it to disk (a save from an
+// un-hydrated page would overwrite the real config with defaults).
+let configHydrated = false;
 let isButtonLocked = false;
 let guiLockTimer = null;
 
@@ -545,11 +554,21 @@ const repeatIntervalInput = document.getElementById("repeatIntervalInput");
 const pickPosBtn        = document.getElementById("pickPosBtn");
 const pickPosStatus     = document.getElementById("pickPosStatus");
 const openConfigFolderBtn = document.getElementById("openConfigFolderBtn");
+// Input diagnostics: drains the backend's ring buffers (which hotkey fired,
+// which was suppressed by the typing guard) into the log file.
+const dumpInputDiagBtn = document.getElementById("dumpInputDiagBtn");
 
 const startMinimizedCheckbox  = document.getElementById("startMinimizedCheckbox");
 const autostartCheckbox       = document.getElementById("autostartCheckbox");
-const minimizeToTrayCheckbox  = document.getElementById("minimizeToTrayCheckbox");
+// ONE master switch for "live in the tray": it drives BOTH `minimize_to_tray`
+// and `deep_sleep_to_tray`. Merged because deep sleep on its own was inert —
+// it can only happen on a close that "minimize to tray" is responsible for,
+// so "deep sleep ON + minimize OFF" was a setting that did nothing.
+const trayLifeCheckbox        = document.getElementById("trayLifeCheckbox");
 const notificationsCheckbox   = document.getElementById("notificationsCheckbox");
+// The master's value at hydrate time: deep sleep is only written together with
+// it once the user actually moved the switch (see `collect`).
+let trayLifeInitial = null;
 const pauseFocusLossCheckbox  = document.getElementById("pauseFocusLossCheckbox");
 const rememberPosCheckbox     = document.getElementById("rememberPosCheckbox");
 const alwaysOnTopCheckbox     = document.getElementById("alwaysOnTopCheckbox");
@@ -561,6 +580,19 @@ const delayUnitBtn            = document.getElementById("delayUnitBtn");
 const delayUnitBadge          = document.getElementById("delayUnitBadge");
 const delayUnitMenu           = document.getElementById("delayUnitMenu");
 const delayUnitSuffix         = document.getElementById("delayUnitSuffix");
+const stopUnitBtn             = document.getElementById("stopUnitBtn");
+const stopUnitBadge           = document.getElementById("stopUnitBadge");
+const stopUnitMenu            = document.getElementById("stopUnitMenu");
+const presetStopUnitBtn       = document.getElementById("presetStopUnitBtn");
+const presetStopUnitBadge     = document.getElementById("presetStopUnitBadge");
+const presetStopUnitMenu      = document.getElementById("presetStopUnitMenu");
+const techniqueBadge          = document.getElementById("techniqueBadge");
+const techniqueDot            = document.getElementById("techniqueDot");
+const techniqueLabel          = document.getElementById("techniqueLabel");
+const techniquePin            = document.getElementById("techniquePin");
+const techniqueMenu           = document.getElementById("techniqueMenu");
+const outlierRange            = document.getElementById("outlierRange");
+const outlierInput            = document.getElementById("outlierInput");
 let currentSpeedUnit = "cps";
 let currentDelayUnit = "sec";
 
@@ -572,6 +604,58 @@ function applyAlwaysOnTop(enable) {
   } catch (e) {
     console.warn("[always-on-top] failed to set:", e);
   }
+}
+
+// ── BIOMETRIC TECHNIQUE BADGE (Phase A: display + pin only) ──
+// The ENGINE stays Single whatever this shows: butterfly/drag wave shapes
+// are the next act. Auto maps CPS bands (<=15 single, <=25 butterfly, 25+
+// drag); a pinned non-auto value always wins and survives CPS moves.
+const TECHNIQUES = ["auto", "single", "butterfly", "drag"];
+function normalizeTechnique(t) {
+  const v = String(t || "auto").trim().toLowerCase();
+  if (v === "double") return "butterfly";
+  return TECHNIQUES.includes(v) ? v : "auto";
+}
+function resolveTechnique(technique, cps) {
+  const pinned = normalizeTechnique(technique);
+  if (pinned !== "auto") return pinned;
+  const c = Number(cps) || 0;
+  if (c <= 15) return "single";
+  if (c <= 25) return "butterfly";
+  return "drag";
+}
+function updateTechniqueBadge(cps) {
+  if (!techniqueBadge) return;
+  const pinned = normalizeTechnique(currentConfig?.engine?.technique);
+  const shown = resolveTechnique(pinned, cps);
+  if (techniqueLabel) techniqueLabel.textContent = getI18nText(`technique_${shown}`, {}, shown);
+  if (techniqueDot) techniqueDot.className = `technique-dot tech-${shown}`;
+  if (techniquePin) techniquePin.classList.toggle("hidden", pinned === "auto");
+  if (techniqueMenu) {
+    techniqueMenu.querySelectorAll(".unit-popover-item").forEach(btn => {
+      btn.classList.toggle("active", btn.getAttribute("data-technique") === pinned);
+    });
+  }
+}
+function setTechnique(mode) {
+  const norm = normalizeTechnique(mode);
+  if (currentConfig?.engine) currentConfig.engine.technique = norm;
+  if (techniqueMenu) techniqueMenu.classList.add("hidden");
+  updateTechniqueBadge(currentConfig?.engine?.target_cps);
+  saveConfigThrottled();
+}
+
+// ── HESITATION (biological outlier) display: % in UI, prob in config ──
+function outlierPctToProb(pct) {
+  return Math.max(0, Math.min(0.10, (Number(pct) || 0) / 100));
+}
+function outlierProbToPct(prob) {
+  return Math.round(Math.max(0, Math.min(0.10, Number(prob) || 0)) * 100 * 2) / 2;
+}
+function updateOutlierDisplay(prob) {
+  const pct = outlierProbToPct(prob);
+  if (outlierRange) outlierRange.value = pct;
+  if (outlierInput) outlierInput.value = pct;
 }
 
 function updateSpeedDisplay(targetCps) {
@@ -625,6 +709,278 @@ function updateStartDelayDisplay(delayMs) {
     startDelayInput.value = Math.round(ms / 1000);
   }
 }
+
+// ── AUTO-STOP TIMER UNITS (Stop after) ───────────────────────
+// The auto-stop timer has exactly ONE owner: the Rust scheduler
+// (`scheduler.rs` snapshots `stop_duration_ms` at run start and stops the loop
+// itself). The page only renders and persists the value. A
+// `setTimeout(... invoke("toggle_autoclicker"))` pair used to live inside
+// `executeStartAutomation()`: it TOGGLED instead of stopping, ignored the start
+// delay, was armed only on the UI-button path, and raced the backend's own IDLE
+// emit — so a run the backend had already stopped could be restarted by its own
+// frontend timer. Never re-add a page-owned auto-stop timer.
+//
+// The value is always persisted in MILLISECONDS; the unit only shapes the input
+// (step/min/max), so "1.5 sec" never silently becomes "0 min" after a save.
+// The ranges follow "the bigger the unit, the bigger the number you may pick,
+// and the finer the step where precision matters": ms resolves 1 ms, hours give
+// multi-day range.
+const STOP_UNITS = {
+  ms:   { factor: 1,       step: "1",     min: "1",     max: "999999" },
+  sec:  { factor: 1000,    step: "0.001", min: "0.001", max: "86400" },
+  min:  { factor: 60000,   step: "0.01",  min: "0.01",  max: "1440" },
+  hour: { factor: 3600000, step: "0.001", min: "0.001", max: "999" },
+};
+// Hard ceiling shared with the backend (`scheduler::MAX_STOP_DURATION_MS`,
+// 999 hours) — anything above it is clamped on both sides of the bridge.
+const STOP_DURATION_HARD_MAX_MS = 3596400000;
+let currentStopUnit = "sec";
+
+// ── WHICH auto-stop trigger is ARMED ─────────────────────────
+// The card offers two triggers, but only ONE may end a run: the backend loop
+// snapshots `engine.stop_mode` once per run and gates on it (`scheduler.rs`), so
+// two non-zero deadlines are never ambiguous. The rule the page enforces:
+//   * both fields empty          → "none", both rows normal, badge hidden;
+//   * you write into one of them → that one is armed, the other row is LOCKED
+//     (greyed) but KEEPS its value in the config, so switching back restores
+//     exactly what you typed;
+//   * you clear the armed field  → the other takes over if it has a value.
+// The locked row stays CLICKABLE on purpose — typing into it is how you switch.
+// "Locked" means "not armed": it is never `disabled` / `pointer-events:none`
+// (that would dead-end the card), and only the backend gate makes it true.
+const STOP_MODES = ["none", "duration", "wallclock"];
+let currentStopMode = "none";
+
+function normalizeStopMode(mode) {
+  return STOP_MODES.includes(mode) ? mode : "none";
+}
+
+function readStopTimeValue() {
+  return document.getElementById("stopTimeInput")?.value || "";
+}
+
+// ONE rule for the UI and for the saved config, so the two cannot disagree.
+// `hint` is the trigger the user touched last (or the one already armed): it
+// stays armed even when the OTHER field still holds a value — that is the whole
+// point of keeping both. An empty hint (config load, preset apply, legacy
+// config) lets the values decide, duration first, exactly like
+// `config::resolve_stop_mode` on the backend.
+function resolveStopMode(hint, hasDuration, hasTime) {
+  if (hint === "duration") return hasDuration ? "duration" : (hasTime ? "wallclock" : "none");
+  if (hint === "wallclock") return hasTime ? "wallclock" : (hasDuration ? "duration" : "none");
+  if (hasDuration) return "duration";
+  return hasTime ? "wallclock" : "none";
+}
+
+function deriveStopMode(hint) {
+  return resolveStopMode(
+    hint || currentStopMode,
+    readStopDurationMs() > 0,
+    !!readStopTimeValue()
+  );
+}
+
+// The armed trigger STORED WITH a preset. An explicit `stop_mode` in a bundle
+// wins; otherwise it is derived from the two values, so a preset exported by an
+// older build (no field at all) cannot arrive with both timers looking armed —
+// and `applyPreset` never has to guess.
+function presetStopModeFor(stored, durMs, timeStr) {
+  const explicit = normalizeStopMode(stored);
+  return explicit !== "none" ? explicit : resolveStopMode("", durMs > 0, !!timeStr);
+}
+
+// The hint a loaded config gives: its stored mode when it is one of the three,
+// else "" so the values decide (a config written before `stop_mode` existed has
+// no field at all, and the timer must not silently disappear on upgrade).
+function configuredStopModeHint(engine) {
+  const stored = String(engine?.stop_mode || "");
+  return STOP_MODES.includes(stored) && stored !== "none" ? stored : "";
+}
+
+function normalizeStopUnit(unit) {
+  return Object.prototype.hasOwnProperty.call(STOP_UNITS, unit) ? unit : "sec";
+}
+
+function stopUnitFactor(unit) {
+  return STOP_UNITS[normalizeStopUnit(unit)].factor;
+}
+
+// The configured auto-stop, in ms. Falls back to the legacy whole-minutes field
+// for a config written by an older build — the backend migrates exactly the same
+// way in `Config::from`, so the first save after an upgrade cannot write 0 over
+// the user's timer.
+function configuredStopDurationMs(engine) {
+  const ms = Number(engine?.stop_duration_ms) || 0;
+  if (ms > 0) return ms;
+  return Math.round((Number(engine?.stop_duration_min) || 0) * 60000);
+}
+
+function stopUnitShort(unit) {
+  const u = normalizeStopUnit(unit);
+  return getI18nText(`unit_dur_${u}_short`, {}, u);
+}
+
+// Milliseconds → the number a human should see while `unit` is active.
+function msToStopUnitValue(ms, unit) {
+  const u = normalizeStopUnit(unit);
+  const raw = Math.max(0, Number(ms) || 0) / STOP_UNITS[u].factor;
+  // 3 decimals cover ms→sec (0.001) and min→hour (0.0166…) without the float
+  // noise of 0.30000000000000004.
+  return Number(raw.toFixed(3));
+}
+
+// Human-readable duration for toasts: "850 ms", "12.5 s", "3 min 20 s", "2 h 5 min".
+function formatDurationMs(ms) {
+  const n = Math.max(0, Number(ms) || 0);
+  if (n < 1000) return `${Math.round(n)} ms`;
+  const s = n / 1000;
+  if (s < 60) return `${Number(s.toFixed(2))} s`;
+  const totalMin = Math.floor(s / 60);
+  const remS = Math.round(s - totalMin * 60);
+  if (totalMin < 60) return remS > 0 ? `${totalMin} min ${remS} s` : `${totalMin} min`;
+  const h = Math.floor(totalMin / 60);
+  const remMin = totalMin - h * 60;
+  return remMin > 0 ? `${h} h ${remMin} min` : `${h} h`;
+}
+
+// The number currently in the field, in milliseconds, already clamped.
+function readStopDurationMs() {
+  const input = document.getElementById("stopDurationInput");
+  const raw = parseFloat(input?.value);
+  if (!Number.isFinite(raw) || raw <= 0) return 0;
+  const ms = Math.round(raw * stopUnitFactor(currentStopUnit));
+  return Math.max(0, Math.min(STOP_DURATION_HARD_MAX_MS, ms));
+}
+
+function updateStopUnitChrome() {
+  if (stopUnitBadge) stopUnitBadge.textContent = stopUnitShort(currentStopUnit);
+  if (stopUnitMenu) {
+    stopUnitMenu.querySelectorAll(".unit-popover-item").forEach(btn => {
+      btn.classList.toggle("active", btn.getAttribute("data-unit") === currentStopUnit);
+    });
+  }
+}
+
+// Render `ms` into the input with the active unit and switch the field's
+// min/max/step to that unit's range (mirrors updateStartDelayDisplay()).
+function updateStopDurationDisplay(ms) {
+  currentStopUnit = normalizeStopUnit(currentStopUnit);
+  updateStopUnitChrome();
+  const input = document.getElementById("stopDurationInput");
+  if (!input) return;
+  const spec = STOP_UNITS[currentStopUnit];
+  input.min = spec.min;
+  input.max = spec.max;
+  input.step = spec.step;
+  input.value = msToStopUnitValue(ms, currentStopUnit);
+  updateTimerBadge();
+}
+
+function setStopUnit(unit) {
+  // Convert what is on screen BEFORE the unit changes, or the displayed number
+  // would be re-interpreted (10 sec would silently become 10 min).
+  const ms = readStopDurationMs();
+  currentStopUnit = normalizeStopUnit(unit);
+  updateStopDurationDisplay(ms);
+  if (stopUnitMenu) stopUnitMenu.classList.add("hidden");
+  saveConfigThrottled();
+}
+
+// ── Preset-modal copy of the same pair ───────────────────────
+// The preset editor edits a DRAFT (persisted only into presets[]), so it needs
+// its own badge/input state. It still stores milliseconds, exactly like the
+// live engine field, so applying a preset is a straight copy.
+let presetStopUnit = "min";
+// The armed trigger inside the preset DRAFT. Declared next to the draft's unit
+// because the modal owns its own copy of the whole pair (nothing is written to
+// the engine until the preset is applied).
+let presetStopMode = "none";
+
+function presetStopSpec() {
+  return STOP_UNITS[normalizeStopUnit(presetStopUnit)];
+}
+
+function updatePresetStopUnitChrome() {
+  presetStopUnit = normalizeStopUnit(presetStopUnit);
+  if (presetStopUnitBadge) presetStopUnitBadge.textContent = stopUnitShort(presetStopUnit);
+  if (presetStopUnitMenu) {
+    presetStopUnitMenu.querySelectorAll(".unit-popover-item").forEach(btn => {
+      btn.classList.toggle("active", btn.getAttribute("data-unit") === presetStopUnit);
+    });
+  }
+  const input = document.getElementById("presetStopDuration");
+  if (input) {
+    const spec = presetStopSpec();
+    input.min = spec.min;
+    input.max = spec.max;
+    input.step = spec.step;
+  }
+}
+
+function setPresetStopUnit(unit) {
+  const input = document.getElementById("presetStopDuration");
+  const prevMs = Math.round(Math.max(0, parseFloat(input?.value) || 0) * stopUnitFactor(presetStopUnit));
+  presetStopUnit = normalizeStopUnit(unit);
+  updatePresetStopUnitChrome();
+  if (input) input.value = msToStopUnitValue(prevMs, presetStopUnit);
+  if (presetStopUnitMenu) presetStopUnitMenu.classList.add("hidden");
+}
+
+function showPresetStopDurationMs(ms) {
+  updatePresetStopUnitChrome();
+  const input = document.getElementById("presetStopDuration");
+  if (input) input.value = msToStopUnitValue(ms, presetStopUnit);
+}
+
+function readPresetStopDurationMs() {
+  const input = document.getElementById("presetStopDuration");
+  const raw = parseFloat(input?.value);
+  if (!Number.isFinite(raw) || raw <= 0) return 0;
+  return Math.max(0, Math.min(STOP_DURATION_HARD_MAX_MS, Math.round(raw * stopUnitFactor(presetStopUnit))));
+}
+
+function readPresetStopTimeStr() {
+  return document.getElementById("presetStopTime")?.value || "";
+}
+
+// The modal's own copy of applyStopMode: same rule, same two rows, same
+// "dimmed but still editable" lock — a preset must not be able to describe two
+// armed timers either, because applying one copies both values to the engine.
+function applyPresetStopMode(mode) {
+  presetStopMode = normalizeStopMode(mode);
+  const lockedHint = getI18nText("auto_stop_locked_tip", {}, "Only one auto-stop runs at a time");
+  [["presetStopAfterRow", "duration"], ["presetStopAtRow", "wallclock"]].forEach(([rowId, trigger]) => {
+    const row = document.getElementById(rowId);
+    if (!row) return;
+    const locked = presetStopMode !== "none" && presetStopMode !== trigger;
+    row.classList.toggle("timer-option--locked", locked);
+    if (locked) row.title = lockedHint;
+    else row.removeAttribute("title");
+  });
+}
+
+// Re-derive the draft's trigger from what the modal currently shows, keeping the
+// field the user touched last (`hint`) armed. Shared by the two `input` handlers
+// and by the two row clicks (a click on the dimmed row arms it — there is nothing
+// to type when it already holds a value).
+function refreshPresetStopMode(hint) {
+  applyPresetStopMode(resolveStopMode(
+    hint || presetStopMode,
+    readPresetStopDurationMs() > 0,
+    !!readPresetStopTimeStr()
+  ));
+}
+
+// The modal's two fields and both rows follow the SAME one-armed-trigger rule as
+// the dashboard card: the field you type in is armed, the other row is dimmed but
+// keeps its value, and a click on the dimmed row arms it (there is nothing to type
+// when it already holds a value). The draft never touches the engine — only
+// `applyPreset` copies it, and it derives `stop_mode` at that point.
+document.getElementById("presetStopDuration")?.addEventListener("input", () => refreshPresetStopMode("duration"));
+document.getElementById("presetStopTime")?.addEventListener("input", () => refreshPresetStopMode("wallclock"));
+[["presetStopAfterRow", "duration"], ["presetStopAtRow", "wallclock"]].forEach(([rowId, trigger]) => {
+  document.getElementById(rowId)?.addEventListener("click", () => refreshPresetStopMode(trigger));
+});
 
 function setSpeedUnit(unit) {
   currentSpeedUnit = unit;
@@ -685,10 +1041,63 @@ function wireUnitSelectors() {
     });
   }
 
+  if (stopUnitBtn && stopUnitMenu) {
+    stopUnitBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      stopUnitMenu.classList.toggle("hidden");
+      if (speedUnitMenu) speedUnitMenu.classList.add("hidden");
+      if (delayUnitMenu) delayUnitMenu.classList.add("hidden");
+    });
+    stopUnitMenu.querySelectorAll(".unit-popover-item").forEach(item => {
+      item.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const unit = item.getAttribute("data-unit");
+        if (unit) setStopUnit(unit);
+      });
+    });
+  }
+
+  if (presetStopUnitBtn && presetStopUnitMenu) {
+    presetStopUnitBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      presetStopUnitMenu.classList.toggle("hidden");
+      if (stopUnitMenu) stopUnitMenu.classList.add("hidden");
+      if (speedUnitMenu) speedUnitMenu.classList.add("hidden");
+      if (delayUnitMenu) delayUnitMenu.classList.add("hidden");
+    });
+    presetStopUnitMenu.querySelectorAll(".unit-popover-item").forEach(item => {
+      item.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const unit = item.getAttribute("data-unit");
+        if (unit) setPresetStopUnit(unit);
+      });
+    });
+  }
+
   document.addEventListener("click", () => {
     if (speedUnitMenu) speedUnitMenu.classList.add("hidden");
     if (delayUnitMenu) delayUnitMenu.classList.add("hidden");
+    if (stopUnitMenu) stopUnitMenu.classList.add("hidden");
+    if (presetStopUnitMenu) presetStopUnitMenu.classList.add("hidden");
+    if (techniqueMenu) techniqueMenu.classList.add("hidden");
   });
+
+  if (techniqueBadge && techniqueMenu) {
+    techniqueBadge.addEventListener("click", (e) => {
+      e.stopPropagation();
+      techniqueMenu.classList.toggle("hidden");
+      if (speedUnitMenu) speedUnitMenu.classList.add("hidden");
+      if (delayUnitMenu) delayUnitMenu.classList.add("hidden");
+      if (stopUnitMenu) stopUnitMenu.classList.add("hidden");
+    });
+    techniqueMenu.querySelectorAll(".unit-popover-item").forEach(item => {
+      item.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const mode = item.getAttribute("data-technique");
+        if (mode) setTechnique(mode);
+      });
+    });
+  }
 }
 wireUnitSelectors();
 
@@ -908,6 +1317,8 @@ function updateUiFromConfig(config) {
   setModeDisplay(config.active_mode || "autoclicker", true);
 
   updateSpeedDisplay(config.engine.target_cps);
+  updateTechniqueBadge(config.engine.target_cps);
+  updateOutlierDisplay(config.engine.outlier_prob ?? 0.02);
 
   if (randomRange) randomRange.value = config.engine.jitter_percent;
   if (randomInput) randomInput.value = config.engine.jitter_percent;
@@ -933,14 +1344,19 @@ function updateUiFromConfig(config) {
   if (holdIntervalInput) holdIntervalInput.value = config.engine.hold_interval_ms ?? 1000;
   if (repeatIntervalInput) repeatIntervalInput.value = config.engine.repeat_interval_ms ?? 1000;
 
-  const stopDurationInput = document.getElementById("stopDurationInput");
   const stopTimeInput = document.getElementById("stopTimeInput");
 
-  // start_delay_ms is rendered by updateStartDelayDisplay(), which queries the
-  // field itself and also switches its min/max/step per the active delay unit.
+  // start_delay_ms and stop_duration_ms are rendered by their unit-aware display
+  // helpers, which query the field themselves and also switch its min/max/step
+  // to the active unit's range.
   updateStartDelayDisplay(config.engine.start_delay_ms || 0);
-  if (stopDurationInput) stopDurationInput.value = config.engine.stop_duration_min || 0;
+  currentStopUnit = normalizeStopUnit(config.engine.stop_duration_unit);
+  updateStopDurationDisplay(configuredStopDurationMs(config.engine));
   if (stopTimeInput) stopTimeInput.value = config.engine.stop_time_str || "";
+  // Restore which trigger is armed (and thus which row is greyed). A legacy
+  // config has no `stop_mode`, so the values decide — same fallback as
+  // `config::resolve_stop_mode`, or an upgrade would disarm a live timer.
+  applyStopMode(deriveStopMode(configuredStopModeHint(config.engine)));
 
   // Call AFTER repeatCountInput is set so visibility logic reads correct value
   updateSubSettingsVisibility();
@@ -988,7 +1404,13 @@ function updateUiFromConfig(config) {
   }
   if (startMinimizedCheckbox) startMinimizedCheckbox.checked = !!config.ui.start_minimized;
   if (autostartCheckbox) autostartCheckbox.checked = !!config.ui.autostart;
-  if (minimizeToTrayCheckbox) minimizeToTrayCheckbox.checked = config.ui.minimize_to_tray !== false;
+  // The master mirrors the PRIMARY flag (close → tray); deep sleep is written
+  // with it on the next explicit change, so a config that still says
+  // "minimize ON / deep sleep OFF" keeps behaving as before until then.
+  if (trayLifeCheckbox) {
+    trayLifeCheckbox.checked = config.ui.minimize_to_tray !== false;
+    trayLifeInitial = trayLifeCheckbox.checked;
+  }
   if (notificationsCheckbox) notificationsCheckbox.checked = config.ui.show_notifications !== false;
   if (pauseFocusLossCheckbox) pauseFocusLossCheckbox.checked = !!config.ui.pause_on_focus_loss;
   if (rememberPosCheckbox) rememberPosCheckbox.checked = config.ui.remember_window_position !== false;
@@ -1012,6 +1434,8 @@ function updateUiFromConfig(config) {
   updateSwatchActiveState(config.ui.accent_color || "#06b6d4");
 
   renderPresetsGrid();
+  // Config is real from here on: a status payload may now safely trigger a save.
+  configHydrated = true;
 }
 
 function setRadioChecked(name, val) {
@@ -1291,6 +1715,13 @@ async function loadConfig() {
       if (Array.isArray(notices) && notices.length) showDeadboltQueue(notices);
     } catch { /* notices are best-effort, never block boot */ }
     try { startFileToastPolling(); } catch (_) {}
+    // Backend truth, once per page load: the page owns NO clicker state, and a
+    // page built by a deep-sleep rebuild (or a watchdog reload) may appear while
+    // the clicker is already running — started from the tray menu, or by a
+    // hotkey — with no telemetry having ever reached it. Without this it would
+    // sit on `isRunning = false` until the next frame, or for good if the run
+    // ended while the WebView did not exist.
+    try { applyStatusUpdate(await invoke("get_status")); } catch { /* best-effort: never block boot */ }
   } catch (err) {
     console.error("Failed to load app config:", err);
   }
@@ -1495,21 +1926,39 @@ async function saveConfig() {
         currentConfig.engine.target_cps = Math.max(0.1, Math.min(160, parseFloat(cpsInput?.value) || 29.0));
       }
       currentConfig.engine.jitter_percent = parseFloat(randomInput?.value) || 0.0;
+      currentConfig.engine.outlier_prob = outlierPctToProb(outlierInput?.value);
+      currentConfig.engine.technique = normalizeTechnique(currentConfig.engine.technique);
       currentConfig.engine.click_limit = safeInt(limitInput?.value, 0);
       currentConfig.engine.gui_lock_ms = safeInt(guiLockDelayInput?.value, 1500) || 1500;
       currentConfig.engine.hotkey_debounce_ms = safeInt(document.getElementById("debounceSlider")?.value, 80);
       currentConfig.engine.jitter_radius_px = safeInt(jitterRadiusInput?.value, 0);
 
       const startDelayInput = document.getElementById("startDelayInput");
-      const stopDurationInput = document.getElementById("stopDurationInput");
       const stopTimeInput = document.getElementById("stopTimeInput");
 
       if (startDelayInput) {
         const dVal = Math.max(0, safeInt(startDelayInput.value, 0));
         currentConfig.engine.start_delay_ms = currentDelayUnit === "ms" ? dVal : dVal * 1000;
       }
-      if (stopDurationInput) currentConfig.engine.stop_duration_min = safeInt(stopDurationInput.value, 0);
+      // Milliseconds are the storage format; the unit is persisted next to the
+      // value so "1.5 sec" is not re-read as "1.5 min" after a restart.
+      currentConfig.engine.stop_duration_ms = readStopDurationMs();
+      currentConfig.engine.stop_duration_unit = normalizeStopUnit(currentStopUnit);
+      // The legacy whole-minutes field is retired — zero it on every save, or a
+      // stale value would be resurrected by the migration fallback.
+      currentConfig.engine.stop_duration_min = 0;
       if (stopTimeInput) currentConfig.engine.stop_time_str = stopTimeInput.value || "";
+      // WHICH trigger is armed. Both values above are persisted ON PURPOSE (so
+      // switching back restores what the user typed), but only the armed one can
+      // end a run — `scheduler.rs` snapshots this mode once per run. Resolved
+      // from the trigger the user touched last (`currentStopMode`), so a save can
+      // never arm the other field behind the UI's back.
+      currentStopMode = applyStopMode(resolveStopMode(
+        currentStopMode,
+        currentConfig.engine.stop_duration_ms > 0,
+        !!currentConfig.engine.stop_time_str
+      ));
+      currentConfig.engine.stop_mode = currentStopMode;
 
       if (clickTypeSelect) currentConfig.engine.button = clickTypeSelect.value;
       currentConfig.engine.click_type = getRadioChecked("clickMode", "single");
@@ -1537,7 +1986,15 @@ async function saveConfig() {
       if (alwaysOnTopCheckbox) currentConfig.ui.always_on_top = alwaysOnTopCheckbox.checked;
       if (startMinimizedCheckbox) currentConfig.ui.start_minimized = startMinimizedCheckbox.checked;
       if (autostartCheckbox) currentConfig.ui.autostart = autostartCheckbox.checked;
-      if (minimizeToTrayCheckbox) currentConfig.ui.minimize_to_tray = minimizeToTrayCheckbox.checked;
+      if (trayLifeCheckbox) {
+        currentConfig.ui.minimize_to_tray = trayLifeCheckbox.checked;
+        // Deep sleep follows the master — but only once the user moved it.
+        // Otherwise an unrelated save would silently switch deep sleep on for a
+        // config that deliberately had it off.
+        if (trayLifeInitial === null || trayLifeCheckbox.checked !== trayLifeInitial) {
+          currentConfig.ui.deep_sleep_to_tray = trayLifeCheckbox.checked;
+        }
+      }
       if (notificationsCheckbox) currentConfig.ui.show_notifications = notificationsCheckbox.checked;
       if (pauseFocusLossCheckbox) currentConfig.ui.pause_on_focus_loss = pauseFocusLossCheckbox.checked;
       if (rememberPosCheckbox) currentConfig.ui.remember_window_position = rememberPosCheckbox.checked;
@@ -1579,11 +2036,13 @@ if (cpsRange) cpsRange.addEventListener("input", (e) => {
     const targetCps = Math.max(0.1, Math.min(160, 1000.0 / safeMs));
     if (displayCps) displayCps.textContent = targetCps.toFixed(1);
     if (currentConfig?.engine) currentConfig.engine.target_cps = targetCps;
+    updateTechniqueBadge(targetCps);
   } else {
     const safeVal = isNaN(val) ? 29 : Math.max(0.1, Math.min(160, val));
     if (cpsInput) cpsInput.value = safeVal;
     if (displayCps) displayCps.textContent = safeVal.toFixed(1);
     if (currentConfig?.engine) currentConfig.engine.target_cps = safeVal;
+    updateTechniqueBadge(safeVal);
   }
   saveConfigThrottled();
 });
@@ -1597,6 +2056,7 @@ if (cpsInput) {
       const targetCps = Math.max(0.1, Math.min(160, 1000.0 / safeMs));
       if (displayCps) displayCps.textContent = targetCps.toFixed(1);
       if (currentConfig?.engine) currentConfig.engine.target_cps = targetCps;
+      updateTechniqueBadge(targetCps);
     } else {
       if (!isNaN(val) && val > 160) {
         val = 160;
@@ -1606,6 +2066,7 @@ if (cpsInput) {
       if (cpsRange) cpsRange.value = safeVal;
       if (displayCps) displayCps.textContent = safeVal.toFixed(1);
       if (currentConfig?.engine) currentConfig.engine.target_cps = safeVal;
+      updateTechniqueBadge(safeVal);
     }
     saveConfigThrottled();
   });
@@ -1618,12 +2079,14 @@ if (cpsInput) {
       const targetCps = Math.max(0.1, Math.min(160, 1000.0 / safeMs));
       if (displayCps) displayCps.textContent = targetCps.toFixed(1);
       if (currentConfig?.engine) currentConfig.engine.target_cps = targetCps;
+      updateTechniqueBadge(targetCps);
     } else {
       const safeVal = isNaN(val) ? 29 : Math.max(0.1, Math.min(160, val));
       e.target.value = safeVal;
       if (cpsRange) cpsRange.value = safeVal;
       if (displayCps) displayCps.textContent = safeVal.toFixed(1);
       if (currentConfig?.engine) currentConfig.engine.target_cps = safeVal;
+      updateTechniqueBadge(safeVal);
     }
     saveConfig();
   });
@@ -1642,6 +2105,22 @@ if (randomInput) randomInput.addEventListener("input", (e) => {
   const safeVal = isNaN(val) ? 0 : Math.max(0, Math.min(35, val));
   if (randomRange) randomRange.value = safeVal;
   if (currentConfig?.engine) currentConfig.engine.jitter_percent = safeVal;
+  saveConfigThrottled();
+});
+
+// ── Hesitation slider + number input (Dashboard, % <-> prob) ──
+if (outlierRange) outlierRange.addEventListener("input", (e) => {
+  const val = parseFloat(e.target.value);
+  const safeVal = isNaN(val) ? 0 : Math.max(0, Math.min(10, val));
+  if (outlierInput) outlierInput.value = safeVal;
+  if (currentConfig?.engine) currentConfig.engine.outlier_prob = outlierPctToProb(safeVal);
+  saveConfigThrottled();
+});
+if (outlierInput) outlierInput.addEventListener("input", (e) => {
+  const val = parseFloat(e.target.value);
+  const safeVal = isNaN(val) ? 0 : Math.max(0, Math.min(10, val));
+  if (outlierRange) outlierRange.value = safeVal;
+  if (currentConfig?.engine) currentConfig.engine.outlier_prob = outlierPctToProb(safeVal);
   saveConfigThrottled();
 });
 
@@ -1829,15 +2308,22 @@ function codeToPhysicalKey(code, key) {
   return key ? key.toUpperCase() : code;
 }
 
+const mouseButtonToKey = (btnNum) => {
+  if (btnNum === 3) return "Mouse4";
+  if (btnNum === 4) return "Mouse5";
+  if (btnNum === 1) return "Mouse3";
+  return null;
+};
+
 function setupHotkeyRecorder(btn, targetKey) {
   if (!btn) return;
   btn.addEventListener("click", () => {
     if (activeRecordingBtn) return;
-    dbg("Hotkey recorder STARTED for targetKey:", targetKey);
+    dbg("Hotkey recorder STARTED for targetKey:", typeof targetKey === "string" ? targetKey : "custom");
     activeRecordingBtn = btn;
     btn.classList.add("recording");
-    const labelEl = btn.querySelector("span:last-child");
-    labelEl.textContent = "Press key...";
+    const labelEl = btn.querySelector("span:last-child") || btn;
+    labelEl.textContent = getI18nText("preset_hotkey_press", {}, "Press key or Mouse 4 / 5...");
 
     // Array of { key: string, pressedAt: number, releasedAt: number | null }
     const keyEvents = [];
@@ -1919,13 +2405,77 @@ function setupHotkeyRecorder(btn, targetKey) {
       }
     };
 
+    const handleMouseDown = (e) => {
+      const mouseKey = mouseButtonToKey(e.button);
+      if (!mouseKey) return;
+      e.preventDefault();
+      e.stopPropagation();
+
+      const now = Date.now();
+      cleanExpiredKeys(now);
+
+      let existing = keyEvents.find(k => k.key === mouseKey);
+      if (!existing) {
+        keyEvents.push({ key: mouseKey, pressedAt: now, releasedAt: null });
+      } else {
+        existing.releasedAt = null;
+      }
+
+      const bindingStr = getBindingString();
+      labelEl.textContent = bindingStr || "Press key...";
+      dbg("Hotkey mousedown:", mouseKey, "current sequence:", bindingStr);
+
+      if (finishTimeout) clearTimeout(finishTimeout);
+      finishTimeout = setTimeout(() => {
+        finalizeRecording(bindingStr);
+      }, 400);
+    };
+
+    const handleMouseUp = (e) => {
+      const mouseKey = mouseButtonToKey(e.button);
+      if (!mouseKey) return;
+      e.preventDefault();
+      e.stopPropagation();
+
+      const now = Date.now();
+      let existing = keyEvents.find(k => k.key === mouseKey);
+      if (existing) {
+        existing.releasedAt = now;
+      }
+
+      cleanExpiredKeys(now);
+
+      if (keyEvents.length > 0) {
+        if (finishTimeout) clearTimeout(finishTimeout);
+        finishTimeout = setTimeout(() => {
+          cleanExpiredKeys(Date.now());
+          const bindingStr = getBindingString();
+          finalizeRecording(bindingStr);
+        }, isSmartRecord ? 200 : 100);
+      }
+    };
+
+    const cleanupListeners = () => {
+      btn.classList.remove("recording");
+      activeRecordingBtn = null;
+      window.removeEventListener("keydown", handleKeyDown, true);
+      window.removeEventListener("keyup", handleKeyUp, true);
+      window.removeEventListener("mousedown", handleMouseDown, true);
+      window.removeEventListener("mouseup", handleMouseUp, true);
+    };
+
     function finalizeRecording(bindingStr) {
       if (!bindingStr) {
-        labelEl.textContent = currentConfig.hotkeys?.[targetKey] || "R / K";
-        btn.classList.remove("recording");
-        activeRecordingBtn = null;
-        window.removeEventListener("keydown", handleKeyDown, true);
-        window.removeEventListener("keyup", handleKeyUp, true);
+        if (typeof targetKey === "string") {
+          labelEl.textContent = currentConfig.hotkeys?.[targetKey] || "R / K";
+        }
+        cleanupListeners();
+        return;
+      }
+      if (typeof targetKey === "function") {
+        targetKey(bindingStr);
+        labelEl.textContent = bindingStr;
+        cleanupListeners();
         return;
       }
       if (targetKey === "toggle") {
@@ -1949,15 +2499,14 @@ function setupHotkeyRecorder(btn, targetKey) {
         if (recordMacroHotkeyLabel) recordMacroHotkeyLabel.textContent = bindingStr;
       }
       labelEl.textContent = bindingStr;
-      btn.classList.remove("recording");
-      activeRecordingBtn = null;
-      window.removeEventListener("keydown", handleKeyDown, true);
-      window.removeEventListener("keyup", handleKeyUp, true);
+      cleanupListeners();
       saveConfig();
     }
 
     window.addEventListener("keydown", handleKeyDown, true);
     window.addEventListener("keyup", handleKeyUp, true);
+    window.addEventListener("mousedown", handleMouseDown, true);
+    window.addEventListener("mouseup", handleMouseUp, true);
   });
 }
 
@@ -2059,10 +2608,52 @@ listen("app-profile-activate", async (event) => {
   if (!presetId) return;
   await applyPreset(presetId);
 });
+
+// Direct preset hotkey activation / preemption from Rust backend
+let currentRunningPresetId = null;
+
+listen("preset-activated", async (event) => {
+  const presetId = String(event.payload || "");
+  if (!presetId) return;
+  currentRunningPresetId = presetId;
+  renderPresetsGrid();
+  await applyPreset(presetId);
+});
+
+// Prevent WebView2 from navigating back/forward on mouse 4 / 5 side buttons
+window.addEventListener("mouseup", (e) => {
+  if (e.button === 3 || e.button === 4) {
+    e.preventDefault();
+  }
+});
+
 setupHotkeyRecorder(emergencyRecordBtn, "emergency_stop");
 setupHotkeyRecorder(speedUpRecordBtn, "speed_up");
 setupHotkeyRecorder(slowDownRecordBtn, "slow_down");
 setupHotkeyRecorder(pickPosRecordBtn, "capture_pos");
+
+// ── INPUT DIAGNOSTICS BUTTON ─────────────────────────────────
+// The keyboard hook records its decisions in memory (file I/O on that thread is
+// forbidden), so without this the log cannot answer "why did my hotkey do
+// nothing". `warn` level on the Rust side → visible in release builds too.
+if (dumpInputDiagBtn) {
+  dumpInputDiagBtn.addEventListener("click", async () => {
+    try {
+      const n = await invoke("dump_input_diagnostics");
+      const lines = Number(n) || 0;
+      showToast(
+        getI18nText(
+          "diag_dump_done",
+          { n: lines },
+          `Diagnostics written: ${lines} line(s) — see the log file`
+        ),
+        "info"
+      );
+    } catch (err) {
+      dbg("dump_input_diagnostics failed:", err);
+    }
+  });
+}
 
 // ── OPEN CONFIG FOLDER BUTTON ────────────────────────────────
 if (openConfigFolderBtn) {
@@ -2080,6 +2671,27 @@ if (autostartCheckbox) {
     catch (err) { console.error("Failed to set Windows autostart:", err); }
   });
 }
+
+// ── ADMIN RIGHTS: SAY THAT A RESTART IS NEEDED ───────────────
+// The checkbox writes the Windows compatibility flag for the executable; it
+// cannot elevate the running process (UAC has no "become admin" call). Without
+// this toast the user flips it, sees UIPI still blocking, and calls it broken.
+{
+  const alwaysAdminCb = document.getElementById("alwaysRunAsAdminCheckbox");
+  if (alwaysAdminCb) {
+    alwaysAdminCb.addEventListener("change", () => {
+      if (!alwaysAdminCb.checked) return;
+      showToast(
+        getI18nText(
+          "admin_restart_required",
+          {},
+          "Restart required: administrator rights apply after the next launch"
+        ),
+        "warn"
+      );
+    });
+  }
+}
 if (alwaysOnTopCheckbox) {
   alwaysOnTopCheckbox.addEventListener("change", () => {
     applyAlwaysOnTop(alwaysOnTopCheckbox.checked);
@@ -2087,7 +2699,11 @@ if (alwaysOnTopCheckbox) {
   });
 }
 if (startMinimizedCheckbox) startMinimizedCheckbox.addEventListener("change", saveConfig);
-if (minimizeToTrayCheckbox) minimizeToTrayCheckbox.addEventListener("change", saveConfig);
+if (trayLifeCheckbox) trayLifeCheckbox.addEventListener("change", () => {
+  // Touching the master is the explicit "set both flags together" intent.
+  trayLifeInitial = null;
+  saveConfig();
+});
 if (notificationsCheckbox) notificationsCheckbox.addEventListener("change", saveConfig);
 if (pauseFocusLossCheckbox) pauseFocusLossCheckbox.addEventListener("change", saveConfig);
 if (rememberPosCheckbox) rememberPosCheckbox.addEventListener("change", saveConfig);
@@ -2116,6 +2732,15 @@ function updateSwatchActiveState(accentHex) {
 }
 
 // Wire language, theme & accent listeners
+// The badge label is dynamic (auto bands + pinned mode): after the engine
+// swaps the dictionary and repaints every static data-i18n node, repaint the
+// one dynamic node too — otherwise a locale switch freezes it on "single".
+window.addEventListener("nanoclick-language-changed", () => {
+  updateTechniqueBadge(currentConfig?.engine?.target_cps);
+});
+document.addEventListener("languageChanged", () => {
+  updateTechniqueBadge(currentConfig?.engine?.target_cps);
+});
 if (languageSelect) {
   languageSelect.addEventListener("change", async () => {
     const chosenLang = languageSelect.value;
@@ -2178,6 +2803,8 @@ const defaultPresetList = [
     fixed_y: 100,
     hold_duration_ms: 500,
     hold_interval_ms: 1000,
+    outlier_prob: 0.02,
+    technique: "auto",
     is_default: true
   },
   {
@@ -2195,6 +2822,8 @@ const defaultPresetList = [
     fixed_y: 100,
     hold_duration_ms: 500,
     hold_interval_ms: 1000,
+    outlier_prob: 0.02,
+    technique: "auto",
     is_default: true
   },
   {
@@ -2212,6 +2841,8 @@ const defaultPresetList = [
     fixed_y: 100,
     hold_duration_ms: 500,
     hold_interval_ms: 1000,
+    outlier_prob: 0.02,
+    technique: "auto",
     is_default: true
   },
   {
@@ -2229,6 +2860,8 @@ const defaultPresetList = [
     fixed_y: 100,
     hold_duration_ms: 500,
     hold_interval_ms: 1000,
+    outlier_prob: 0.02,
+    technique: "auto",
     is_default: true
   }
 ];
@@ -2277,9 +2910,12 @@ function renderPresetsGrid() {
     const deleteTitle = getI18nText("presets_card_btn_delete_title", {}, "Delete");
     const icon = p.icon || '🎯';
     const name = escapeHtml(p.name);
+    const isPresetRunning = currentRunningPresetId && currentRunningPresetId === p.id;
+    const hotkeyTitle = getI18nText("preset_field_hotkey", {}, "Activation Hotkey");
+    const hotkeyBadge = p.hotkey ? `<span class="preset-card-hotkey-badge" title="${hotkeyTitle}">⌨️ ${escapeHtml(p.hotkey)}</span>` : '';
     // data-action hook for delegated click handler below
     return `
-      <div class="preset-card-new" data-id="${p.id}">
+      <div class="preset-card-new ${isPresetRunning ? 'preset-card--running' : ''}" data-id="${p.id}">
         <div class="preset-card-accent"></div>
         <div class="preset-card-body">
           <div class="preset-card-top">
@@ -2287,7 +2923,10 @@ function renderPresetsGrid() {
               <span class="preset-card-emoji">${icon}</span>
               <span class="preset-card-name">${name}</span>
             </div>
-            <span class="preset-card-cps-badge">${p.target_cps} CPS</span>
+            <div class="preset-card-badges">
+              ${hotkeyBadge}
+              <span class="preset-card-cps-badge">${p.target_cps} CPS</span>
+            </div>
           </div>
           <div class="preset-card-tags">
             <span class="preset-tag">${jitterStr}</span>
@@ -2474,12 +3113,25 @@ async function applyPreset(presetId) {
       currentConfig.engine.hold_duration_ms = Number(p.hold_duration_ms) || 500;
       currentConfig.engine.hold_interval_ms = Number(p.hold_interval_ms) || 1000;
       currentConfig.engine.jitter_radius_px = Number(p.jitter_radius_px) || 0;
+      currentConfig.engine.outlier_prob = Number.isFinite(Number(p.outlier_prob)) ? Math.max(0, Math.min(0.10, Number(p.outlier_prob))) : 0.02;
+      currentConfig.engine.technique = normalizeTechnique(p.technique);
       currentConfig.engine.repeat_mode = p.repeat_mode || "unlimited";
       currentConfig.engine.repeat_count = Number(p.repeat_count) || 0;
       currentConfig.engine.repeat_interval_ms = p.repeat_interval_ms == null ? 1000 : Number(p.repeat_interval_ms);
       currentConfig.engine.start_delay_ms = Number(p.start_delay_ms) || 0;
-      currentConfig.engine.stop_duration_min = Number(p.stop_duration_min) || 0;
+      // Presets store the auto-stop in ms; a preset saved by an older build still
+      // has the whole-minutes field, so migrate it on the way in.
+      currentConfig.engine.stop_duration_ms = Number(p.stop_duration_ms)
+        || Math.round((Number(p.stop_duration_min) || 0) * 60000);
       currentConfig.engine.stop_time_str = p.stop_time_str || "";
+      // A preset carries both auto-stop values; the armed trigger comes from the
+      // preset and is re-derived from the values only when the preset predates
+      // the field — the backend then reads exactly the trigger the card shows.
+      currentConfig.engine.stop_mode = presetStopModeFor(
+        p.stop_mode,
+        currentConfig.engine.stop_duration_ms,
+        currentConfig.engine.stop_time_str
+      );
       // Multi-point sequence: copy onto engine so the scheduler picks it up.
       currentConfig.engine.sequence_points = Array.isArray(p.points)
         ? JSON.parse(JSON.stringify(p.points))
@@ -2724,7 +3376,6 @@ function openPresetEditModal(p = null) {
   const fixedYInput = document.getElementById("presetFixedY");
   const clickLimitInput = document.getElementById("presetClickLimit");
   const startDelayInput = document.getElementById("presetStartDelaySec");
-  const stopDurationInput = document.getElementById("presetStopDurationMin");
   const stopTimeInput = document.getElementById("presetStopTime");
   const repeatModeSelect = document.getElementById("presetRepeatModeSelect");
   const presetRepeatCountEl = document.getElementById("presetRepeatCount");
@@ -2733,6 +3384,14 @@ function openPresetEditModal(p = null) {
   const modalTitle = document.getElementById("presetModalTitle");
 
   renderPresetHotkeySlots();
+  const hotkeyInput = document.getElementById("presetHotkeyInput");
+  const hotkeyLabel = document.getElementById("presetHotkeyLabel");
+  const currentHotkey = p ? (p.hotkey || "") : "";
+  if (hotkeyInput) hotkeyInput.value = currentHotkey;
+  if (hotkeyLabel) {
+    hotkeyLabel.textContent = currentHotkey || getI18nText("preset_hotkey_none", {}, "None");
+  }
+
   if (p) {
     if (modalTitle) modalTitle.textContent = "✏️ Edit Preset";
     if (editIdInput) editIdInput.value = p.id;
@@ -2755,7 +3414,10 @@ function openPresetEditModal(p = null) {
     if (fixedYInput) fixedYInput.value = p.fixed_y ?? 100;
     if (clickLimitInput) clickLimitInput.value = p.click_limit || 0;
     if (startDelayInput) startDelayInput.value = Math.round((p.start_delay_ms || 0) / 1000);
-    if (stopDurationInput) stopDurationInput.value = p.stop_duration_min || 0;
+    // The time limit is unit-aware: the preset keeps ms, the badge keeps the unit.
+    showPresetStopDurationMs(
+      Number(p.stop_duration_ms) || Math.round((Number(p.stop_duration_min) || 0) * 60000)
+    );
     if (stopTimeInput) stopTimeInput.value = p.stop_time_str || "";
     if (repeatModeSelect) repeatModeSelect.value = p.repeat_mode || "unlimited";
     if (presetRepeatCountEl) presetRepeatCountEl.value = p.repeat_count || 0;
@@ -2782,12 +3444,18 @@ function openPresetEditModal(p = null) {
     if (fixedYInput) fixedYInput.value = currentConfig.engine.fixed_y ?? 100;
     if (clickLimitInput) clickLimitInput.value = currentConfig.engine.click_limit || 0;
     if (startDelayInput) startDelayInput.value = Math.round((currentConfig.engine.start_delay_ms || 0) / 1000);
-    if (stopDurationInput) stopDurationInput.value = currentConfig.engine.stop_duration_min || 0;
+    showPresetStopDurationMs(configuredStopDurationMs(currentConfig.engine));
     if (stopTimeInput) stopTimeInput.value = currentConfig.engine.stop_time_str || "";
     if (repeatModeSelect) repeatModeSelect.value = currentConfig.engine.repeat_mode || "unlimited";
     if (presetRepeatCountEl) presetRepeatCountEl.value = currentConfig.engine.repeat_count || 0;
     if (presetRepeatIntervalEl) presetRepeatIntervalEl.value = currentConfig.engine.repeat_interval_ms ?? 1000;
   }
+
+  // The draft's armed trigger follows the values just rendered (the hint is
+  // "none", i.e. "let the values decide"), so the modal opens in exactly the
+  // state `applyPreset` will copy onto the engine. Without this the rows keep the
+  // lock of the PREVIOUS modal session.
+  refreshPresetStopMode("none");
 
   if (p && p.points && Array.isArray(p.points)) {
     window.SequenceEditor?.setPoints(p.points);
@@ -2807,6 +3475,7 @@ function savePresetFromModal() {
   const editId = document.getElementById("presetEditId")?.value;
   const name = document.getElementById("presetNameInput")?.value?.trim() || "Preset";
   const icon = document.getElementById("presetIconSelect")?.value || "⚡";
+  const hotkey = document.getElementById("presetHotkeyInput")?.value?.trim() || "";
   const cps = parseFloat(document.getElementById("presetCpsRange")?.value) || 29;
   const jitter = parseFloat(document.getElementById("presetJitterRange")?.value) || 0;
   const clickType = document.getElementById("presetClickTypeSelect")?.value || "single";
@@ -2818,11 +3487,14 @@ function savePresetFromModal() {
   const fixedY = parseInt(document.getElementById("presetFixedY")?.value, 10) || 100;
   const clickLimit = parseInt(document.getElementById("presetClickLimit")?.value, 10) || 0;
   const startDelaySec = Math.max(0, parseInt(document.getElementById("presetStartDelaySec")?.value, 10) || 0);
-  const stopDurationMin = Math.max(0, parseInt(document.getElementById("presetStopDurationMin")?.value, 10) || 0);
+  const stopDurationMs = readPresetStopDurationMs();
   const stopTimeStr = document.getElementById("presetStopTime")?.value || "";
   const repeatMode = document.getElementById("presetRepeatModeSelect")?.value || "unlimited";
   const repeatCount = Math.max(0, parseInt(document.getElementById("presetRepeatCount")?.value, 10) || 0);
   const repeatIntervalMs = Math.max(0, parseInt(document.getElementById("presetRepeatInterval")?.value, 10) || 0);
+  // Which of the preset's two timers is armed. Stored next to the values so a
+  // preset describes ONE trigger, exactly like `engine.stop_mode` does.
+  const presetMode = presetStopModeFor(presetStopMode, stopDurationMs, stopTimeStr);
 
   ensurePresetsExist();
 
@@ -2834,6 +3506,7 @@ function savePresetFromModal() {
         ...currentConfig.presets[idx],
         name,
         icon,
+        hotkey,
         target_cps: cps,
         jitter_percent: jitter,
         click_type: clickType,
@@ -2848,8 +3521,11 @@ function savePresetFromModal() {
         repeat_count: repeatCount,
         repeat_interval_ms: repeatIntervalMs,
         start_delay_ms: startDelaySec * 1000,
-        stop_duration_min: stopDurationMin,
+        stop_duration_ms: stopDurationMs,
         stop_time_str: stopTimeStr,
+        stop_mode: presetMode,
+        outlier_prob: currentConfig.engine.outlier_prob ?? 0.02,
+        technique: normalizeTechnique(currentConfig.engine.technique),
         points,
       };
     }
@@ -2861,9 +3537,12 @@ function savePresetFromModal() {
       name,
       description: `${cps} CPS | ${clickType}`,
       icon,
+      hotkey,
       target_cps: cps,
       jitter_percent: jitter,
       jitter_radius_px: 0,
+      outlier_prob: currentConfig.engine.outlier_prob ?? 0.02,
+      technique: normalizeTechnique(currentConfig.engine.technique),
       click_limit: clickLimit,
       button,
       click_type: clickType,
@@ -2874,8 +3553,9 @@ function savePresetFromModal() {
       repeat_count: repeatCount,
       repeat_interval_ms: repeatIntervalMs,
       start_delay_ms: startDelaySec * 1000,
-      stop_duration_min: stopDurationMin,
+      stop_duration_ms: stopDurationMs,
       stop_time_str: stopTimeStr,
+      stop_mode: presetMode,
       hold_duration_ms: holdDurationMs,
       hold_interval_ms: holdIntervalMs,
       is_default: false,
@@ -2942,11 +3622,13 @@ function setupPresetListeners() {
       fixed_y: currentConfig.engine.fixed_y,
       hold_duration_ms: currentConfig.engine.hold_duration_ms,
       hold_interval_ms: currentConfig.engine.hold_interval_ms,
+      outlier_prob: currentConfig.engine.outlier_prob ?? 0.02,
+      technique: normalizeTechnique(currentConfig.engine.technique),
       repeat_mode: currentConfig.engine.repeat_mode,
       repeat_count: currentConfig.engine.repeat_count,
       repeat_interval_ms: currentConfig.engine.repeat_interval_ms,
       start_delay_ms: currentConfig.engine.start_delay_ms,
-      stop_duration_min: currentConfig.engine.stop_duration_min,
+      stop_duration_ms: configuredStopDurationMs(currentConfig.engine),
       stop_time_str: currentConfig.engine.stop_time_str,
       points: Array.isArray(currentConfig.engine.sequence_points) ? JSON.parse(JSON.stringify(currentConfig.engine.sequence_points)) : []
     });
@@ -2957,6 +3639,28 @@ function setupPresetListeners() {
   });
   bindPresetControl("inspectCloseBtn", "click", () => {
     document.getElementById("presetInspectModal")?.classList.add("hidden");
+  });
+
+  const presetHotkeyBtn = document.getElementById("presetHotkeyBtn");
+  if (presetHotkeyBtn && !presetHotkeyBtn.dataset.presetBound) {
+    presetHotkeyBtn.dataset.presetBound = "1";
+    setupHotkeyRecorder(presetHotkeyBtn, (bindingStr) => {
+      const hotkeyInput = document.getElementById("presetHotkeyInput");
+      const label = document.getElementById("presetHotkeyLabel");
+      if (hotkeyInput) hotkeyInput.value = bindingStr || "";
+      if (label) {
+        label.textContent = bindingStr || getI18nText("preset_hotkey_none", {}, "None");
+      }
+    });
+  }
+
+  bindPresetControl("presetHotkeyClearBtn", "click", () => {
+    const hotkeyInput = document.getElementById("presetHotkeyInput");
+    const label = document.getElementById("presetHotkeyLabel");
+    if (hotkeyInput) hotkeyInput.value = "";
+    if (label) {
+      label.textContent = getI18nText("preset_hotkey_none", {}, "None");
+    }
   });
 
   // --- Escape key: close any open preset modal ---
@@ -3029,12 +3733,27 @@ function setupPresetListeners() {
             fixed_y: Number.isFinite(Number(p.fixed_y)) ? Number(p.fixed_y) : 100,
             hold_duration_ms: Number(p.hold_duration_ms) || 500,
             hold_interval_ms: Number(p.hold_interval_ms) || 1000,
+            outlier_prob: Number.isFinite(Number(p.outlier_prob)) ? Math.max(0, Math.min(0.10, Number(p.outlier_prob))) : 0.02,
+            technique: normalizeTechnique(p.technique),
             repeat_mode: p.repeat_mode || "unlimited",
             repeat_count: Math.max(0, parseInt(p.repeat_count, 10) || 0),
             repeat_interval_ms: Math.max(0, Number(p.repeat_interval_ms) || 1000),
             start_delay_ms: Math.max(0, Number(p.start_delay_ms) || 0),
-            stop_duration_min: Math.max(0, parseInt(p.stop_duration_min, 10) || 0),
+            // ms is the storage format; a bundle exported by an older build
+            // carries whole minutes instead, so migrate it here (mirrors
+            // `config::resolve_stop_duration_ms`).
+            stop_duration_ms: Math.max(
+              0,
+              Number(p.stop_duration_ms) || Math.round((Number(p.stop_duration_min) || 0) * 60000)
+            ),
             stop_time_str: p.stop_time_str || "",
+            // Same rule as the editor: an explicit mode travels with the bundle,
+            // otherwise it is derived from the two values (duration first).
+            stop_mode: presetStopModeFor(
+              p.stop_mode,
+              Number(p.stop_duration_ms) || Math.round((Number(p.stop_duration_min) || 0) * 60000),
+              p.stop_time_str || ""
+            ),
             is_default: false
           }));
 
@@ -3055,21 +3774,58 @@ function setupPresetListeners() {
 
 setupPresetListeners();
 
-// ── TIMER ACTIVE BADGE ──────────────────────────────────────
-function updateTimerBadge() {
+// ── ARMED-TRIGGER CHROME (badge + which row is locked) ──────
+// Single place that repaints it — the page equivalent of `applyStatusUpdate` —
+// so no other path toggles these classes itself. The ACTIVE badge means "a
+// trigger is really armed", not "something is typed somewhere": with both
+// fields empty the badge is hidden and both rows stay normal, which is exactly
+// how the backend reads `stop_mode: "none"`.
+function applyStopMode(mode) {
+  currentStopMode = normalizeStopMode(mode);
+  const lockedHint = getI18nText("auto_stop_locked_tip", {}, "Only one auto-stop runs at a time");
+  [["stopAfterRow", "duration"], ["stopAtRow", "wallclock"]].forEach(([rowId, trigger]) => {
+    const row = document.getElementById(rowId);
+    if (!row) return;
+    const locked = currentStopMode !== "none" && currentStopMode !== trigger;
+    row.classList.toggle("timer-option--locked", locked);
+    // The value stays visible (that is the point of keeping both), so the row
+    // must say WHY it is grey instead of looking broken.
+    if (locked) row.title = lockedHint;
+    else row.removeAttribute("title");
+  });
   const badge = document.getElementById("timerActiveBadge");
-  if (!badge) return;
-  const dur = parseInt(document.getElementById("stopDurationInput")?.value, 10) || 0;
-  const timeVal = document.getElementById("stopTimeInput")?.value || "";
-  if (dur > 0 || timeVal) {
-    badge.classList.remove("hidden");
-  } else {
-    badge.classList.add("hidden");
-  }
+  if (badge) badge.classList.toggle("hidden", currentStopMode === "none");
 }
 
-document.getElementById("stopDurationInput")?.addEventListener("input", updateTimerBadge);
-document.getElementById("stopTimeInput")?.addEventListener("input", updateTimerBadge);
+// `lastEdited` is the input the user just typed in. Without it the armed
+// trigger is the hint, so a plain repaint (a unit switch, a config refresh) can
+// never steal the trigger away from the field the user is working in.
+function updateTimerBadge(lastEdited) {
+  applyStopMode(deriveStopMode(lastEdited));
+}
+
+document.getElementById("stopDurationInput")?.addEventListener("input", () => {
+  // Typing here arms "Stop after"; "Stop at" is greyed but keeps its value, so
+  // switching back is one edit and nothing is lost.
+  updateTimerBadge("duration");
+  saveConfigThrottled();
+});
+document.getElementById("stopTimeInput")?.addEventListener("input", () => {
+  updateTimerBadge("wallclock");
+  saveConfigThrottled();
+});
+// Clicking a DIMMED row re-arms it when it already holds a value: there is
+// nothing left to type, so the click itself is the decision ("only one of the
+// two runs at a time"). Clicking the armed row is a harmless repaint. Same
+// wiring as the preset modal, and it only rewrites `stop_mode` — both values
+// stay in the config, so switching never destroys what the user typed.
+[["stopAfterRow", "duration"], ["stopAtRow", "wallclock"]].forEach(([rowId, trigger]) => {
+  document.getElementById(rowId)?.addEventListener("click", () => {
+    updateTimerBadge(trigger);
+    saveConfigThrottled();
+  });
+});
+// Paint the empty state before the config arrives (both rows normal, no badge).
 updateTimerBadge();
 
 document.getElementById("presetCpsRange")?.addEventListener("input", (e) => {
@@ -3095,14 +3851,14 @@ document.getElementById("presetPositionSelect")?.addEventListener("change", (e) 
 });
 
 // ── ADVANCED TIMERS LOGIC ───────────────────────────────────
+// The page owns exactly ONE timer here: the Start countdown (`startDelayTimer`).
+// The auto-stop timers moved to the backend (scheduler.rs) — see the
+// STOP_UNITS banner above for the race that made the frontend copies
+// actively harmful.
 let startDelayTimer = null;
-let stopDurationTimer = null;
-let stopTimeTimer = null;
 
 function clearAutoTimers() {
   if (startDelayTimer) { clearInterval(startDelayTimer); startDelayTimer = null; }
-  if (stopDurationTimer) { clearTimeout(stopDurationTimer); stopDurationTimer = null; }
-  if (stopTimeTimer) { clearTimeout(stopTimeTimer); stopTimeTimer = null; }
 }
 
 // Cancel an in-flight Start countdown (if user clicks Start, starts a 5s delay,
@@ -3151,50 +3907,25 @@ async function executeStartAutomation() {
         return "timer scheduled";
       });
 
-      // ── STEP 3: Optional stop-duration timer (auto-stop after N min) ─
-      await op.run("setup-stop-duration", () => {
-        const stopMin = parseInt(document.getElementById("stopDurationInput")?.value, 10) || 0;
-        if (stopDurationTimer) clearTimeout(stopDurationTimer);
-        if (stopMin > 0) {
-          stopDurationTimer = setTimeout(async () => {
-            const sub = stage("StopDuration");
-            await sub.run("check-still-running", () => isRunning || false);
-            const active = await invoke("toggle_autoclicker");
-            await sub.run("rust-toggle", () => `returned active=${active}`);
-            setRunningState(active);
-            sub.ok("auto-stopped after duration");
-          }, stopMin * 60 * 1000);
-          return `${stopMin} min until auto-stop`;
-        }
-        return "no stop-duration set";
-      });
-
-      // ── STEP 4: Optional stop-time timer (HH:MM wall clock) ─────────
-      await op.run("setup-stop-time", () => {
-        const stopTimeVal = document.getElementById("stopTimeInput")?.value;
-        if (!stopTimeVal) return "no stop-time set";
-        const [targetH, targetM] = stopTimeVal.split(":").map(Number);
-        const now = new Date();
-        const targetDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), targetH, targetM, 0);
-        if (targetDate <= now) targetDate.setDate(targetDate.getDate() + 1);
-        const msUntilTarget = targetDate.getTime() - now.getTime();
-
-        if (stopTimeTimer) clearTimeout(stopTimeTimer);
-        stopTimeTimer = setTimeout(async () => {
-          const sub = stage("StopTime");
-          await sub.run("check-still-running", () => isRunning || false);
-          const active = await invoke("toggle_autoclicker");
-          await sub.run("rust-toggle", () => `returned active=${active}`);
-          setRunningState(active);
-          sub.ok("auto-stopped at wall-clock time");
-        }, msUntilTarget);
-        return `stops at ${stopTimeVal} (in ${(msUntilTarget / 60000).toFixed(1)} min)`;
+      // ── STEP 3+4: auto-stop is owned by the BACKEND ────────────────────
+      // `stop_duration_ms` / `stop_time_str` are persisted by saveConfig(); the
+      // Rust click loop snapshots both at run start (scheduler.rs) and stops
+      // itself, and it pushes the IDLE status the page reacts to. There used to
+      // be a setTimeout here calling invoke("toggle_autoclicker") — a TOGGLE,
+      // not a stop: after the backend had already stopped the run, the page's
+      // own timer would flip the clicker back ON. Deliberately not replaced.
+      await op.run("auto-stop-owned-by-backend", () => {
+        const ms = readStopDurationMs();
+        const at = document.getElementById("stopTimeInput")?.value || "";
+        if (ms <= 0 && !at) return "no auto-stop configured";
+        return `${ms > 0 ? `${ms}ms` : "-"} / at ${at || "-"} → Rust timer`;
       });
     } else {
-      // Stop path — clear all auto timers first
-      await op.run("clear-auto-timers", () => {
+      // Stop path — drop a pending Start countdown (the backend cancels its own
+      // timers by leaving the loop, so there is nothing else to clear here).
+      await op.run("clear-start-countdown", () => {
         clearAutoTimers();
-        return "stop-duration + stop-time timers cancelled";
+        return "start-delay countdown cancelled";
       });
     }
 
@@ -3727,10 +4458,18 @@ function _configSignature(cfg) {
   ].join("|");
 }
 
-listenSilent("status-update", (event) => {
+/**
+ * Apply one status payload. This is the ONLY place that knows how the UI reacts
+ * to clicker state, and it has two producers:
+ *   * the live `status-update` event (66 ms telemetry worker while a run is
+ *     alive, plus the start / stop / vetoed emits), and
+ *   * `invoke("get_status")` on boot.
+ * The page owns no clicker state of its own — that, and not luck, is what makes
+ * a rebuild after deep sleep show the truth immediately.
+ */
+function applyStatusUpdate(payload) {
   try {
-    const payload = event?.payload || {};
-    const { active, mode, clicks_done, cps, status_text } = payload;
+    const { active, mode, clicks_done, cps, status_text } = payload || {};
 
     // 1. Core UI state update (lightweight, mandatory)
     const n = clicks_done || 0;
@@ -3738,7 +4477,9 @@ listenSilent("status-update", (event) => {
       const modeChanged = mode !== currentConfig.active_mode;
       if (modeChanged) {
         setModeDisplay(mode, true);
-        saveConfig();
+        // Persist only once the real config is in memory: a payload that lands
+        // before `loadConfig()` resolved would write module defaults to disk.
+        if (configHydrated) saveConfig();
       }
     }
     setRunningState(active, status_text);
@@ -3765,6 +4506,10 @@ listenSilent("status-update", (event) => {
         _lastSettingsRunClicksDone = 0;
       } else {
         // Run ended: capture final click delta before resetting baseline
+        if (currentRunningPresetId) {
+          currentRunningPresetId = null;
+          renderPresetsGrid();
+        }
         const finalDelta = n > _lastSettingsRunClicksDone ? (n - _lastSettingsRunClicksDone) : 0;
         if (finalDelta > 0) {
           _clicksThisSettings += finalDelta;
@@ -3804,7 +4549,9 @@ listenSilent("status-update", (event) => {
     origError.call(console, "[status-update error]", err);
     dbg("STATUS UPDATE ERROR:", err?.message || String(err));
   }
-});
+}
+
+listenSilent("status-update", (event) => applyStatusUpdate(event?.payload || {}));
 
 // ── FOCUS LOSS AUTO-PAUSE (Smart Guard) ──────────────────────────
 // The Rust click loop stopped the run because the foreground app changed
@@ -3818,6 +4565,63 @@ listen("focus-loss-paused", (event) => {
     showToast("⏸ " + base + (exe ? ` → ${exe}` : ""), "warn");
   } catch (err) {
     dbg("focus-loss-paused handler error:", err?.message || String(err));
+  }
+});
+
+// ── TRAY MENU FEEDBACK ───────────────────────────────────────
+// The tray menu mutates backend state behind the page's back, so the page must
+// be told about it. The clicker state itself arrives through applyStatusUpdate
+// (`status-update`); these two events cover what that payload cannot express.
+
+// (1) A VETOED menu action. Work Mode and the typing guard may refuse a start:
+// without this the item would look like a broken binding (nothing happens
+// anywhere) instead of "blocked, and here is why".
+listen("tray-action-result", (event) => {
+  try {
+    const p = event?.payload || {};
+    if (p.ok !== false) return;
+    const typing = p.reason === "typing";
+    const key = typing ? "tray_blocked_typing" : "tray_blocked_work_mode";
+    const fallback = typing
+      ? "Blocked: you are typing"
+      : "Blocked: Work Mode is active";
+    const left = Number(p.left_ms);
+    const suffix = typing && Number.isFinite(left) && left > 0 ? ` (${left} ms)` : "";
+    showToast("⚠ " + getI18nText(key, {}, fallback) + suffix, "warn");
+  } catch (err) {
+    dbg("tray-action-result handler error:", err?.message || String(err));
+  }
+});
+
+// (2) The tray already persisted `ui.show_hud`; mirror it into the BEHAVIOR
+// checkbox WITHOUT saving — a save from here would write the stale checkbox
+// value back to disk and silently undo the menu choice.
+listen("tray-hud-changed", (event) => {
+  try {
+    const show = !!event?.payload;
+    if (currentConfig?.ui) currentConfig.ui.show_hud = show;
+    if (hudCheckbox) hudCheckbox.checked = show;
+  } catch (err) {
+    dbg("tray-hud-changed handler error:", err?.message || String(err));
+  }
+});
+
+// (3) The backend auto-stop fired (stop-after duration or stop-at wall clock).
+// The timer lives in Rust so it also works with zero windows alive (tray deep
+// sleep); the page only explains why the run ended. The clicker state itself
+// still arrives through `status-update` — this event must never mutate it.
+listen("auto-stop", (event) => {
+  try {
+    const p = event?.payload || {};
+    const key = p.reason === "wallclock" ? "auto_stop_wallclock_notify" : "auto_stop_duration_notify";
+    const fallback = p.reason === "wallclock"
+      ? "Auto-stopped at the configured time"
+      : "Auto-stopped: time limit reached";
+    const ms = Number(p.elapsed_ms);
+    const suffix = Number.isFinite(ms) && ms > 0 ? ` (${formatDurationMs(ms)})` : "";
+    showToast("⏱ " + getI18nText(key, {}, fallback) + suffix, "info");
+  } catch (err) {
+    dbg("auto-stop handler error:", err?.message || String(err));
   }
 });
 
@@ -4778,6 +5582,15 @@ onDomReady(() => {
   // because in that case nothing inside this file — including this line — runs.
   window.__nanoclick_boot_ok__ = true;
 
+  // Backend heartbeat (Phase E): the Rust watchdog expects this call within a
+  // few seconds of EVERY window creation (boot, and the rebuild after deep
+  // sleep). Silence means "this page is dead": Rust logs it at error level,
+  // reloads the page once, and — if the window is still hidden — shows it so the
+  // boot-guard banner below becomes visible. Fire-and-forget: a failing invoke
+  // must never break the boot itself.
+  try { invoke("frontend_ready").catch(() => { /* backend not ready yet */ }); }
+  catch (_) { /* never throw from here */ }
+
   // Phase 2 (Deferred 150ms): Non-critical diagnostic & version checks
   setTimeout(() => {
     safeStep("syncVersionDisplay", () => { void syncVersionDisplay(); });
@@ -4951,7 +5764,7 @@ onDomReady(() => {
 // All markup wiring lives in settings_guard.js; main.js only hands over
 // the save pipeline so guard edits persist like every other setting.
 onDomReady(() => {
-  if (window.SmartGuard) window.SmartGuard.init(saveConfig);
+  if (window.SmartGuard) window.SmartGuard.init(saveConfig, saveConfigThrottled);
 });
 
 // ── IMAGE TRIGGER (F8) ────────────────────────────────────────
@@ -5053,6 +5866,22 @@ onDomReady(() => {
     }).catch(() => {});
   }
 });
+
+// Deep-sleep handshake (Phase D). With "Deep Sleep in Tray" enabled, Rust
+// destroys this WebView to free ~250 MB of Chromium and waits — bounded, ~0.7 s —
+// for `tray_flush_done` before doing it. Everything still in memory must be
+// persisted here first: stats reach the disk at most every 5 s, so without this
+// handshake up to 5 s of clicks would be lost. Rust arms
+// `__NANOCLICK_RELOADING__` before the unload, so the `beforeunload` fallback
+// below cannot kill the backend during the suspension.
+window.__nanoclick_tray_flush__ = async () => {
+  try {
+    if (typeof saveConfig === "function") await saveConfig();
+  } catch (_) {
+    /* a failed flush must not block the suspension — Rust has its own timeout */
+  }
+  try { await invoke("tray_flush_done"); } catch (_) { /* idem */ }
+};
 
 // Clean process termination hook on REAL app close.
 // v1.1.0 fix: was a bare `beforeunload` — which fires on EVERY page reload,

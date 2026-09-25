@@ -391,11 +391,88 @@ pub fn repair_and_patch_value(user_val: &Value) -> Result<(AppConfig, Vec<String
         if let Some(sd) = user_engine.get("start_delay_ms").and_then(Value::as_u64) {
             default_engine.insert("start_delay_ms".into(), Value::from(sd));
         }
-        if let Some(sdm) = user_engine.get("stop_duration_min").and_then(Value::as_u64) {
-            default_engine.insert("stop_duration_min".into(), Value::from(sdm));
+        if let Some(op) = user_engine.get("outlier_prob").and_then(Value::as_f64) {
+            if op.is_finite() && (0.0..=0.10).contains(&op) {
+                default_engine.insert("outlier_prob".into(), Value::from(op));
+            } else {
+                details.push(format!(
+                    "engine.outlier_prob {op} out of range; repaired to 0.02"
+                ));
+                default_engine.insert("outlier_prob".into(), Value::from(0.02));
+            }
+        } else if user_engine.contains_key("outlier_prob") {
+            details.push("engine.outlier_prob invalid type; repaired to 0.02".into());
+        }
+        if let Some(tq) = user_engine.get("technique").and_then(Value::as_str) {
+            let norm = crate::config::normalize_technique(tq);
+            if norm == "auto" && tq.trim().to_ascii_lowercase() != "auto" {
+                details.push(format!(
+                    "engine.technique '{tq}' invalid; repaired to 'auto'"
+                ));
+            }
+            default_engine.insert("technique".into(), Value::from(norm));
+        }
+        // Auto-stop: `stop_duration_ms` is authoritative, `stop_duration_min` is
+        // the pre-1.3 whole-minutes field. Migrating it here keeps the user's
+        // timer alive across a repair/reset from an old config instead of
+        // silently dropping it to 0 (which is exactly how an auto-stop gets
+        // "lost" on upgrade).
+        let user_stop_ms = user_engine
+            .get("stop_duration_ms")
+            .and_then(Value::as_u64)
+            .filter(|ms| *ms > 0)
+            .or_else(|| {
+                user_engine
+                    .get("stop_duration_min")
+                    .and_then(Value::as_u64)
+                    .filter(|min| *min > 0)
+                    .map(|min| min.saturating_mul(60_000))
+            });
+        if let Some(ms) = user_stop_ms {
+            default_engine.insert("stop_duration_ms".into(), Value::from(ms));
+        }
+        if let Some(unit) = user_engine.get("stop_duration_unit").and_then(Value::as_str) {
+            default_engine.insert("stop_duration_unit".into(), Value::from(unit));
         }
         if let Some(st) = user_engine.get("stop_time_str").and_then(Value::as_str) {
             default_engine.insert("stop_time_str".into(), Value::from(st));
+        }
+        // The armed trigger. Normalized rather than trusted: a corrupted or
+        // hand-edited string must fall back to a value the UI can render, and a
+        // config written before `stop_mode` existed (field absent → "none")
+        // must re-derive the arm from the values it carries, or a repair pass
+        // would silently disarm a timer the user had deliberately set.
+        let stored_mode = user_engine
+            .get("stop_mode")
+            .and_then(Value::as_str)
+            .unwrap_or("none");
+        let repaired_mode = crate::config::normalize_stop_mode(stored_mode);
+        if repaired_mode != "none" {
+            if repaired_mode != stored_mode.trim().to_ascii_lowercase() {
+                details.push(format!(
+                    "engine.stop_mode '{stored_mode}' invalid; repaired to '{repaired_mode}'"
+                ));
+            }
+            default_engine.insert("stop_mode".into(), Value::from(repaired_mode));
+        } else {
+            // `stop_time_epoch_sec` is a runtime-only field (it does not exist in
+            // the serialized `EngineSettings`), so the wall-clock intent is read
+            // from `stop_time_str` — exactly what `Config::from` resolves into
+            // the epoch.
+            let ms = default_engine
+                .get("stop_duration_ms")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let has_wallclock = default_engine
+                .get("stop_time_str")
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.trim().is_empty());
+            let derived = crate::config::resolve_stop_mode(
+                "none",
+                ms,
+                if has_wallclock { 1 } else { 0 },
+            );
+            default_engine.insert("stop_mode".into(), Value::from(derived));
         }
         if let Some(gl) = user_engine.get("gui_lock_ms").and_then(Value::as_u64) {
             default_engine.insert("gui_lock_ms".into(), Value::from(gl));
@@ -459,12 +536,12 @@ pub fn repair_and_patch_value(user_val: &Value) -> Result<(AppConfig, Vec<String
     ) {
         let bool_keys = [
             "always_on_top",
-            "sound_feedback",
             "visual_ripple",
             "show_hud",
             "start_minimized",
             "autostart",
             "minimize_to_tray",
+            "deep_sleep_to_tray",
             "show_notifications",
             "pause_on_focus_loss",
             "remember_window_position",
@@ -473,11 +550,6 @@ pub fn repair_and_patch_value(user_val: &Value) -> Result<(AppConfig, Vec<String
         for k in bool_keys {
             if let Some(b) = user_ui.get(k).and_then(Value::as_bool) {
                 default_ui.insert(k.into(), Value::from(b));
-            }
-        }
-        if let Some(m) = user_ui.get("mode").and_then(Value::as_str) {
-            if !m.trim().is_empty() {
-                default_ui.insert("mode".into(), Value::from(m));
             }
         }
         if let Some(tp) = user_ui.get("typing_pause_ms").and_then(Value::as_u64) {
@@ -524,6 +596,25 @@ pub fn repair_and_patch_value(user_val: &Value) -> Result<(AppConfig, Vec<String
                         default_ui.insert(k.into(), Value::Null);
                     }
                 }
+            }
+        }
+        // Window size: same lifecycle as the position, but the range is
+        // POSITIVE (a 0 or negative size would make the restored window
+        // invisible, and a junk-huge one would fill the screen). Anything
+        // outside 200..=32767 falls back to `null` = the conf default size.
+        for k in ["window_w", "window_h"] {
+            let ok = user_ui
+                .get(k)
+                .and_then(Value::as_i64)
+                .map(|n| (200..=32767).contains(&n))
+                .unwrap_or(false);
+            if ok {
+                default_ui.insert(k.into(), user_ui.get(k).cloned().unwrap_or(Value::Null));
+            } else {
+                if user_ui.get(k).is_some_and(|v| !v.is_null()) {
+                    details.push(format!("ui.{k} unusable as a size; reset to default"));
+                }
+                default_ui.insert(k.into(), Value::Null);
             }
         }
     }

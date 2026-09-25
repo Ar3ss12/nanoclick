@@ -17,14 +17,14 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex as StdMutex, Once, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use windows::Win32::Foundation::{LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::{GetDC, GetPixel, ReleaseDC};
 use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetCursorPos, GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId,
     MSG, PM_REMOVE, PeekMessageW, SetCursorPos, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
-    KBDLLHOOKSTRUCT, WH_KEYBOARD_LL,
+    KBDLLHOOKSTRUCT, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL,
 };
 
 /// Parse a config button label into the neutral MouseButton type.
@@ -379,6 +379,58 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
         }
     };
 
+    unsafe extern "system" fn mouse_hotkey_proc(
+        n_code: i32,
+        w_param: WPARAM,
+        l_param: LPARAM,
+    ) -> LRESULT {
+        let msg = w_param.0;
+        // FAST-PATH: 1000-8000 Hz gaming mouse move bypass!
+        // If not XButton (0x020B, 0x020C) or MButton (0x0207, 0x0208) -> instant return!
+        if n_code != 0 || (msg != 0x020B && msg != 0x020C && msg != 0x0207 && msg != 0x0208) {
+            return CallNextHookEx(None, n_code, w_param, l_param);
+        }
+        let vk = if msg == 0x020B || msg == 0x020C {
+            let m = *(l_param.0 as *const MSLLHOOKSTRUCT);
+            let xbutton = (m.mouseData >> 16) as u16;
+            if xbutton == 1 {
+                0x05 // VK_XBUTTON1
+            } else if xbutton == 2 {
+                0x06 // VK_XBUTTON2
+            } else {
+                0
+            }
+        } else {
+            0x04 // VK_MBUTTON
+        };
+        if vk != 0 {
+            let is_down = msg == 0x020B || msg == 0x0207;
+            if let Some(lock) = GLOBAL_HOTKEY_TX.get() {
+                if let Ok(guard) = lock.try_lock() {
+                    if let Some(sender) = guard.as_ref() {
+                        let _ = sender.send(GlobalKeyEvent { vk, is_down });
+                    }
+                }
+            }
+        }
+        CallNextHookEx(None, n_code, w_param, l_param)
+    }
+
+    let mouse_hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hotkey_proc), None, 0) };
+    let _mouse_hook = match mouse_hook {
+        Ok(mh) => {
+            crate::debug_log_internal("stage-ok", "[Hotkeys] WH_MOUSE_LL installed");
+            Some(mh)
+        }
+        Err(e) => {
+            crate::debug_log_internal(
+                "warn",
+                &format!("[Hotkeys] WH_MOUSE_LL install failed: {:?}", e),
+            );
+            None
+        }
+    };
+
     crate::debug_log_internal("stage-ok", "[Hotkeys] entering event-driven loop");
 
     // Parse-once contract: bindings are parsed from scheduler strings only at
@@ -595,12 +647,30 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
                                     "suppressed_action=toggle_typing_guard vk=0x{:02X}",
                                     event.vk
                                 ));
+                                // The bind DID fire and the guard refused it. Silence
+                                // is what makes a working hotkey look broken, so the
+                                // veto goes to the page on the same channel the tray
+                                // menu uses (with zero windows there is nobody to tell).
+                                if let Some(win) = app_handle.get_webview_window("main") {
+                                    let _ = win.emit(
+                                        "tray-action-result",
+                                        serde_json::json!({
+                                            "action": "toggle_clicking",
+                                            "ok": false,
+                                            "reason": "typing",
+                                            "left_ms": guard.lock_remaining_ms(),
+                                        }),
+                                    );
+                                }
                             }
                         }
                     }
                     fire_hotkey_group(&bindings.mode_switch, event.vk, &held, || {
                         hotkey_diag_push("fired_action=mode_switch".into());
-                        scheduler.toggle_mode(Some(&app_handle));
+                        // Shared with the UI badge and the tray menu: this path
+                        // must persist `active_mode` too, or the next config load
+                        // reverts the switch the user just made.
+                        crate::apply_mode_toggle(&app_handle);
                     });
                     fire_hotkey_group(&bindings.emergency_stop, event.vk, &held, || {
                         hotkey_diag_push("fired_action=emergency_stop".into());
@@ -626,6 +696,14 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
                         hotkey_diag_push("fired_action=record_toggle".into());
                         let _ = app_handle.emit("global-record-toggle", ());
                     });
+
+                    // Direct Preset Hotkeys with Instant Preemption
+                    for (preset_id, combos) in &bindings.preset_hotkeys {
+                        fire_hotkey_group(combos, event.vk, &held, || {
+                            hotkey_diag_push(format!("fired_action=preset_{preset_id}"));
+                            scheduler.activate_preset_hotkey(preset_id, Some(&app_handle));
+                        });
+                    }
 
                     // Preset slot hotkeys: slot 1..9 -> global-preset-hotkey(idx).
                     for (slot_idx, combos) in bindings.preset_slots.iter().enumerate() {
@@ -700,6 +778,9 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
 
     unsafe {
         let _ = UnhookWindowsHookEx(_hook);
+        if let Some(mh) = _mouse_hook {
+            let _ = UnhookWindowsHookEx(mh);
+        }
     }
     crate::debug_log_internal("stage-ok", "[Hotkeys] listener stopped and hook released");
 }
@@ -726,8 +807,8 @@ fn hotkey_diag_push(line: String) {
     }
 }
 
-/// Dump and clear the diagnostic buffer (test hooks / debug command).
-#[allow(dead_code)]
+/// Dump and clear the diagnostic buffer. Used by `dump_input_diagnostics`
+/// (the Settings button) and by the tests; the hook thread only ever pushes.
 pub fn hotkey_diag_dump() -> Vec<String> {
     HOTKEY_DIAG
         .lock()
@@ -803,11 +884,18 @@ struct HotkeySnapshot {
     record_toggle: bool,
     record_hotkey: String,
     preset_slots: Vec<String>,
+    preset_hotkeys: Vec<(String, String)>,
 }
 
 impl HotkeySnapshot {
     fn from_scheduler(scheduler: &ClickScheduler) -> Self {
         let cfg = scheduler.get_config();
+        let preset_hotkeys = cfg
+            .presets
+            .iter()
+            .filter(|p| !p.hotkey.trim().is_empty())
+            .map(|p| (p.id.clone(), p.hotkey.clone()))
+            .collect();
         HotkeySnapshot {
             toggle: cfg.hotkey_toggle,
             mode_switch: cfg.hotkey_mode_switch,
@@ -818,6 +906,7 @@ impl HotkeySnapshot {
             record_toggle: cfg.hotkey_record_toggle,
             record_hotkey: cfg.hotkey_record,
             preset_slots: cfg.hotkey_preset_slots,
+            preset_hotkeys,
         }
     }
 }
@@ -844,20 +933,29 @@ struct HotkeyBindings {
     record_toggle: Vec<HotkeyCombo>,
     /// Per-slot preset combos: outer index = slot number - 1.
     preset_slots: Vec<Vec<HotkeyCombo>>,
+    /// Direct preset hotkeys: (preset_id, combos).
+    preset_hotkeys: Vec<(String, Vec<HotkeyCombo>)>,
     invalid_bindings: usize,
 }
 
 impl HotkeyBindings {
-    fn all_groups(&self) -> [&[HotkeyCombo]; 7] {
-        [
-            &self.toggle,
-            &self.mode_switch,
-            &self.emergency_stop,
-            &self.speed_up,
-            &self.slow_down,
-            &self.capture_pos,
-            &self.record_toggle,
-        ]
+    fn all_groups(&self) -> Vec<&[HotkeyCombo]> {
+        let mut groups = vec![
+            self.toggle.as_slice(),
+            self.mode_switch.as_slice(),
+            self.emergency_stop.as_slice(),
+            self.speed_up.as_slice(),
+            self.slow_down.as_slice(),
+            self.capture_pos.as_slice(),
+            self.record_toggle.as_slice(),
+        ];
+        for slot in &self.preset_slots {
+            groups.push(slot.as_slice());
+        }
+        for (_id, combos) in &self.preset_hotkeys {
+            groups.push(combos.as_slice());
+        }
+        groups
     }
 }
 
@@ -891,6 +989,17 @@ impl HotkeyBindings {
             (slots, inv)
         };
         invalid_bindings += invalid;
+        let (preset_hotkeys, invalid) = {
+            let mut list = Vec::with_capacity(snapshot.preset_hotkeys.len());
+            let mut inv = 0usize;
+            for (id, label) in &snapshot.preset_hotkeys {
+                let (combos, n) = combos_from_label(label);
+                inv += n;
+                list.push((id.clone(), combos));
+            }
+            (list, inv)
+        };
+        invalid_bindings += invalid;
         HotkeyBindings {
             toggle,
             mode_switch,
@@ -900,6 +1009,7 @@ impl HotkeyBindings {
             capture_pos,
             record_toggle,
             preset_slots,
+            preset_hotkeys,
             invalid_bindings,
         }
     }
@@ -1045,6 +1155,10 @@ fn vk_from_label(label: &str) -> Option<u16> {
         "alt" | "menu" => 0x12,           // VK_MENU
         "win" | "meta" | "super" => 0x5B, // VK_LWIN
         "apps" | "menu2" => 0x5D,         // VK_APPS
+        // Mouse buttons as global hotkeys (Win32 virtual keys)
+        "mouse4" | "m4" | "xbutton1" | "x1" => 0x05, // VK_XBUTTON1
+        "mouse5" | "m5" | "xbutton2" | "x2" => 0x06, // VK_XBUTTON2
+        "mouse3" | "m3" | "mbutton" | "middle" => 0x04, // VK_MBUTTON
         _ => return None,
     };
     Some(vk)
@@ -1171,6 +1285,33 @@ mod hotkey_tests {
         let (combos, invalid) = combos_from_label("R / NotARealKey / K");
         assert_eq!(combos.len(), 2);
         assert_eq!(invalid, 1);
+    }
+
+    #[test]
+    fn mouse_buttons_parse_to_correct_virtual_keys() {
+        assert_eq!(vk_from_label("Mouse4"), Some(0x05));
+        assert_eq!(vk_from_label("M4"), Some(0x05));
+        assert_eq!(vk_from_label("XButton1"), Some(0x05));
+        assert_eq!(vk_from_label("X1"), Some(0x05));
+
+        assert_eq!(vk_from_label("Mouse5"), Some(0x06));
+        assert_eq!(vk_from_label("M5"), Some(0x06));
+        assert_eq!(vk_from_label("XButton2"), Some(0x06));
+        assert_eq!(vk_from_label("X2"), Some(0x06));
+
+        assert_eq!(vk_from_label("Mouse3"), Some(0x04));
+        assert_eq!(vk_from_label("M3"), Some(0x04));
+        assert_eq!(vk_from_label("Middle"), Some(0x04));
+    }
+
+    #[test]
+    fn ctrl_plus_mouse4_parses_as_valid_combo() {
+        let combo = parse_hotkey_combo("Ctrl+Mouse4").expect("Ctrl+Mouse4 should parse");
+        assert_eq!(combo.required, vec![0x11]);
+        assert_eq!(combo.trigger, 0x05);
+        let held = HashSet::from([0x11]);
+        assert!(combo_matches(&combo, 0x05, &held, |_| false));
+        assert!(!combo_matches(&combo, 0x05, &HashSet::new(), |_| false));
     }
 }
 
@@ -1713,6 +1854,7 @@ mod physical_integration_tests {
             record_toggle: true,
             record_hotkey: "F9".into(),
             preset_slots: Vec::new(),
+            preset_hotkeys: Vec::new(),
         };
         let bindings_before = HotkeyBindings::from_snapshot(&before);
         assert!(bindings_before.toggle.iter().any(|c| c.trigger == 0x52));
@@ -1806,8 +1948,15 @@ fn process_exe_name(pid: u32) -> Option<String> {
         GetCurrentProcessId, OpenProcess, QueryFullProcessImageNameW,
         PROCESS_QUERY_LIMITED_INFORMATION,
     };
-    if pid == 0 || pid == unsafe { GetCurrentProcessId() } {
+    if pid == 0 {
         return None;
+    }
+    // Our own window must be a VISIBLE baseline, not an invisible `None`:
+    // starting from the NanoClick window (button click) and Alt+Tab-ing away
+    // must stop the run. `None` stays reserved for genuinely unresolvable
+    // foreground (lock screen, elevated-only) which fails open by design.
+    if pid == unsafe { GetCurrentProcessId() } {
+        return crate::platform::own_exe_name();
     }
     unsafe {
         let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
