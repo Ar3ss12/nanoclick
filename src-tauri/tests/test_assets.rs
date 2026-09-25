@@ -2518,7 +2518,13 @@ fn test_preset_scope_sections_are_painted_not_hidden() {
 /// wrong file.
 #[test]
 fn test_embedded_asset_blobs_are_not_truncated() {
-    let dir = std::path::Path::new(env!("OUT_DIR")).join("tauri-codegen-assets");
+    // `option_env!` on purpose: if this target were ever built without a build
+    // script's OUT_DIR, the check must degrade to a no-op instead of failing to
+    // COMPILE (a `env!` here would turn a missing variable into a red gate).
+    let Some(out_dir) = option_env!("OUT_DIR") else {
+        return;
+    };
+    let dir = std::path::Path::new(out_dir).join("tauri-codegen-assets");
     let mut truncated: Vec<String> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
