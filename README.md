@@ -93,11 +93,11 @@ All hotkeys are handled by an event-driven `WH_KEYBOARD_LL` listener in Rust —
 
 ## 📦 Install
 
-Download the `v1.0.0-beta` installer from [Releases](https://github.com/Ar3ss12/nanoclick/releases/tag/v1.0.0-beta):
+Download the `v1.2.0` installer from [Releases](https://github.com/Ar3ss12/nanoclick/releases/tag/v1.2.0):
 
 ```
-NanoClick_1.0.0-beta_x64-setup.exe   (~2.2 MB)
-NanoClick-portable.exe               (~4.9 MB, zero-install)
+NanoClick_1.2.0_x64-setup.exe   (~2.2 MB)
+NanoClick-portable.exe          (~5.1 MB, zero-install)
 ```
 
 - Installs per-user (no admin rights needed)
