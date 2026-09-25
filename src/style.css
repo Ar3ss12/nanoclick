@@ -3495,3 +3495,110 @@ button {
 }
 
 
+/* ── PRESETS: capture scope, sections, toolbar, card badges ─────────────
+   A preset captures opt-in groups (engine/guards/hotkeys/ui). An unchecked
+   group COLLAPSES its section but keeps the inherited value visible — the
+   honest picture of "not captured". The lock is a paint, never `disabled`. */
+.preset-scope-panel {
+  grid-column: 1 / -1;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+
+.preset-scope-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-bright);
+  margin-bottom: 8px;
+}
+
+.preset-scope-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+}
+
+.preset-scope-row .checkbox-row {
+  font-size: 12px;
+}
+
+.preset-section {
+  grid-column: 1 / -1;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+  padding: 8px 12px;
+}
+
+.preset-section-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-bright);
+  margin-bottom: 8px;
+}
+
+.preset-section-body {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px 12px;
+}
+
+/* Collapsed = "this group is inherited, not captured". The inputs stay in the
+   DOM and readable (a preview of what the preset would capture), just dimmed. */
+.preset-section.collapsed .preset-section-body {
+  opacity: 0.45;
+  filter: grayscale(0.6);
+  pointer-events: none;
+}
+
+.presets-toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: 12px 0;
+}
+
+.presets-search {
+  flex: 1;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 7px 10px;
+  font-size: 13px;
+}
+
+.presets-search:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.presets-filter {
+  flex: 0 0 190px;
+}
+
+.preset-card-scope-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--accent);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border);
+}
+
+.inspect-section-title {
+  margin: 10px 0 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-bright);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 4px;
+}
+
+

@@ -350,6 +350,17 @@
             </div>
           </div>
 
+          <!-- Search / category filter toolbar -->
+          <div class="presets-toolbar">
+            <input type="search" id="presetSearchInput" class="presets-search" data-i18n-placeholder="presets_search_placeholder" placeholder="Search presets…">
+            <select id="presetCategoryFilter" class="select-input presets-filter">
+              <option value="all" data-i18n="presets_filter_all">All categories</option>
+              <option value="combat" data-i18n="preset_category_combat">Combat</option>
+              <option value="utility" data-i18n="preset_category_utility">Utility</option>
+              <option value="game" data-i18n="preset_category_game">Game-specific</option>
+            </select>
+          </div>
+
           <!-- Presets Grid -->
           <div id="presetGridContainer" class="presets-grid-new">
             <!-- Dynamically populated by JS -->
@@ -1074,7 +1085,37 @@
       <div class="modal-body preset-modal-body">
         <input type="hidden" id="presetEditId">
         <input type="hidden" id="presetHotkeyInput">
-        
+
+        <!-- CAPTURE SCOPE: which groups this preset owns. Engine is mandatory
+             (a preset without an engine is not a preset); the other three are
+             opt-in because applying them changes guards / global hotkeys / the
+             look of the app. -->
+        <div class="preset-scope-panel">
+          <div class="preset-scope-title" data-i18n="preset_scope_title">📦 Capture scope</div>
+          <div class="preset-scope-row">
+            <label class="checkbox-row" data-i18n-title="preset_scope_engine_hint" title="Always captured — the click engine itself">
+              <input type="checkbox" id="presetScopeEngine" class="custom-checkbox" checked disabled>
+              <span class="checkbox-box"></span>
+              <span data-i18n="preset_scope_engine">Engine</span>
+            </label>
+            <label class="checkbox-row" data-i18n-title="preset_scope_guards_hint" title="Smart Guard: typing freeze, focus-loss pause, app filter">
+              <input type="checkbox" id="presetScopeGuards" class="custom-checkbox">
+              <span class="checkbox-box"></span>
+              <span data-i18n="preset_scope_guards">Guards</span>
+            </label>
+            <label class="checkbox-row" data-i18n-title="preset_scope_hotkeys_hint" title="Global hotkeys (the nine preset slots are never captured)">
+              <input type="checkbox" id="presetScopeHotkeys" class="custom-checkbox">
+              <span class="checkbox-box"></span>
+              <span data-i18n="preset_scope_hotkeys">Hotkeys</span>
+            </label>
+            <label class="checkbox-row" data-i18n-title="preset_scope_ui_hint" title="Appearance: theme, accent, language, HUD (never tray/lifecycle)">
+              <input type="checkbox" id="presetScopeUi" class="custom-checkbox">
+              <span class="checkbox-box"></span>
+              <span data-i18n="preset_scope_ui">Appearance</span>
+            </label>
+          </div>
+        </div>
+
         <div class="preset-form-grid">
           <div class="preset-form-group">
             <label data-i18n="preset_field_name">Preset name</label>
@@ -1094,6 +1135,18 @@
               <option value="🚀" data-i18n="preset_icon_turbo">🚀 Turbo</option>
             </select>
           </div>
+          <div class="preset-form-group">
+            <label data-i18n="preset_field_category">Category</label>
+            <select id="presetCategorySelect" class="select-input">
+              <option value="combat" data-i18n="preset_category_combat">Combat</option>
+              <option value="utility" data-i18n="preset_category_utility">Utility</option>
+              <option value="game" data-i18n="preset_category_game">Game-specific</option>
+            </select>
+          </div>
+          <div class="preset-form-group full-width">
+            <label data-i18n="preset_field_description">Description</label>
+            <input type="text" id="presetDescriptionInput" class="text-input" data-i18n-placeholder="preset_field_description_placeholder" placeholder="Shown on the preset card">
+          </div>
 
           <div class="preset-form-group">
             <label data-i18n="preset_field_hotkey">Activation Hotkey</label>
@@ -1108,16 +1161,43 @@
           
           <div class="preset-form-group">
             <label>Speed (CPS: <span id="presetCpsVal">29.0</span>)</label>
-            <input type="range" id="presetCpsRange" min="1" max="160" step="0.5" value="29.0" class="slider">
+            <input type="range" id="presetCpsRange" min="0.1" max="160" step="0.5" value="29.0" class="slider">
           </div>
           <div class="preset-form-group">
             <label>Randomization (Jitter: <span id="presetJitterVal">7.5</span>%)</label>
-            <input type="range" id="presetJitterRange" min="0" max="30" step="0.5" value="7.5" class="slider">
+            <input type="range" id="presetJitterRange" min="0" max="35" step="0.5" value="7.5" class="slider">
+          </div>
+          <div class="preset-form-group">
+            <label data-i18n="dash_outlier_prob" data-i18n-title="dash_outlier_prob_hint" title="Rare human hesitation: this % of intervals stretch to 2-3x base">Hesitation (±%)</label>
+            <input type="number" id="presetHesitation" class="num-input" min="0" max="10" step="0.5" value="2">
+          </div>
+          <div class="preset-form-group">
+            <label data-i18n="dash_jitter_radius">Jitter Radius (px)</label>
+            <input type="number" id="presetJitterRadius" class="num-input" min="0" max="50" step="1" value="0">
+          </div>
+          <div class="preset-form-group">
+            <label data-i18n="preset_field_technique">Technique</label>
+            <select id="presetTechniqueSelect" class="select-input">
+              <option value="auto" data-i18n="technique_auto">Auto (by CPS)</option>
+              <option value="single" data-i18n="technique_single">Single — one finger</option>
+              <option value="butterfly" data-i18n="technique_butterfly">Butterfly — two fingers</option>
+              <option value="drag" data-i18n="technique_drag">Drag — flick</option>
+            </select>
+          </div>
+          <div class="preset-form-group">
+            <label data-i18n="settings_gui_lock_label">GUI Lock Duration (ms)</label>
+            <input type="number" id="presetGuiLock" class="num-input" min="500" max="5000" step="100" value="1500">
           </div>
 
           <div class="preset-form-group">
-            <label data-i18n="preset_field_start_delay">Start delay (sec)</label>
-            <input type="number" id="presetStartDelaySec" class="num-input" min="0" max="300" step="1" value="0">
+            <label data-i18n="preset_field_start_delay">Start delay</label>
+            <div style="display:flex;gap:6px;align-items:center;">
+              <input type="number" id="presetStartDelaySec" class="num-input" min="0" max="300" step="1" value="0">
+              <select id="presetStartDelayUnit" class="select-input" style="flex:0 0 92px;">
+                <option value="sec" data-i18n="unit_sec_option">sec (Seconds)</option>
+                <option value="ms" data-i18n="unit_ms_option">ms (Interval)</option>
+              </select>
+            </div>
           </div>
 
           <div class="preset-form-group" id="presetStopAfterRow">
@@ -1157,7 +1237,7 @@
 
           <div class="preset-form-group">
             <label data-i18n="preset_field_hold_pause">Hold pause (ms)</label>
-            <input type="number" id="presetHoldInterval" class="num-input" min="0" step="50" value="1000">
+            <input type="number" id="presetHoldInterval" class="num-input" min="10" step="50" value="1000">
           </div>
 
           <div class="preset-form-group">
@@ -1207,7 +1287,7 @@
 
           <div class="preset-form-group">
             <label data-i18n="preset_field_click_limit">Click limit (0 = unlimited)</label>
-            <input type="number" id="presetClickLimit" class="num-input" min="0" value="0">
+            <input type="number" id="presetClickLimit" class="num-input" min="0" max="1000000" value="0">
           </div>
 
           <div class="preset-form-group">
@@ -1226,6 +1306,98 @@
           <div class="preset-form-group">
             <label data-i18n="preset_field_repeat_interval">Pause between repeats (ms)</label>
             <input type="number" id="presetRepeatInterval" class="num-input" min="0" step="100" value="1000">
+          </div>
+
+          <!-- ── SMART GUARD (scope.guards) ────────────────────────── -->
+          <div class="preset-section full-width collapsed" id="presetSectionGuards">
+            <div class="preset-section-title" data-i18n="preset_section_guards">🛡️ Smart Guard</div>
+            <div class="preset-section-body">
+              <div class="preset-form-group">
+                <label data-i18n="preset_guard_typing_label">Hotkey lockout after typing (ms)</label>
+                <input type="number" id="presetTypingFreeze" class="num-input" min="100" max="5000" step="50" value="600">
+              </div>
+              <div class="preset-form-group">
+                <label class="checkbox-row">
+                  <input type="checkbox" id="presetFocusPause" class="custom-checkbox">
+                  <span class="checkbox-box"></span>
+                  <span data-i18n="preset_guard_focus_label">Pause when the focused app changes</span>
+                </label>
+              </div>
+              <div class="preset-form-group">
+                <label data-i18n="preset_guard_appscope_label">App scope</label>
+                <select id="presetAppFilterMode" class="select-input">
+                  <option value="everywhere" data-i18n="preset_guard_scope_everywhere">Everywhere</option>
+                  <option value="whitelist" data-i18n="preset_guard_scope_whitelist">Only in these apps</option>
+                  <option value="blacklist" data-i18n="preset_guard_scope_blacklist">Not in these apps</option>
+                </select>
+              </div>
+              <div class="preset-form-group full-width">
+                <label data-i18n="preset_guard_apps_label">Apps (one process name per line)</label>
+                <textarea id="presetAppFilterList" class="text-input" rows="3" data-i18n-placeholder="preset_guard_apps_placeholder" placeholder="discord.exe"></textarea>
+              </div>
+            </div>
+          </div>
+          <!-- ── GLOBAL HOTKEYS (scope.hotkeys) ───────────────────── -->
+          <div class="preset-section full-width collapsed" id="presetSectionHotkeys">
+            <div class="preset-section-title" data-i18n="preset_section_hotkeys">⌨️ Global hotkeys</div>
+            <div class="preset-section-body">
+              <div class="preset-form-group"><label data-i18n="preset_hk_toggle">Toggle autoclicker</label><input type="text" id="presetHkToggle" class="text-input"></div>
+              <div class="preset-form-group"><label data-i18n="preset_hk_mode">Work / Autoclicker mode</label><input type="text" id="presetHkMode" class="text-input"></div>
+              <div class="preset-form-group"><label data-i18n="preset_hk_emergency">Emergency stop</label><input type="text" id="presetHkEmergency" class="text-input"></div>
+              <div class="preset-form-group"><label data-i18n="preset_hk_speed_up">Speed up</label><input type="text" id="presetHkSpeedUp" class="text-input"></div>
+              <div class="preset-form-group"><label data-i18n="preset_hk_slow_down">Slow down</label><input type="text" id="presetHkSlowDown" class="text-input"></div>
+              <div class="preset-form-group"><label data-i18n="preset_hk_capture">Capture cursor position</label><input type="text" id="presetHkCapture" class="text-input"></div>
+              <div class="preset-form-group"><label data-i18n="preset_hk_record">Record macro</label><input type="text" id="presetHkRecord" class="text-input"></div>
+              <div class="preset-form-group"><label data-i18n="preset_hk_ttl">Smart key memory TTL (ms)</label><input type="number" id="presetHkKeyTtl" class="num-input" min="100" max="5000" step="50" value="500"></div>
+              <div class="preset-form-group"><label data-i18n="preset_hk_debounce">Toggle response time (ms)</label><input type="number" id="presetHkDebounce" class="num-input" min="0" max="1000" step="10" value="80"></div>
+              <div class="preset-form-group">
+                <label class="checkbox-row"><input type="checkbox" id="presetHkRecordToggle" class="custom-checkbox"><span class="checkbox-box"></span><span data-i18n="preset_hk_record_enabled">Recording hotkey enabled</span></label>
+              </div>
+              <div class="preset-form-group">
+                <label class="checkbox-row"><input type="checkbox" id="presetHkSmartRecord" class="custom-checkbox"><span class="checkbox-box"></span><span data-i18n="preset_hk_smart_record">Smart key memory</span></label>
+              </div>
+            </div>
+          </div>
+          <!-- ── APPEARANCE (scope.ui) ─────────────────────────────── -->
+          <div class="preset-section full-width collapsed" id="presetSectionUi">
+            <div class="preset-section-title" data-i18n="preset_section_ui">🎨 Appearance</div>
+            <div class="preset-section-body">
+              <div class="preset-form-group">
+                <label data-i18n="settings_theme_label">Theme</label>
+                <select id="presetUiTheme" class="select-input">
+                  <option value="cyberpunk" data-i18n="settings_theme_cyberpunk">Dark Cyberpunk</option>
+                  <option value="emerald" data-i18n="settings_theme_emerald">Neon Grass</option>
+                  <option value="slate" data-i18n="settings_theme_slate">Dark Slate</option>
+                  <option value="midnight" data-i18n="settings_theme_midnight">Midnight Blue</option>
+                  <option value="dracula" data-i18n="settings_theme_dracula">Dracula Crimson</option>
+                  <option value="amethyst" data-i18n="settings_theme_amethyst">Amethyst Purple</option>
+                </select>
+              </div>
+              <div class="preset-form-group">
+                <label data-i18n="preset_ui_accent">Accent color</label>
+                <input type="color" id="presetUiAccent" class="num-input" value="#06b6d4">
+              </div>
+              <div class="preset-form-group">
+                <label data-i18n="settings_lang_label">Interface Language</label>
+                <select id="presetUiLanguage" class="select-input">
+                  <option value="ua">🇺🇦 Українська</option>
+                  <option value="ru">🇷🇺 Русский</option>
+                  <option value="en">🇬🇧 English</option>
+                </select>
+              </div>
+              <div class="preset-form-group">
+                <label class="checkbox-row"><input type="checkbox" id="presetUiAlwaysOnTop" class="custom-checkbox"><span class="checkbox-box"></span><span data-i18n="settings_always_on_top">Always on Top (Keep window pinned)</span></label>
+              </div>
+              <div class="preset-form-group">
+                <label class="checkbox-row"><input type="checkbox" id="presetUiRipple" class="custom-checkbox"><span class="checkbox-box"></span><span data-i18n="preset_ui_ripple">Visual click ripple</span></label>
+              </div>
+              <div class="preset-form-group">
+                <label class="checkbox-row"><input type="checkbox" id="presetUiHud" class="custom-checkbox"><span class="checkbox-box"></span><span data-i18n="settings_hud_label">Floating Click Counter HUD</span></label>
+              </div>
+              <div class="preset-form-group">
+                <label class="checkbox-row"><input type="checkbox" id="presetUiNotifications" class="custom-checkbox"><span class="checkbox-box"></span><span data-i18n="preset_ui_notifications">Show notifications</span></label>
+              </div>
+            </div>
           </div>
         </div>
       </div>

@@ -2132,3 +2132,378 @@ fn test_biometric_outlier_and_technique_wiring() {
         }
     }
 }
+
+/// A preset is a SELECTIVE snapshot: `scope` decides which groups travel with it.
+/// The backend (`PresetScope`) and the page (`normalizePresetScope`) must agree on
+/// the four keys, the backend must apply exactly the enabled groups, and the three
+/// group snapshots must exist on both sides — otherwise the checkbox the user
+/// ticks would mean something different in Rust than in the modal.
+#[test]
+fn test_preset_scope_model_matches_backend_and_frontend() {
+    let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
+    let asset = |name: &str| -> String {
+        let key = tauri::utils::assets::AssetKey::from(name);
+        let bytes = ctx
+            .assets()
+            .get(&key)
+            .unwrap_or_else(|| panic!("{name} must be embedded"));
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    let main_js = asset("main.js");
+    let html = asset("index.html");
+    let cm_src = include_str!("../src/config_manager.rs");
+    let sched_src = include_str!("../src/scheduler.rs");
+
+    assert!(
+        cm_src.contains("pub struct PresetScope") && cm_src.contains("pub engine: bool"),
+        "the backend needs a typed scope, not loose booleans scattered over PresetItem"
+    );
+    // `engine` defaults to ON: every preset written before the scope existed meant
+    // "the engine configuration", so an old record must not lose its engine.
+    assert!(
+        cm_src.contains("impl Default for PresetScope")
+            && cm_src.contains("engine: true,")
+            && cm_src.contains("#[serde(default = \"default_preset_scope\")]"),
+        "a preset from an older build must deserialize as engine-only, not as an empty snapshot"
+    );
+    assert!(main_js.contains("engine: src.engine !== false,"),
+        "the page's scope normalizer must default `engine` to ON, like PresetScope::default()");
+    for key in ["guards", "hotkeys", "ui"] {
+        assert!(
+            main_js.contains(&format!("{key}: !!src.{key},")),
+            "normalizePresetScope must carry `{key}` (the modal checkbox writes it)"
+        );
+    }
+    for (snapshot, field) in [
+        ("GuardSnapshot", "pub guard_settings: Option<GuardSnapshot>"),
+        ("HotkeySnapshot", "pub hotkey_settings: Option<HotkeySnapshot>"),
+        ("PresetUiSnapshot", "pub ui_settings: Option<PresetUiSnapshot>"),
+    ] {
+        assert!(
+            cm_src.contains(&format!("pub struct {snapshot}")),
+            "the {snapshot} group needs its own type"
+        );
+        assert!(
+            cm_src.contains(field),
+            "PresetItem must carry the {snapshot} as an optional field"
+        );
+    }
+
+    // Only the enabled groups are written, in BOTH apply paths.
+    assert!(
+        sched_src.contains("if preset.scope.engine {")
+            && sched_src.contains("if preset.scope.guards {")
+            && sched_src.contains("if preset.scope.hotkeys {"),
+        "the scheduler must gate each group on its scope flag"
+    );
+    let hotkey_block = &sched_src[sched_src.find("if preset.scope.hotkeys").unwrap()
+        ..sched_src.find("fn apply_preset_engine").unwrap()];
+    assert!(
+        hotkey_block.contains("hotkeys_version.fetch_add(1, Ordering::Release);"),
+        "a rebind must bump `hotkeys_version`, or the LL hook keeps the stale snapshot"
+    );
+    assert!(
+        main_js.contains("if (sc.guards && full.guard_settings)")
+            && main_js.contains("if (sc.hotkeys && full.hotkey_settings)")
+            && main_js.contains("if (sc.ui && full.ui_settings)"),
+        "applyPreset must gate each group on its scope flag too"
+    );
+
+    // The modal must offer the four checkboxes; engine is pinned ON.
+    for id in ["presetScopeEngine", "presetScopeGuards", "presetScopeHotkeys", "presetScopeUi"] {
+        assert!(html.contains(&format!("id=\"{id}\"")), "the scope panel needs #{id}");
+    }
+    assert!(
+        html.contains("id=\"presetScopeEngine\" class=\"custom-checkbox\" checked disabled"),
+        "engine is mandatory — its checkbox is checked and disabled on purpose"
+    );
+    assert!(
+        html.contains("id=\"presetSectionGuards\"") && html.contains("id=\"presetSectionUi\""),
+        "each optional group needs its own section"
+    );
+    assert!(
+        main_js.contains("function refreshPresetSectionVisibility")
+            && main_js.contains("sec.classList.toggle(\"collapsed\", !on)"),
+        "an unchecked group collapses its section instead of hiding it"
+    );
+}
+
+/// The preset editor must accept every value the dashboard accepts. It used to cap
+/// CPS at 1.0 (engine floor 0.1) and jitter at 30 (slider 35), and the IMPORT path
+/// repeated both clamps — so merely loading a record could silently rewrite it.
+/// `PRESET_LIMITS` is the single source of truth in the page.
+#[test]
+fn test_preset_editor_limits_match_dashboard() {
+    let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
+    let asset = |name: &str| -> String {
+        let key = tauri::utils::assets::AssetKey::from(name);
+        let bytes = ctx
+            .assets()
+            .get(&key)
+            .unwrap_or_else(|| panic!("{name} must be embedded"));
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    let main_js = asset("main.js");
+    let html = asset("index.html");
+
+    assert!(
+        main_js.contains("const PRESET_LIMITS = {"),
+        "the editor ranges need one named source of truth"
+    );
+    for literal in [
+        "cpsMin: 0.1, cpsMax: 160",
+        "jitterMax: 35",
+        "jitterRadiusMax: 50",
+        "clickLimitMax: 1000000",
+        "holdDurationMin: 10",
+    ] {
+        assert!(main_js.contains(literal), "PRESET_LIMITS must carry `{literal}`");
+    }
+    // The DOM must agree with the constants, or the browser clamps silently.
+    assert!(
+        html.contains("id=\"presetCpsRange\" min=\"0.1\" max=\"160\""),
+        "the modal CPS slider must span the engine range (0.1-160)"
+    );
+    assert!(
+        html.contains("id=\"presetJitterRange\" min=\"0\" max=\"35\""),
+        "the modal jitter slider must reach the dashboard ceiling (35)"
+    );
+    assert!(
+        html.contains("id=\"presetClickLimit\" class=\"num-input\" min=\"0\" max=\"1000000\""),
+        "the click limit must carry the dashboard ceiling"
+    );
+    assert!(
+        html.contains("id=\"presetHoldInterval\" class=\"num-input\" min=\"10\""),
+        "hold pause must match the dashboard floor (10 ms)"
+    );
+    // The engine fields that were missing from the modal entirely.
+    for id in ["presetHesitation", "presetJitterRadius", "presetTechniqueSelect", "presetGuiLock"] {
+        assert!(html.contains(&format!("id=\"{id}\"")), "the modal must expose #{id}");
+    }
+    // …and the narrow import clamps must be gone for good.
+    assert!(
+        !main_js.contains("Math.max(1, Math.min(160, Number(p.target_cps))")
+            && !main_js.contains("Math.min(30, Number(p.jitter_percent)"),
+        "import must not rewrite a record with narrower ranges than the editor"
+    );
+    assert!(
+        main_js.contains("function withPresetDefaults"),
+        "one normalizer must gate every preset entry point (load, edit, import, apply)"
+    );
+}
+
+
+
+/// A preset must never capture or rebind the nine preset SLOTS: a slot maps to a
+/// preset id, so storing the slots inside a preset is recursive — a preset could
+/// unbind its own activation key, or two of them could fight over one slot.
+#[test]
+fn test_preset_never_captures_slot_hotkeys() {
+    let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
+    let asset = |name: &str| -> String {
+        let key = tauri::utils::assets::AssetKey::from(name);
+        let bytes = ctx
+            .assets()
+            .get(&key)
+            .unwrap_or_else(|| panic!("{name} must be embedded"));
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    let main_js = asset("main.js");
+    let cm_src = include_str!("../src/config_manager.rs");
+
+    let snapshot = {
+        let start = cm_src
+            .find("pub struct HotkeySnapshot")
+            .expect("HotkeySnapshot must exist");
+        let rest = &cm_src[start..];
+        let end = rest.find("\n}").expect("HotkeySnapshot must be a struct");
+        &rest[..end]
+    };
+    assert!(
+        !snapshot.contains("preset_hotkeys"),
+        "HotkeySnapshot must not carry the preset slots (that would be recursive)"
+    );
+    let js_capture = {
+        let start = main_js
+            .find("function capturePresetHotkeys")
+            .expect("capturePresetHotkeys must exist");
+        let rest = &main_js[start..];
+        let end = rest
+            .find("\n}")
+            .expect("capturePresetHotkeys must be a function");
+        &rest[..end]
+    };
+    assert!(
+        !js_capture.contains("preset_hotkeys"),
+        "the page's hotkey capture must skip the slot bindings too"
+    );
+    // The slots are still applied on a normal config save — presets just do not
+    // own them.
+    assert!(
+        cm_src.contains("pub preset_hotkeys: Vec<String>"),
+        "HotkeySettings keeps the slots; only the PRESET snapshot excludes them"
+    );
+}
+
+/// Every `EngineSettings` field must be reachable from a preset on BOTH sides of
+/// the bridge, or be listed here with the reason it is not. `applyPreset` used to
+/// copy ~50 % of the fields while the card showed a handful of tags, so a preset
+/// could mean something different from what the user saw. A new engine field fails
+/// this test until it is deliberately placed.
+#[test]
+fn test_preset_field_coverage_matches_engine_settings() {
+    let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
+    let main_js = {
+        let key = tauri::utils::assets::AssetKey::from("main.js");
+        let bytes = ctx.assets().get(&key).expect("main.js must be embedded");
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    let cm_src = include_str!("../src/config_manager.rs");
+    let sched_src = include_str!("../src/scheduler.rs");
+
+    let engine_struct = {
+        let start = cm_src
+            .find("pub struct EngineSettings {")
+            .expect("EngineSettings must exist");
+        let rest = &cm_src[start..];
+        let end = rest.find("\n}").expect("EngineSettings must be a struct");
+        &rest[..end]
+    };
+    let fields: Vec<&str> = engine_struct
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("pub "))
+        .filter_map(|l| l.split(':').next())
+        .map(str::trim)
+        .collect();
+    assert!(
+        fields.len() >= 18,
+        "field extraction broke ({} fields found)",
+        fields.len()
+    );
+
+    // Engine fields NOT copied 1:1 by the engine group, each with its reason.
+    // Keep this list honest: it is what would otherwise let a field slip in.
+    let exemptions = [
+        ("stop_duration_unit", "display-only; the preset has its own field"),
+        ("stop_duration_min", "pre-1.3 migration input, handled explicitly in both paths"),
+        ("sequence_points", "carried as `PresetItem::points` (the multi-point canvas)"),
+        ("hotkey_debounce_ms", "belongs to the hotkeys group (HotkeySnapshot)"),
+    ];
+
+    let sched_engine = &sched_src[sched_src
+        .find("fn apply_preset_engine")
+        .expect("apply_preset_engine must exist")..];
+    let js_engine = {
+        let start = main_js
+            .find("// ── engine (ALWAYS captured")
+            .expect("the applyPreset engine block must exist");
+        let rest = &main_js[start..];
+        let end = rest
+            .find("// ── guards (opt-in)")
+            .expect("the applyPreset guards block must exist");
+        &rest[..end]
+    };
+
+    let mut covered = 0usize;
+    for field in &fields {
+        if let Some((_, _reason)) = exemptions.iter().find(|(f, _)| f == field) {
+            assert!(
+                cm_src.contains(&format!("pub {field}:")),
+                "exempt field `{field}` must still exist on a config struct"
+            );
+            continue;
+        }
+        covered += 1;
+        assert!(
+            cm_src.contains(&format!("pub {field}:")),
+            "engine field `{field}` has no counterpart on the config structs"
+        );
+        assert!(
+            sched_engine.contains(*field),
+            "apply_preset_engine must apply engine field `{field}`"
+        );
+        assert!(
+            js_engine.contains(*field),
+            "applyPreset must copy engine field `{field}` onto currentConfig.engine"
+        );
+    }
+    assert!(
+        covered >= 14,
+        "too few engine fields are covered ({covered}) — did the extraction break?"
+    );
+
+    // The group snapshots must cover their own settings too.
+    for field in ["typing_pause_ms", "pause_on_focus_loss", "app_filter_mode", "app_filter_list"] {
+        assert!(
+            cm_src.contains(&format!("pub {field}")),
+            "GuardSnapshot must carry `{field}`"
+        );
+    }
+    for field in [
+        "toggle", "mode_switch", "emergency_stop", "speed_up", "slow_down",
+        "capture_pos", "record_toggle", "record_hotkey", "key_ttl_ms", "smart_record",
+    ] {
+        assert!(
+            cm_src.contains(&format!("pub {field}")),
+            "HotkeySnapshot must carry `{field}`"
+        );
+    }
+    for field in [
+        "accent_color", "always_on_top", "visual_ripple", "show_hud", "show_notifications",
+    ] {
+        assert!(
+            cm_src.contains(&format!("pub {field}")),
+            "PresetUiSnapshot must carry `{field}`"
+        );
+
+/// The scope sections are a PAINT, like the auto-stop lock: an unchecked group
+/// dims and collapses, but nothing is `disabled` in the JS, and the section is
+/// never `hidden` — the inherited value stays readable, so "not captured" cannot
+/// be mistaken for "empty". The checkbox above the section is the only control
+/// that changes the capture set.
+#[test]
+fn test_preset_scope_sections_are_painted_not_hidden() {
+    let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
+    let asset = |name: &str| -> String {
+        let key = tauri::utils::assets::AssetKey::from(name);
+        let bytes = ctx
+            .assets()
+            .get(&key)
+            .unwrap_or_else(|| panic!("{name} must be embedded"));
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    let main_js = asset("main.js");
+    let style_css = asset("style.css");
+    let html = asset("index.html");
+
+    // Embedded assets may carry CRLF endings — normalize before hunting for the
+    // function's closing brace, or the `\n}` pattern never matches.
+    let norm = main_js.replace("\r\n", "\n");
+    let start = norm
+        .find("function refreshPresetSectionVisibility")
+        .expect("refreshPresetSectionVisibility must exist");
+    let rest = &norm[start..];
+    let end = rest.find("\n}\n").expect("it must be a function");
+    let body = &rest[..end];
+    assert!(
+        !body.contains("disabled") && !body.contains("pointerEvents"),
+        "the scope lock must only toggle a class — `disabled` would dead-end the section"
+    );
+    assert!(
+        body.contains("classList.toggle(\"collapsed\", !on)"),
+        "the collapsed class is the whole mechanism"
+    );
+    assert!(
+        style_css.contains(".preset-section.collapsed"),
+        "the collapsed state needs a rule (dimmed, still laid out)"
+    );
+    assert!(
+        !html.contains("preset-section full-width collapsed hidden"),
+        "a scope section is collapsed, never `hidden` — the inherited value must stay visible"
+    );
+}
+
+    }
+}
+
+

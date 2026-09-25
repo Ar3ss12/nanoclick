@@ -690,7 +690,60 @@ impl ClickScheduler {
     }
 
     /// Update internal scheduler parameters from a preset specification.
+    ///
+    /// Only the groups enabled in `preset.scope` are written, and every one of
+    /// them goes **straight into the atomics** the click loop and the hotkey hook
+    /// already read. A `get_config()`/`set_config()` round-trip is deliberately
+    /// avoided: `get_config()` zeroes the run-scoped timers (`start_delay_ms`,
+    /// `stop_duration_ms`, `stop_time_epoch_sec`) by design, so the round-trip
+    /// would silently disarm the auto-stop the preset just armed.
+    ///
+    /// `scope.ui` is page-owned (theme/accent/language/ripple/HUD): the backend
+    /// persists it, and a live page repaints from the `preset-activated` event —
+    /// there is nothing to store on the scheduler here.
     pub fn apply_preset_fields_to_scheduler(&self, preset: &crate::config_manager::PresetItem) {
+        if preset.scope.engine {
+            self.apply_preset_engine(preset);
+        }
+        if preset.scope.guards {
+            if let Some(g) = &preset.guard_settings {
+                self.typing_guard.set_pause_ms(g.typing_pause_ms);
+                self.app_filter.set(&g.app_filter_mode, &g.app_filter_list);
+                // Mirror `set_config`: disarm only on a real flag flip, so a
+                // preset applied mid-run does not wipe a live FocusGuard
+                // baseline just because the value was re-written.
+                let focus_was = self.focus_guard.is_enabled();
+                self.focus_guard.set_enabled(g.pause_on_focus_loss);
+                if focus_was != g.pause_on_focus_loss {
+                    self.focus_guard.disarm();
+                }
+            }
+        }
+        if preset.scope.hotkeys {
+            if let Some(h) = &preset.hotkey_settings {
+                *self.hotkey_toggle.lock().unwrap() = h.toggle.clone();
+                *self.hotkey_mode_switch.lock().unwrap() = h.mode_switch.clone();
+                *self.hotkey_emergency_stop.lock().unwrap() = h.emergency_stop.clone();
+                *self.hotkey_speed_up.lock().unwrap() = h.speed_up.clone();
+                *self.hotkey_slow_down.lock().unwrap() = h.slow_down.clone();
+                *self.hotkey_capture_pos.lock().unwrap() = h.capture_pos.clone();
+                self.hotkey_record_toggle
+                    .store(h.record_toggle, Ordering::Relaxed);
+                *self.hotkey_record.lock().unwrap() = h.record_hotkey.clone();
+                self.hotkey_debounce_ms
+                    .store(h.hotkey_debounce_ms, Ordering::Relaxed);
+                // The preset slots are NOT part of the snapshot (a slot maps to a
+                // preset — capturing it would be recursive), so they survive.
+                // Signal the hotkey listener that the bindings changed, exactly
+                // like `set_config` does, or the hook keeps the stale snapshot.
+                self.hotkeys_version.fetch_add(1, Ordering::Release);
+            }
+        }
+    }
+
+    /// Engine half of a preset apply — the historic behaviour (every engine
+    /// field), plus `gui_lock_ms`, which lives in the engine config.
+    fn apply_preset_engine(&self, preset: &crate::config_manager::PresetItem) {
         self.cps_raw.store(preset.target_cps.to_bits(), Ordering::Relaxed);
         self.random_pct_raw
             .store(preset.jitter_percent.to_bits(), Ordering::Relaxed);
@@ -718,6 +771,7 @@ impl ClickScheduler {
             .store(preset.jitter_radius_px, Ordering::Relaxed);
         self.start_delay_ms
             .store(preset.start_delay_ms, Ordering::Relaxed);
+        self.gui_lock_ms.store(preset.gui_lock_ms, Ordering::Relaxed);
         let stop_dur_ms = if preset.stop_duration_ms > 0 {
             preset.stop_duration_ms
         } else {

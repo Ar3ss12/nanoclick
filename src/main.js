@@ -2786,6 +2786,202 @@ if (modeToggleBtn) {
   });
 }
 
+// ── PRESET SCOPE MODEL ──────────────────────────────────────
+// A preset is a *selective* snapshot of the app configuration. `engine` is
+// always captured (a preset without an engine is not a preset); guards /
+// hotkeys / ui are opt-in, because applying them changes how the clicker is
+// guarded, which keys drive it, and how the app looks. The backend mirrors this
+// in `PresetScope` (config_manager.rs) — the two sides must agree, and
+// `test_preset_scope_model_matches_backend` fails if they drift.
+function normalizePresetScope(scope) {
+  const src = scope || {};
+  return {
+    engine: src.engine !== false,
+    guards: !!src.guards,
+    hotkeys: !!src.hotkeys,
+    ui: !!src.ui,
+  };
+}
+
+// Ranges the preset editor accepts. These MUST mirror the dashboard controls in
+// index.html: a narrower editor range silently rewrites records (CPS used to be
+// capped at 1.0 while the engine floor is 0.1, jitter at 30 while the slider
+// reaches 35, and the import path repeated both mistakes).
+const PRESET_LIMITS = {
+  cpsMin: 0.1, cpsMax: 160, cpsStep: 0.5,
+  jitterMin: 0, jitterMax: 35, jitterStep: 0.5,
+  hesitationMin: 0, hesitationMax: 10, hesitationStep: 0.5,
+  jitterRadiusMin: 0, jitterRadiusMax: 50, jitterRadiusStep: 1,
+  clickLimitMax: 1000000,
+  holdDurationMin: 10,
+  startDelayMaxSec: 300,
+};
+
+function clampPresetNumber(value, min, max, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
+// Hesitation is *shown* as a percentage (0-10) but stored as a probability
+// (0-0.10), exactly like `engine.outlier_prob` and `config::MAX_OUTLIER_PROB`.
+function hesitationPercentToProb(pct) {
+  const p = clampPresetNumber(pct, PRESET_LIMITS.hesitationMin, PRESET_LIMITS.hesitationMax, 2);
+  return Math.round(p * 100) / 10000;
+}
+
+function hesitationProbToPercent(prob) {
+  const p = Number(prob);
+  if (!Number.isFinite(p)) return 2;
+  return Math.round(Math.max(0, Math.min(0.10, p)) * 10000) / 100;
+}
+
+// A COMPLETE preset view. Records written by older builds (or by the Rust
+// default template) lack the fields this build reads; fill them here once
+// instead of sprinkling `?? fallback` over every consumer.
+function withPresetDefaults(p) {
+  const merged = {
+    id: "", name: "Preset", description: "", icon: "⚡", category: "utility",
+    target_cps: 10, jitter_percent: 5, jitter_radius_px: 0, outlier_prob: 0.02,
+    technique: "auto", click_limit: 0, button: "left", click_type: "single",
+    position_mode: "cursor", fixed_x: 100, fixed_y: 100,
+    hold_duration_ms: 500, hold_interval_ms: 1000,
+    repeat_mode: "unlimited", repeat_count: 0, repeat_interval_ms: 1000,
+    start_delay_ms: 0, stop_duration_ms: 0, stop_duration_unit: "sec",
+    stop_time_str: "", stop_mode: "none", gui_lock_ms: 1500,
+    points: [], hotkey: "", is_default: false,
+    scope: normalizePresetScope(null),
+    guard_settings: null, hotkey_settings: null, ui_settings: null,
+    ...p,
+  };
+  merged.scope = normalizePresetScope(merged.scope);
+  merged.target_cps = clampPresetNumber(merged.target_cps, PRESET_LIMITS.cpsMin, PRESET_LIMITS.cpsMax, 10);
+  merged.jitter_percent = clampPresetNumber(merged.jitter_percent, PRESET_LIMITS.jitterMin, PRESET_LIMITS.jitterMax, 5);
+  merged.jitter_radius_px = Math.round(clampPresetNumber(merged.jitter_radius_px, PRESET_LIMITS.jitterRadiusMin, PRESET_LIMITS.jitterRadiusMax, 0));
+  merged.click_limit = Math.max(0, Math.min(PRESET_LIMITS.clickLimitMax, parseInt(merged.click_limit, 10) || 0));
+  merged.outlier_prob = hesitationPercentToProb(hesitationProbToPercent(merged.outlier_prob));
+  merged.technique = normalizeTechnique(merged.technique);
+  merged.stop_duration_unit = normalizeStopUnit(merged.stop_duration_unit);
+  merged.points = Array.isArray(merged.points) ? merged.points : [];
+  return merged;
+}
+// Capture the engine group from the LIVE config (the dashboard is the source of
+// truth for what the user currently has selected).
+function capturePresetEngine() {
+  const e = currentConfig.engine || {};
+  const stopMs = configuredStopDurationMs(e);
+  return {
+    target_cps: clampPresetNumber(e.target_cps, PRESET_LIMITS.cpsMin, PRESET_LIMITS.cpsMax, 10),
+    jitter_percent: clampPresetNumber(e.jitter_percent, PRESET_LIMITS.jitterMin, PRESET_LIMITS.jitterMax, 5),
+    jitter_radius_px: Math.round(clampPresetNumber(e.jitter_radius_px, PRESET_LIMITS.jitterRadiusMin, PRESET_LIMITS.jitterRadiusMax, 0)),
+    outlier_prob: hesitationPercentToProb(hesitationProbToPercent(e.outlier_prob)),
+    technique: normalizeTechnique(e.technique),
+    click_limit: Math.max(0, Math.min(PRESET_LIMITS.clickLimitMax, parseInt(e.click_limit, 10) || 0)),
+    button: e.button || "left",
+    click_type: e.click_type || "single",
+    position_mode: e.position_mode || "cursor",
+    fixed_x: Number.isFinite(Number(e.fixed_x)) ? Number(e.fixed_x) : 100,
+    fixed_y: Number.isFinite(Number(e.fixed_y)) ? Number(e.fixed_y) : 100,
+    hold_duration_ms: Math.max(PRESET_LIMITS.holdDurationMin, Number(e.hold_duration_ms) || 500),
+    hold_interval_ms: Math.max(0, Number(e.hold_interval_ms) || 1000),
+    repeat_mode: e.repeat_mode || "unlimited",
+    repeat_count: Math.max(0, parseInt(e.repeat_count, 10) || 0),
+    repeat_interval_ms: e.repeat_interval_ms == null ? 1000 : Number(e.repeat_interval_ms),
+    start_delay_ms: Math.max(0, Number(e.start_delay_ms) || 0),
+    stop_duration_ms: stopMs,
+    stop_duration_unit: normalizeStopUnit(e.stop_duration_unit),
+    stop_time_str: e.stop_time_str || "",
+    stop_mode: presetStopModeFor(e.stop_mode, stopMs, e.stop_time_str || ""),
+    gui_lock_ms: Number(e.gui_lock_ms) || 1500,
+    points: Array.isArray(e.sequence_points) ? JSON.parse(JSON.stringify(e.sequence_points)) : [],
+  };
+}
+
+// Capture the Smart Guard group from the live config.
+function capturePresetGuards() {
+  const ui = currentConfig.ui || {};
+  return {
+    typing_pause_ms: Math.max(0, Number(ui.typing_pause_ms) || 0),
+    pause_on_focus_loss: !!ui.pause_on_focus_loss,
+    app_filter_mode: ui.app_filter_mode || "everywhere",
+    app_filter_list: Array.isArray(ui.app_filter_list)
+      ? ui.app_filter_list.map(s => String(s).trim().toLowerCase()).filter(Boolean)
+      : [],
+  };
+}
+// Capture the global-hotkey group. The nine preset SLOTS are deliberately not
+// part of it: a slot maps to a preset, so capturing them would be recursive.
+function capturePresetHotkeys() {
+  const h = currentConfig.hotkeys || {};
+  return {
+    toggle: h.toggle || "R / K",
+    mode_switch: h.mode_switch || "Ctrl+Alt+M",
+    emergency_stop: h.emergency_stop || "Escape",
+    speed_up: h.speed_up || "Ctrl+=",
+    slow_down: h.slow_down || "Ctrl+-",
+    capture_pos: h.capture_pos || "Ctrl+P",
+    record_toggle: h.record_toggle !== false,
+    record_hotkey: h.record_hotkey || "Ctrl+Shift+R",
+    key_ttl_ms: Math.max(100, Math.min(5000, Number(h.key_ttl_ms) || 500)),
+    smart_record: h.smart_record !== false,
+    hotkey_debounce_ms: Math.max(0, Number(currentConfig.engine?.hotkey_debounce_ms) || 80),
+  };
+}
+
+// Capture the appearance group. Lifecycle/tray settings stay OUT on purpose:
+// applying a preset must never hide the window into the tray or arm an
+// autostart entry behind the user's back.
+function capturePresetUi() {
+  const ui = currentConfig.ui || {};
+  return {
+    theme: ui.theme || "cyberpunk",
+    accent_color: ui.accent_color || "#06b6d4",
+    language: ui.language || "ua",
+    always_on_top: !!ui.always_on_top,
+    visual_ripple: ui.visual_ripple !== false,
+    show_hud: !!ui.show_hud,
+    show_notifications: ui.show_notifications !== false,
+  };
+}
+
+// The single place that turns "the current config + a scope" into a preset
+// payload. Every path (Save config, the editor, the export bundle) goes through
+// it, so no field can be forgotten again — `jitter_radius_px` and
+// `stop_duration_unit` used to be dropped exactly that way.
+function buildPresetSnapshot(scope) {
+  const sc = normalizePresetScope(scope);
+  const engine = capturePresetEngine();
+  return {
+    scope: sc,
+    target_cps: engine.target_cps,
+    jitter_percent: engine.jitter_percent,
+    jitter_radius_px: engine.jitter_radius_px,
+    outlier_prob: engine.outlier_prob,
+    technique: engine.technique,
+    click_limit: engine.click_limit,
+    button: engine.button,
+    click_type: engine.click_type,
+    position_mode: engine.position_mode,
+    fixed_x: engine.fixed_x,
+    fixed_y: engine.fixed_y,
+    hold_duration_ms: engine.hold_duration_ms,
+    hold_interval_ms: engine.hold_interval_ms,
+    repeat_mode: engine.repeat_mode,
+    repeat_count: engine.repeat_count,
+    repeat_interval_ms: engine.repeat_interval_ms,
+    start_delay_ms: engine.start_delay_ms,
+    stop_duration_ms: engine.stop_duration_ms,
+    stop_duration_unit: engine.stop_duration_unit,
+    stop_time_str: engine.stop_time_str,
+    stop_mode: engine.stop_mode,
+    gui_lock_ms: engine.gui_lock_ms,
+    points: engine.points,
+    guard_settings: sc.guards ? capturePresetGuards() : null,
+    hotkey_settings: sc.hotkeys ? capturePresetHotkeys() : null,
+    ui_settings: sc.ui ? capturePresetUi() : null,
+  };
+}
+
 // ── PRESETS MANAGER V2 ──────────────────────────────────────
 const defaultPresetList = [
   {
@@ -2889,30 +3085,64 @@ function renderPresetsGrid() {
   }
   if (emptyState) emptyState.classList.add("hidden");
 
+  // Search + category filter. The config array is the source of truth; the grid
+  // is only a VIEW of it, so a filtered-out row is never "gone".
+  const query = (presetEl("presetSearchInput")?.value || "").trim().toLowerCase();
+  const categoryFilter = presetEl("presetCategoryFilter")?.value || "all";
+  const visible = currentConfig.presets
+    .map(withPresetDefaults)
+    .filter(p => categoryFilter === "all" || p.category === categoryFilter)
+    .filter(p => !query
+      || p.name.toLowerCase().includes(query)
+      || (p.description || "").toLowerCase().includes(query)
+      || (p.hotkey || "").toLowerCase().includes(query));
+
+  if (visible.length === 0) {
+    container.innerHTML = `<div class="presets-empty" style="grid-column:1/-1;"><div class="presets-empty-icon">🔍</div><div class="presets-empty-title">${escapeHtml(getI18nText("presets_no_match", {}, "No presets match"))}</div></div>`;
+    return;
+  }
+
   // Build the whole grid in one innerHTML write
-  const html = currentConfig.presets.map(p => {
+  const html = visible.map(p => {
     const posStr = p.position_mode === "fixed"
       ? getI18nText("presets_card_tag_fixed", { x: p.fixed_x, y: p.fixed_y }, `Fixed (${p.fixed_x},${p.fixed_y})`)
       : getI18nText("presets_card_tag_cursor", {}, "Cursor");
-    const clickTypeKey = `dash_type_${p.click_type || "single"}`;
-    const clickTypeStr = getI18nText(clickTypeKey, {}, p.click_type ? (p.click_type.charAt(0).toUpperCase() + p.click_type.slice(1)) : "Single");
-    const btnKey = `dash_btn_${p.button || "left"}`;
-    const btnName = getI18nText(btnKey, {}, p.button ? (p.button.charAt(0).toUpperCase() + p.button.slice(1)) : "Left");
+    const clickTypeStr = getI18nText(`dash_type_${p.click_type}`, {}, p.click_type);
+    const btnName = getI18nText(`dash_btn_${p.button}`, {}, p.button);
     const btnStr = getI18nText("presets_card_tag_btn", { btn: btnName }, `${btnName} Btn`);
-    const limitStr = p.click_limit > 0 ? getI18nText("presets_card_tag_limit", { val: p.click_limit }, `Limit: ${p.click_limit}`) : null;
+    const limitStr = getI18nText("presets_card_tag_limit", { val: p.click_limit }, `Limit: ${p.click_limit}`);
     const jitterStr = getI18nText("presets_card_tag_jitter", { val: p.jitter_percent }, `±${p.jitter_percent}% Jitter`);
+    const techniqueStr = getI18nText(`technique_${p.technique}`, {}, p.technique);
     const runBtnText = getI18nText("presets_card_btn_run", {}, "▶ Run");
     const runTitle = getI18nText("presets_card_btn_run_title", {}, "Apply and run now");
     const applyBtnText = getI18nText("presets_card_btn_apply", {}, "⚡ Apply");
     const applyTitle = getI18nText("presets_card_btn_apply_title", {}, "Apply preset");
     const inspectTitle = getI18nText("presets_card_btn_inspect_title", {}, "View details");
     const editTitle = getI18nText("presets_card_btn_edit_title", {}, "Edit");
+    const dupTitle = getI18nText("presets_card_btn_duplicate_title", {}, "Duplicate");
     const deleteTitle = getI18nText("presets_card_btn_delete_title", {}, "Delete");
     const icon = p.icon || '🎯';
     const name = escapeHtml(p.name);
     const isPresetRunning = currentRunningPresetId && currentRunningPresetId === p.id;
     const hotkeyTitle = getI18nText("preset_field_hotkey", {}, "Activation Hotkey");
     const hotkeyBadge = p.hotkey ? `<span class="preset-card-hotkey-badge" title="${hotkeyTitle}">⌨️ ${escapeHtml(p.hotkey)}</span>` : '';
+    // Scope badges answer "what would applying this preset change?" at a glance.
+    const scopeBadges = [
+      p.scope.guards ? getI18nText("preset_scope_guards", {}, "Guards") : null,
+      p.scope.hotkeys ? getI18nText("preset_scope_hotkeys", {}, "Hotkeys") : null,
+      p.scope.ui ? getI18nText("preset_scope_ui", {}, "Appearance") : null,
+    ].filter(Boolean).map(l => `<span class="preset-card-scope-badge">${escapeHtml(l)}</span>`).join("");
+    // Every engine value that differs from the default gets a tag: the card used
+    // to show five tags and hide half of what a preset actually applies.
+    const tags = [jitterStr, techniqueStr, clickTypeStr, btnStr, posStr];
+    if (p.outlier_prob > 0) tags.push(`🍀 ${hesitationProbToPercent(p.outlier_prob)}%`);
+    if (p.jitter_radius_px > 0) tags.push(`📍 ±${p.jitter_radius_px}px`);
+    if (p.click_limit > 0) tags.push(limitStr);
+    if (p.repeat_mode === "repeat" && p.repeat_count > 0) tags.push(`🔁 ×${p.repeat_count}`);
+    if (p.start_delay_ms > 0) tags.push(`⏳ ${formatDurationMs(p.start_delay_ms)}`);
+    if (p.stop_duration_ms > 0) tags.push(`⏱️ ${formatDurationMs(p.stop_duration_ms)}`);
+    else if (p.stop_time_str) tags.push(`🕐 ${escapeHtml(p.stop_time_str)}`);
+    if (p.points.length > 0) tags.push(`🎯 ${p.points.length}`);
     // data-action hook for delegated click handler below
     return `
       <div class="preset-card-new ${isPresetRunning ? 'preset-card--running' : ''}" data-id="${p.id}">
@@ -2925,15 +3155,12 @@ function renderPresetsGrid() {
             </div>
             <div class="preset-card-badges">
               ${hotkeyBadge}
+              ${scopeBadges}
               <span class="preset-card-cps-badge">${p.target_cps} CPS</span>
             </div>
           </div>
           <div class="preset-card-tags">
-            <span class="preset-tag">${jitterStr}</span>
-            <span class="preset-tag">${clickTypeStr}</span>
-            <span class="preset-tag">${btnStr}</span>
-            <span class="preset-tag">${posStr}</span>
-            ${limitStr ? `<span class="preset-tag">${limitStr}</span>` : ''}
+            ${tags.map(t => `<span class="preset-tag">${t}</span>`).join('')}
           </div>
         </div>
         <div class="preset-card-footer">
@@ -2945,6 +3172,7 @@ function renderPresetsGrid() {
           </button>
           <button type="button" class="preset-icon-btn" data-action="inspect" data-id="${escapeHtml(p.id)}" title="${inspectTitle}">👁️</button>
           <button type="button" class="preset-icon-btn edit" data-action="edit" data-id="${escapeHtml(p.id)}" title="${editTitle}">✏️</button>
+          <button type="button" class="preset-icon-btn" data-action="duplicate" data-id="${escapeHtml(p.id)}" title="${dupTitle}">📋</button>
           <button type="button" class="preset-icon-btn danger" data-action="delete" data-id="${escapeHtml(p.id)}" title="${deleteTitle}">🗑️</button>
         </div>
       </div>`;
@@ -2967,11 +3195,29 @@ function renderPresetsGrid() {
           if (p) openPresetEditModal(p);
           break;
         }
+        case "duplicate": duplicatePreset(id); break;
         case "delete": deletePreset(id); break;
       }
     });
     container.dataset.bound = "1";
   }
+}
+
+// Copy a preset (every captured group included) under a fresh id, so "make a
+// variant of this profile" does not mean re-entering twenty fields by hand.
+async function duplicatePreset(presetId) {
+  ensurePresetsExist();
+  const source = currentConfig.presets.find(x => x.id === presetId);
+  if (!source) return;
+  const copy = JSON.parse(JSON.stringify(withPresetDefaults(source)));
+  copy.id = "preset_" + Date.now();
+  copy.name = `${copy.name} (copy)`;
+  copy.is_default = false;
+  // Two presets must never fight over one global hotkey.
+  copy.hotkey = "";
+  currentConfig.presets.push(copy);
+  renderPresetsGrid();
+  await saveConfig();
 }
 
 // ── VISUAL EDITOR HELPERS ─────────────────────────────────────────────────
@@ -3102,45 +3348,100 @@ async function applyPreset(presetId) {
       const st = ensureStatsConfig();
       st.presets_applied = Number(st.presets_applied || 0) + 1;
       saveConfigThrottled();
-      currentConfig.engine.target_cps = p.target_cps;
-      currentConfig.engine.jitter_percent = p.jitter_percent;
-      currentConfig.engine.click_limit = p.click_limit || 0;
-      currentConfig.engine.button = p.button || "left";
-      currentConfig.engine.click_type = p.click_type || "single";
-      currentConfig.engine.position_mode = p.position_mode || "cursor";
-      if (p.fixed_x !== undefined) currentConfig.engine.fixed_x = p.fixed_x;
-      if (p.fixed_y !== undefined) currentConfig.engine.fixed_y = p.fixed_y;
-      currentConfig.engine.hold_duration_ms = Number(p.hold_duration_ms) || 500;
-      currentConfig.engine.hold_interval_ms = Number(p.hold_interval_ms) || 1000;
-      currentConfig.engine.jitter_radius_px = Number(p.jitter_radius_px) || 0;
-      currentConfig.engine.outlier_prob = Number.isFinite(Number(p.outlier_prob)) ? Math.max(0, Math.min(0.10, Number(p.outlier_prob))) : 0.02;
-      currentConfig.engine.technique = normalizeTechnique(p.technique);
-      currentConfig.engine.repeat_mode = p.repeat_mode || "unlimited";
-      currentConfig.engine.repeat_count = Number(p.repeat_count) || 0;
-      currentConfig.engine.repeat_interval_ms = p.repeat_interval_ms == null ? 1000 : Number(p.repeat_interval_ms);
-      currentConfig.engine.start_delay_ms = Number(p.start_delay_ms) || 0;
-      // Presets store the auto-stop in ms; a preset saved by an older build still
-      // has the whole-minutes field, so migrate it on the way in.
-      currentConfig.engine.stop_duration_ms = Number(p.stop_duration_ms)
+      if (!currentConfig.engine) currentConfig.engine = {};
+      if (!currentConfig.ui) currentConfig.ui = {};
+      if (!currentConfig.hotkeys) currentConfig.hotkeys = {};
+      // One complete view: a preset written by an older build lacks the fields
+      // this build reads, and its `scope` defaults to engine-only.
+      const full = withPresetDefaults(p);
+      const sc = full.scope;
+
+      // ── engine (ALWAYS captured — a preset without an engine is not one) ──
+      currentConfig.engine.target_cps = full.target_cps;
+      currentConfig.engine.jitter_percent = full.jitter_percent;
+      currentConfig.engine.jitter_radius_px = full.jitter_radius_px;
+      currentConfig.engine.outlier_prob = full.outlier_prob;
+      currentConfig.engine.technique = full.technique;
+      currentConfig.engine.click_limit = full.click_limit;
+      currentConfig.engine.button = full.button;
+      currentConfig.engine.click_type = full.click_type;
+      currentConfig.engine.position_mode = full.position_mode;
+      currentConfig.engine.fixed_x = full.fixed_x;
+      currentConfig.engine.fixed_y = full.fixed_y;
+      currentConfig.engine.hold_duration_ms = full.hold_duration_ms;
+      currentConfig.engine.hold_interval_ms = full.hold_interval_ms;
+      currentConfig.engine.repeat_mode = full.repeat_mode;
+      currentConfig.engine.repeat_count = full.repeat_count;
+      currentConfig.engine.repeat_interval_ms = full.repeat_interval_ms;
+      currentConfig.engine.start_delay_ms = full.start_delay_ms;
+      currentConfig.engine.gui_lock_ms = full.gui_lock_ms;
+      // ms is the storage format; `stop_duration_min` is the pre-1.3 whole-minute
+      // field, read only as a migration input (the backend migrates it the same way).
+      currentConfig.engine.stop_duration_ms = Number(full.stop_duration_ms)
         || Math.round((Number(p.stop_duration_min) || 0) * 60000);
-      currentConfig.engine.stop_time_str = p.stop_time_str || "";
-      // A preset carries both auto-stop values; the armed trigger comes from the
-      // preset and is re-derived from the values only when the preset predates
-      // the field — the backend then reads exactly the trigger the card shows.
+      currentConfig.engine.stop_duration_unit = full.stop_duration_unit;
+      currentConfig.engine.stop_time_str = full.stop_time_str;
+      // Both auto-stop values travel; the armed trigger comes from the preset and
+      // is re-derived from the values only when the preset predates the field.
       currentConfig.engine.stop_mode = presetStopModeFor(
-        p.stop_mode,
+        full.stop_mode,
         currentConfig.engine.stop_duration_ms,
         currentConfig.engine.stop_time_str
       );
-      // Multi-point sequence: copy onto engine so the scheduler picks it up.
-      currentConfig.engine.sequence_points = Array.isArray(p.points)
-        ? JSON.parse(JSON.stringify(p.points))
-        : [];
-      return "engine fields copied";
+      // Multi-point sequence: copy onto the engine so the scheduler picks it up.
+      currentConfig.engine.sequence_points = JSON.parse(JSON.stringify(full.points));
+
+      // ── guards (opt-in) ──────────────────────────────────────────────────
+      if (sc.guards && full.guard_settings) {
+        const g = full.guard_settings;
+        currentConfig.ui.typing_pause_ms = Math.max(0, Number(g.typing_pause_ms) || 0);
+        currentConfig.ui.pause_on_focus_loss = !!g.pause_on_focus_loss;
+        currentConfig.ui.app_filter_mode = g.app_filter_mode || "everywhere";
+        currentConfig.ui.app_filter_list = Array.isArray(g.app_filter_list)
+          ? g.app_filter_list.map(s => String(s).trim().toLowerCase()).filter(Boolean)
+          : [];
+      }
+
+      // ── hotkeys (opt-in) ────────────────────────────────────────────────
+      if (sc.hotkeys && full.hotkey_settings) {
+        const h = full.hotkey_settings;
+        currentConfig.hotkeys.toggle = h.toggle || "R / K";
+        currentConfig.hotkeys.mode_switch = h.mode_switch || "Ctrl+Alt+M";
+        currentConfig.hotkeys.emergency_stop = h.emergency_stop || "Escape";
+        currentConfig.hotkeys.speed_up = h.speed_up || "Ctrl+=";
+        currentConfig.hotkeys.slow_down = h.slow_down || "Ctrl+-";
+        currentConfig.hotkeys.capture_pos = h.capture_pos || "Ctrl+P";
+        currentConfig.hotkeys.record_toggle = !!h.record_toggle;
+        currentConfig.hotkeys.record_hotkey = h.record_hotkey || "Ctrl+Shift+R";
+        currentConfig.hotkeys.key_ttl_ms = Math.max(100, Math.min(5000, Number(h.key_ttl_ms) || 500));
+        currentConfig.hotkeys.smart_record = !!h.smart_record;
+        currentConfig.engine.hotkey_debounce_ms = Math.max(0, Number(h.hotkey_debounce_ms) || 80);
+        // The nine preset SLOTS are not part of the snapshot (a slot maps to a
+        // preset — capturing it would let a preset rebind its own activation key).
+      }
+
+      // ── ui (opt-in, appearance only — never tray/lifecycle) ─────────────
+      if (sc.ui && full.ui_settings) {
+        const u = full.ui_settings;
+        currentConfig.ui.theme = u.theme || "cyberpunk";
+        currentConfig.ui.accent_color = u.accent_color || "#06b6d4";
+        currentConfig.ui.language = u.language || "ua";
+        currentConfig.ui.always_on_top = !!u.always_on_top;
+        currentConfig.ui.visual_ripple = u.visual_ripple !== false;
+        currentConfig.ui.show_hud = !!u.show_hud;
+        currentConfig.ui.show_notifications = u.show_notifications !== false;
+      }
+      return `groups: engine${sc.guards ? "+guards" : ""}${sc.hotkeys ? "+hotkeys" : ""}${sc.ui ? "+ui" : ""}`;
     });
 
     await op.run("refresh-ui", async () => {
       updateUiFromConfig(currentConfig);
+      // The theme/accent/presence toggles are painted by updateUiFromConfig; the
+      // locale is owned by the i18n engine and only loads on an explicit switch.
+      if (withPresetDefaults(p).scope.ui && currentConfig.ui.language
+          && window.I18nEngine && window.I18nEngine.currentLang !== currentConfig.ui.language) {
+        await window.I18nEngine.setLanguage(currentConfig.ui.language);
+      }
       await saveConfig();
       return "UI + config saved";
     });
@@ -3215,48 +3516,63 @@ function inspectPreset(presetId) {
 
   if (title) title.textContent = getI18nText("inspect_modal_title", { name: `${p.icon || ''} ${p.name}` }, `🔍 Preset details: ${p.icon || ''} ${p.name}`);
 
-  const intervalMs = (1000 / p.target_cps).toFixed(2);
-  const clickTypeStr = getI18nText(`dash_type_${p.click_type || 'single'}`, {}, p.click_type || 'single');
-  const btnKey = `dash_btn_${p.button || 'left'}`;
-  const btnStr = getI18nText(btnKey, {}, p.button || 'left');
-  const posModeStr = p.position_mode === 'fixed'
-    ? getI18nText("presets_card_tag_fixed", { x: p.fixed_x, y: p.fixed_y }, `Fixed (X: ${p.fixed_x}, Y: ${p.fixed_y})`)
+  const full = withPresetDefaults(p);
+  const intervalMs = (1000 / full.target_cps).toFixed(2);
+  const clickTypeStr = getI18nText(`dash_type_${full.click_type}`, {}, full.click_type);
+  const btnStr = getI18nText(`dash_btn_${full.button}`, {}, full.button);
+  const posModeStr = full.position_mode === 'fixed'
+    ? getI18nText("presets_card_tag_fixed", { x: full.fixed_x, y: full.fixed_y }, `Fixed (X: ${full.fixed_x}, Y: ${full.fixed_y})`)
     : getI18nText("preset_pos_follow_cursor", {}, 'Follow cursor');
-  const limitStr = p.click_limit > 0
-    ? `${p.click_limit} clicks`
+  const limitStr = full.click_limit > 0
+    ? `${full.click_limit} clicks`
     : getI18nText("preset_repeat_unlimited", {}, 'Unlimited');
+  const repeatStr = full.repeat_mode === "repeat"
+    ? `×${full.repeat_count}`
+    : getI18nText("preset_repeat_unlimited", {}, 'Unlimited');
+  const stopStr = full.stop_duration_ms > 0
+    ? `${formatDurationMs(full.stop_duration_ms)} (${full.stop_mode})`
+    : (full.stop_time_str ? `${full.stop_time_str} (${full.stop_mode})` : "—");
+  // One row per engine field, plus a section that NAMES what the preset does not
+  // carry — the old dialog showed seven rows and quietly hid the rest.
+  const row = (labelKey, fallback, value) => `
+      <div class="inspect-row">
+        <span class="inspect-label">${getI18nText(labelKey, {}, fallback)}</span>
+        <span class="inspect-value">${value}</span>
+      </div>`;
+  const section = (titleKey, fallback, rows) => `
+      <div class="inspect-section-title">${getI18nText(titleKey, {}, fallback)}</div>${rows}`;
+  const capturedGroups = [
+    full.scope.guards ? getI18nText("preset_scope_guards", {}, "Guards") : null,
+    full.scope.hotkeys ? getI18nText("preset_scope_hotkeys", {}, "Hotkeys") : null,
+    full.scope.ui ? getI18nText("preset_scope_ui", {}, "Appearance") : null,
+  ].filter(Boolean);
 
   if (body) {
-    body.innerHTML = `
-      <div class="inspect-row">
-        <span class="inspect-label">${getI18nText("inspect_label_name", {}, "Name:")}</span>
-        <span class="inspect-value">${escapeHtml(p.name)}</span>
-      </div>
-      <div class="inspect-row">
-        <span class="inspect-label">${getI18nText("inspect_label_speed", {}, "Click speed (CPS):")}</span>
-        <span class="inspect-value">${p.target_cps} CPS (${intervalMs} ms)</span>
-      </div>
-      <div class="inspect-row">
-        <span class="inspect-label">${getI18nText("inspect_label_jitter", {}, "Randomization (Jitter):")}</span>
-        <span class="inspect-value">±${p.jitter_percent}%</span>
-      </div>
-      <div class="inspect-row">
-        <span class="inspect-label">${getI18nText("inspect_label_click_type", {}, "Click type:")}</span>
-        <span class="inspect-value">${clickTypeStr}</span>
-      </div>
-      <div class="inspect-row">
-        <span class="inspect-label">${getI18nText("inspect_label_button", {}, "Mouse button:")}</span>
-        <span class="inspect-value">${btnStr}</span>
-      </div>
-      <div class="inspect-row">
-        <span class="inspect-label">${getI18nText("inspect_label_pos", {}, "Position mode:")}</span>
-        <span class="inspect-value">${posModeStr}</span>
-      </div>
-      <div class="inspect-row">
-        <span class="inspect-label">${getI18nText("inspect_label_limit", {}, "Click limit:")}</span>
-        <span class="inspect-value">${limitStr}</span>
-      </div>
-    `;
+    body.innerHTML = [
+      section("inspect_section_engine", "⚙️ Engine", [
+        row("inspect_label_name", "Name:", escapeHtml(full.name)),
+        row("inspect_label_category", "Category:", escapeHtml(full.category || "utility")),
+        row("inspect_label_description", "Description:", escapeHtml(full.description || "—")),
+        row("inspect_label_speed", "Click speed (CPS):", `${full.target_cps} CPS (${intervalMs} ms)`),
+        row("inspect_label_jitter", "Randomization (Jitter):", `±${full.jitter_percent}%`),
+        row("inspect_label_hesitation", "Hesitation:", `${hesitationProbToPercent(full.outlier_prob)}%`),
+        row("inspect_label_jitter_radius", "Jitter radius:", `${full.jitter_radius_px} px`),
+        row("inspect_label_technique", "Technique:", escapeHtml(getI18nText(`technique_${full.technique}`, {}, full.technique))),
+        row("inspect_label_click_type", "Click type:", escapeHtml(clickTypeStr)),
+        row("inspect_label_button", "Mouse button:", escapeHtml(btnStr)),
+        row("inspect_label_pos", "Position mode:", escapeHtml(posModeStr)),
+        row("inspect_label_limit", "Click limit:", escapeHtml(limitStr)),
+        row("inspect_label_repeat", "Repeat:", escapeHtml(repeatStr)),
+        row("inspect_label_start_delay", "Start delay:", formatDurationMs(full.start_delay_ms)),
+        row("inspect_label_timer", "Auto-stop:", escapeHtml(stopStr)),
+        row("inspect_label_gui_lock", "GUI lock:", `${full.gui_lock_ms} ms`),
+        row("inspect_label_points", "Multi-point:", String(full.points.length)),
+        row("inspect_label_hotkey", "Hotkey:", full.hotkey ? escapeHtml(full.hotkey) : "—"),
+      ].join("")),
+      section("inspect_section_scope", "📦 Captured groups", capturedGroups.length
+        ? capturedGroups.map(g => `<span class="preset-card-scope-badge">${escapeHtml(g)}</span>`).join(" ")
+        : escapeHtml(getI18nText("inspect_scope_engine_only", {}, "Engine only"))),
+    ].join("");
   }
 
   if (applyBtn) {
@@ -3353,34 +3669,217 @@ function renderPresetHotkeySlots() {
     });
   });
 }
+// Short handle for the preset modal's many controls.
+const presetEl = (id) => document.getElementById(id);
+
+// Shared paint helpers for the modal's inputs. Module-level on purpose: they
+// capture nothing but `presetEl`, so nesting them re-created the closures on
+// every call (oxlint: unicorn/consistent-function-scoping).
+function setPresetModalValue(id, value) {
+  const el = presetEl(id);
+  if (el && value != null) el.value = value;
+}
+
+function setPresetModalChecked(id, on) {
+  const el = presetEl(id);
+  if (el) el.checked = !!on;
+}
+
+function readPresetModalScope() {
+  return normalizePresetScope({
+    engine: true,
+    guards: !!presetEl("presetScopeGuards")?.checked,
+    hotkeys: !!presetEl("presetScopeHotkeys")?.checked,
+    ui: !!presetEl("presetScopeUi")?.checked,
+  });
+}
+
+// An unchecked group collapses (and greys) its section instead of disabling its
+// inputs: the inherited value stays visible, which is the honest picture of what
+// "not captured" means.
+function refreshPresetSectionVisibility() {
+  [
+    ["presetScopeGuards", "presetSectionGuards"],
+    ["presetScopeHotkeys", "presetSectionHotkeys"],
+    ["presetScopeUi", "presetSectionUi"],
+  ].forEach(([cbId, secId]) => {
+    const on = !!presetEl(cbId)?.checked;
+    const sec = presetEl(secId);
+    if (sec) sec.classList.toggle("collapsed", !on);
+  });
+}
+
+function setPresetModalScope(scope) {
+  const sc = normalizePresetScope(scope);
+  const engineCb = presetEl("presetScopeEngine");
+  if (engineCb) engineCb.checked = true; // engine is mandatory by construction
+  const guardsCb = presetEl("presetScopeGuards");
+  if (guardsCb) guardsCb.checked = sc.guards;
+  const hotkeysCb = presetEl("presetScopeHotkeys");
+  if (hotkeysCb) hotkeysCb.checked = sc.hotkeys;
+  const uiCb = presetEl("presetScopeUi");
+  if (uiCb) uiCb.checked = sc.ui;
+  refreshPresetSectionVisibility();
+}
+
+// Read every control the ENGINE group owns. Ranges come from PRESET_LIMITS, so
+// a value the dashboard accepts can never be rewritten by a narrower editor.
+function readPresetModalEngine() {
+  const stopMs = readPresetStopDurationMs();
+  const stopTimeStr = presetEl("presetStopTime")?.value || "";
+  const delayUnit = presetEl("presetStartDelayUnit")?.value === "ms" ? "ms" : "sec";
+  const delayRaw = Math.max(0, parseInt(presetEl("presetStartDelaySec")?.value, 10) || 0);
+  return {
+    target_cps: clampPresetNumber(presetEl("presetCpsRange")?.value, PRESET_LIMITS.cpsMin, PRESET_LIMITS.cpsMax, 10),
+    jitter_percent: clampPresetNumber(presetEl("presetJitterRange")?.value, PRESET_LIMITS.jitterMin, PRESET_LIMITS.jitterMax, 5),
+    jitter_radius_px: Math.round(clampPresetNumber(presetEl("presetJitterRadius")?.value, PRESET_LIMITS.jitterRadiusMin, PRESET_LIMITS.jitterRadiusMax, 0)),
+    outlier_prob: hesitationPercentToProb(presetEl("presetHesitation")?.value),
+    technique: normalizeTechnique(presetEl("presetTechniqueSelect")?.value),
+    gui_lock_ms: Math.max(0, Number(presetEl("presetGuiLock")?.value) || 1500),
+    click_limit: Math.max(0, Math.min(PRESET_LIMITS.clickLimitMax, parseInt(presetEl("presetClickLimit")?.value, 10) || 0)),
+    button: presetEl("presetButtonSelect")?.value || "left",
+    click_type: presetEl("presetClickTypeSelect")?.value || "single",
+    position_mode: presetEl("presetPositionSelect")?.value || "cursor",
+    fixed_x: Number.isFinite(Number(presetEl("presetFixedX")?.value)) ? Number(presetEl("presetFixedX").value) : 100,
+    fixed_y: Number.isFinite(Number(presetEl("presetFixedY")?.value)) ? Number(presetEl("presetFixedY").value) : 100,
+    hold_duration_ms: Math.max(PRESET_LIMITS.holdDurationMin, parseInt(presetEl("presetHoldDuration")?.value, 10) || 500),
+    hold_interval_ms: Math.max(PRESET_LIMITS.holdDurationMin, parseInt(presetEl("presetHoldInterval")?.value, 10) || 1000),
+    repeat_mode: presetEl("presetRepeatModeSelect")?.value || "unlimited",
+    repeat_count: Math.max(0, parseInt(presetEl("presetRepeatCount")?.value, 10) || 0),
+    repeat_interval_ms: Math.max(0, parseInt(presetEl("presetRepeatInterval")?.value, 10) || 0),
+    start_delay_ms: delayUnit === "ms" ? delayRaw : delayRaw * 1000,
+    stop_duration_ms: stopMs,
+    stop_duration_unit: normalizeStopUnit(presetStopUnit),
+    stop_time_str: stopTimeStr,
+    stop_mode: presetStopModeFor(presetStopMode, stopMs, stopTimeStr),
+    points: window.SequenceEditor?.getPoints() || [],
+  };
+}
+// ── GROUP SNAPSHOT READERS (scope.guards / .hotkeys / .ui) ──────────────
+function readPresetModalGuards() {
+  const list = (presetEl("presetAppFilterList")?.value || "")
+    .split(/[\r\n,]+/)
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean);
+  return {
+    typing_pause_ms: Math.max(0, parseInt(presetEl("presetTypingFreeze")?.value, 10) || 0),
+    pause_on_focus_loss: !!presetEl("presetFocusPause")?.checked,
+    app_filter_mode: presetEl("presetAppFilterMode")?.value || "everywhere",
+    app_filter_list: list,
+  };
+}
+
+function readPresetModalHotkeys() {
+  const val = (id, fallback) => presetEl(id)?.value?.trim() || fallback;
+  return {
+    toggle: val("presetHkToggle", "R / K"),
+    mode_switch: val("presetHkMode", "Ctrl+Alt+M"),
+    emergency_stop: val("presetHkEmergency", "Escape"),
+    speed_up: val("presetHkSpeedUp", "Ctrl+="),
+    slow_down: val("presetHkSlowDown", "Ctrl+-"),
+    capture_pos: val("presetHkCapture", "Ctrl+P"),
+    record_toggle: !!presetEl("presetHkRecordToggle")?.checked,
+    record_hotkey: val("presetHkRecord", "Ctrl+Shift+R"),
+    key_ttl_ms: Math.max(100, Math.min(5000, parseInt(presetEl("presetHkKeyTtl")?.value, 10) || 500)),
+    smart_record: !!presetEl("presetHkSmartRecord")?.checked,
+    hotkey_debounce_ms: Math.max(0, parseInt(presetEl("presetHkDebounce")?.value, 10) || 80),
+  };
+}
+
+function readPresetModalUi() {
+  return {
+    theme: presetEl("presetUiTheme")?.value || "cyberpunk",
+    accent_color: presetEl("presetUiAccent")?.value || "#06b6d4",
+    language: presetEl("presetUiLanguage")?.value || "ua",
+    always_on_top: !!presetEl("presetUiAlwaysOnTop")?.checked,
+    visual_ripple: !!presetEl("presetUiRipple")?.checked,
+    show_hud: !!presetEl("presetUiHud")?.checked,
+    show_notifications: !!presetEl("presetUiNotifications")?.checked,
+  };
+}
+
+// Fill the group sections. When a group was NOT captured the section shows the
+// live value it would inherit — visible, collapsed, and greyed, never hidden.
+function populatePresetModalGroups(v) {
+  // Aliases to the module-level paint helpers (short call sites; a local
+  // *function* here would be re-created on every call).
+  const setVal = setPresetModalValue;
+  const setChecked = setPresetModalChecked;
+  const g = v.guard_settings || capturePresetGuards();
+  setVal("presetTypingFreeze", g.typing_pause_ms);
+  setChecked("presetFocusPause", g.pause_on_focus_loss);
+  setVal("presetAppFilterMode", g.app_filter_mode);
+  setVal("presetAppFilterList", (g.app_filter_list || []).join("\n"));
+  const h = v.hotkey_settings || capturePresetHotkeys();
+  setVal("presetHkToggle", h.toggle);
+  setVal("presetHkMode", h.mode_switch);
+  setVal("presetHkEmergency", h.emergency_stop);
+  setVal("presetHkSpeedUp", h.speed_up);
+  setVal("presetHkSlowDown", h.slow_down);
+  setVal("presetHkCapture", h.capture_pos);
+  setChecked("presetHkRecordToggle", h.record_toggle);
+  setVal("presetHkRecord", h.record_hotkey);
+  setVal("presetHkKeyTtl", h.key_ttl_ms);
+  setChecked("presetHkSmartRecord", h.smart_record);
+  setVal("presetHkDebounce", h.hotkey_debounce_ms);
+  const u = v.ui_settings || capturePresetUi();
+  setVal("presetUiTheme", u.theme);
+  setVal("presetUiAccent", u.accent_color);
+  setVal("presetUiLanguage", u.language);
+  setChecked("presetUiAlwaysOnTop", u.always_on_top);
+  setChecked("presetUiRipple", u.visual_ripple);
+  setChecked("presetUiHud", u.show_hud);
+  setChecked("presetUiNotifications", u.show_notifications);
+}
+
+// Fill the engine controls. The start-delay unit is derived, not stored: a
+// whole-second value shows as "sec", anything finer shows as "ms".
+function populatePresetModalEngine(v) {
+  const setVal = setPresetModalValue;
+  setVal("presetCpsRange", v.target_cps);
+  const cpsVal = presetEl("presetCpsVal");
+  if (cpsVal) cpsVal.textContent = v.target_cps;
+  setVal("presetJitterRange", v.jitter_percent);
+  const jitterVal = presetEl("presetJitterVal");
+  if (jitterVal) jitterVal.textContent = v.jitter_percent;
+  setVal("presetHesitation", hesitationProbToPercent(v.outlier_prob));
+  setVal("presetJitterRadius", v.jitter_radius_px);
+  setVal("presetTechniqueSelect", normalizeTechnique(v.technique));
+  setVal("presetGuiLock", v.gui_lock_ms);
+  setVal("presetClickLimit", v.click_limit);
+  setVal("presetButtonSelect", v.button);
+  setVal("presetClickTypeSelect", v.click_type);
+  setVal("presetPositionSelect", v.position_mode);
+  setVal("presetFixedX", v.fixed_x);
+  setVal("presetFixedY", v.fixed_y);
+  setVal("presetHoldDuration", v.hold_duration_ms);
+  setVal("presetHoldInterval", v.hold_interval_ms);
+  setVal("presetRepeatModeSelect", v.repeat_mode);
+  setVal("presetRepeatCount", v.repeat_count);
+  setVal("presetRepeatInterval", v.repeat_interval_ms);
+  const delayMs = Math.max(0, Number(v.start_delay_ms) || 0);
+  const delayUnit = delayMs > 0 && delayMs % 1000 !== 0 ? "ms" : "sec";
+  setVal("presetStartDelayUnit", delayUnit);
+  setVal("presetStartDelaySec", delayUnit === "ms" ? delayMs : Math.round(delayMs / 1000));
+  // The time limit keeps the unit the preset remembers.
+  presetStopUnit = normalizeStopUnit(v.stop_duration_unit);
+  showPresetStopDurationMs(v.stop_duration_ms);
+  setVal("presetStopTime", v.stop_time_str);
+  const coordRow = presetEl("presetFixedCoordRow");
+  if (coordRow) coordRow.classList.toggle("hidden", v.position_mode !== "fixed");
+}
+
 function openPresetEditModal(p = null) {
+
   const modal = document.getElementById("presetEditModal");
   const editIdInput = document.getElementById("presetEditId");
   const nameInput = document.getElementById("presetNameInput");
   const iconSelect = document.getElementById("presetIconSelect");
-  // These six element handles carry the `preset` prefix because the dashboard
-  // declares identical identifiers at module scope (cpsRange, clickTypeSelect,
-  // holdDurationInput, holdIntervalInput, repeatCountInput, repeatIntervalInput).
-  // Shadowing them is legal but a trap: code moved between the modal and the
-  // dashboard would silently retarget the wrong widget. (oxlint: no-shadow)
-  const presetCpsRangeEl = document.getElementById("presetCpsRange");
-  const cpsVal = document.getElementById("presetCpsVal");
-  const jitterRange = document.getElementById("presetJitterRange");
-  const jitterVal = document.getElementById("presetJitterVal");
-  const presetClickTypeSelectEl = document.getElementById("presetClickTypeSelect");
-  const presetHoldDurationEl = document.getElementById("presetHoldDuration");
-  const presetHoldIntervalEl = document.getElementById("presetHoldInterval");
-  const buttonSelect = document.getElementById("presetButtonSelect");
-  const positionSelect = document.getElementById("presetPositionSelect");
-  const fixedXInput = document.getElementById("presetFixedX");
-  const fixedYInput = document.getElementById("presetFixedY");
-  const clickLimitInput = document.getElementById("presetClickLimit");
-  const startDelayInput = document.getElementById("presetStartDelaySec");
-  const stopTimeInput = document.getElementById("presetStopTime");
-  const repeatModeSelect = document.getElementById("presetRepeatModeSelect");
-  const presetRepeatCountEl = document.getElementById("presetRepeatCount");
-  const presetRepeatIntervalEl = document.getElementById("presetRepeatInterval");
-  const coordRow = document.getElementById("presetFixedCoordRow");
+  // Engine controls are addressed through the PRESET_LIMITS-aware helpers below
+  // (readPresetModalEngine / populatePresetModalEngine), so the editor can never
+  // drift from the dashboard ranges again.
+  const categorySelect = document.getElementById("presetCategorySelect");
+  const descriptionInput = document.getElementById("presetDescriptionInput");
   const modalTitle = document.getElementById("presetModalTitle");
 
   renderPresetHotkeySlots();
@@ -3392,64 +3891,29 @@ function openPresetEditModal(p = null) {
     hotkeyLabel.textContent = currentHotkey || getI18nText("preset_hotkey_none", {}, "None");
   }
 
-  if (p) {
-    if (modalTitle) modalTitle.textContent = "✏️ Edit Preset";
-    if (editIdInput) editIdInput.value = p.id;
-    if (nameInput) nameInput.value = p.name || "";
-    if (iconSelect) iconSelect.value = p.icon || "⚡";
-    if (presetCpsRangeEl) {
-      presetCpsRangeEl.value = p.target_cps || 29;
-      if (cpsVal) cpsVal.textContent = p.target_cps || 29;
-    }
-    if (jitterRange) {
-      jitterRange.value = p.jitter_percent || 7.5;
-      if (jitterVal) jitterVal.textContent = p.jitter_percent || 7.5;
-    }
-    if (presetClickTypeSelectEl) presetClickTypeSelectEl.value = p.click_type || "single";
-    if (presetHoldDurationEl) presetHoldDurationEl.value = p.hold_duration_ms ?? 500;
-    if (presetHoldIntervalEl) presetHoldIntervalEl.value = p.hold_interval_ms ?? 1000;
-    if (buttonSelect) buttonSelect.value = p.button || "left";
-    if (positionSelect) positionSelect.value = p.position_mode || "cursor";
-    if (fixedXInput) fixedXInput.value = p.fixed_x ?? 100;
-    if (fixedYInput) fixedYInput.value = p.fixed_y ?? 100;
-    if (clickLimitInput) clickLimitInput.value = p.click_limit || 0;
-    if (startDelayInput) startDelayInput.value = Math.round((p.start_delay_ms || 0) / 1000);
-    // The time limit is unit-aware: the preset keeps ms, the badge keeps the unit.
-    showPresetStopDurationMs(
-      Number(p.stop_duration_ms) || Math.round((Number(p.stop_duration_min) || 0) * 60000)
-    );
-    if (stopTimeInput) stopTimeInput.value = p.stop_time_str || "";
-    if (repeatModeSelect) repeatModeSelect.value = p.repeat_mode || "unlimited";
-    if (presetRepeatCountEl) presetRepeatCountEl.value = p.repeat_count || 0;
-    if (presetRepeatIntervalEl) presetRepeatIntervalEl.value = p.repeat_interval_ms ?? 1000;
-  } else {
-    if (modalTitle) modalTitle.textContent = "✨ New Preset";
-    if (editIdInput) editIdInput.value = "";
-    if (nameInput) nameInput.value = "New Preset";
-    if (iconSelect) iconSelect.value = "⚡";
-    if (presetCpsRangeEl) {
-      presetCpsRangeEl.value = currentConfig.engine.target_cps || 29;
-      if (cpsVal) cpsVal.textContent = currentConfig.engine.target_cps || 29;
-    }
-    if (jitterRange) {
-      jitterRange.value = currentConfig.engine.jitter_percent || 7.5;
-      if (jitterVal) jitterVal.textContent = currentConfig.engine.jitter_percent || 7.5;
-    }
-    if (presetClickTypeSelectEl) presetClickTypeSelectEl.value = currentConfig.engine.click_type || "single";
-    if (presetHoldDurationEl) presetHoldDurationEl.value = currentConfig.engine.hold_duration_ms ?? 500;
-    if (presetHoldIntervalEl) presetHoldIntervalEl.value = currentConfig.engine.hold_interval_ms ?? 1000;
-    if (buttonSelect) buttonSelect.value = currentConfig.engine.button || "left";
-    if (positionSelect) positionSelect.value = currentConfig.engine.position_mode || "cursor";
-    if (fixedXInput) fixedXInput.value = currentConfig.engine.fixed_x ?? 100;
-    if (fixedYInput) fixedYInput.value = currentConfig.engine.fixed_y ?? 100;
-    if (clickLimitInput) clickLimitInput.value = currentConfig.engine.click_limit || 0;
-    if (startDelayInput) startDelayInput.value = Math.round((currentConfig.engine.start_delay_ms || 0) / 1000);
-    showPresetStopDurationMs(configuredStopDurationMs(currentConfig.engine));
-    if (stopTimeInput) stopTimeInput.value = currentConfig.engine.stop_time_str || "";
-    if (repeatModeSelect) repeatModeSelect.value = currentConfig.engine.repeat_mode || "unlimited";
-    if (presetRepeatCountEl) presetRepeatCountEl.value = currentConfig.engine.repeat_count || 0;
-    if (presetRepeatIntervalEl) presetRepeatIntervalEl.value = currentConfig.engine.repeat_interval_ms ?? 1000;
+  // One complete, already-clamped view, then paint every control from it.
+  const full = withPresetDefaults(p || {});
+  const isNewRecord = !full.id;
+  if (!p) {
+    // "New preset": start from the LIVE config so the user sees exactly what
+    // would be captured right now, with an engine-only scope — the other groups
+    // are an explicit opt-in on the Capture scope panel.
+    full.name = "New Preset";
+    full.icon = "⚡";
+    full.category = "utility";
+    full.description = "";
+    full.hotkey = "";
+    Object.assign(full, capturePresetEngine(), { scope: normalizePresetScope(null) });
   }
+  if (modalTitle) modalTitle.textContent = isNewRecord ? "✨ New Preset" : "✏️ Edit Preset";
+  if (editIdInput) editIdInput.value = full.id || "";
+  if (nameInput) nameInput.value = full.name;
+  if (iconSelect) iconSelect.value = full.icon || "⚡";
+  if (categorySelect) categorySelect.value = full.category || "utility";
+  if (descriptionInput) descriptionInput.value = full.description || "";
+  populatePresetModalEngine(full);
+  populatePresetModalGroups(full);
+  setPresetModalScope(full.scope);
 
   // The draft's armed trigger follows the values just rendered (the hint is
   // "none", i.e. "let the values decide"), so the modal opens in exactly the
@@ -3458,13 +3922,9 @@ function openPresetEditModal(p = null) {
   refreshPresetStopMode("none");
 
   if (p && p.points && Array.isArray(p.points)) {
-    window.SequenceEditor?.setPoints(p.points);
+    window.SequenceEditor?.setPoints(full.points);
   } else {
-    window.SequenceEditor?.setPoints([]);
-  }
-
-  if (positionSelect && coordRow) {
-    coordRow.classList.toggle("hidden", positionSelect.value !== "fixed");
+    window.SequenceEditor?.setPoints(Array.isArray(full.points) ? full.points : []);
   }
 
   modal.classList.remove("hidden");
@@ -3473,94 +3933,44 @@ function openPresetEditModal(p = null) {
 
 function savePresetFromModal() {
   const editId = document.getElementById("presetEditId")?.value;
-  const name = document.getElementById("presetNameInput")?.value?.trim() || "Preset";
-  const icon = document.getElementById("presetIconSelect")?.value || "⚡";
-  const hotkey = document.getElementById("presetHotkeyInput")?.value?.trim() || "";
-  const cps = parseFloat(document.getElementById("presetCpsRange")?.value) || 29;
-  const jitter = parseFloat(document.getElementById("presetJitterRange")?.value) || 0;
-  const clickType = document.getElementById("presetClickTypeSelect")?.value || "single";
-  const holdDurationMs = Math.max(10, parseInt(document.getElementById("presetHoldDuration")?.value, 10) || 500);
-  const holdIntervalMs = Math.max(0, parseInt(document.getElementById("presetHoldInterval")?.value, 10) || 0);
-  const button = document.getElementById("presetButtonSelect")?.value || "left";
-  const positionMode = document.getElementById("presetPositionSelect")?.value || "cursor";
-  const fixedX = parseInt(document.getElementById("presetFixedX")?.value, 10) || 100;
-  const fixedY = parseInt(document.getElementById("presetFixedY")?.value, 10) || 100;
-  const clickLimit = parseInt(document.getElementById("presetClickLimit")?.value, 10) || 0;
-  const startDelaySec = Math.max(0, parseInt(document.getElementById("presetStartDelaySec")?.value, 10) || 0);
-  const stopDurationMs = readPresetStopDurationMs();
-  const stopTimeStr = document.getElementById("presetStopTime")?.value || "";
-  const repeatMode = document.getElementById("presetRepeatModeSelect")?.value || "unlimited";
-  const repeatCount = Math.max(0, parseInt(document.getElementById("presetRepeatCount")?.value, 10) || 0);
-  const repeatIntervalMs = Math.max(0, parseInt(document.getElementById("presetRepeatInterval")?.value, 10) || 0);
-  // Which of the preset's two timers is armed. Stored next to the values so a
-  // preset describes ONE trigger, exactly like `engine.stop_mode` does.
-  const presetMode = presetStopModeFor(presetStopMode, stopDurationMs, stopTimeStr);
+  const name = presetEl("presetNameInput")?.value?.trim() || "Preset";
+  const icon = presetEl("presetIconSelect")?.value || "⚡";
+  const category = presetEl("presetCategorySelect")?.value || "utility";
+  const description = presetEl("presetDescriptionInput")?.value?.trim() || "";
+  const hotkey = presetEl("presetHotkeyInput")?.value?.trim() || "";
+
+  // Each group is read from exactly ONE place, so no field can be silently
+  // forgotten again (that is how `jitter_radius_px` used to be dropped on
+  // every save, and how `technique`/`outlier_prob` always came from the engine).
+  const engine = readPresetModalEngine();
+  const scope = readPresetModalScope();
 
   ensurePresetsExist();
+
+  const record = {
+    ...engine,
+    scope,
+    name,
+    icon,
+    category,
+    hotkey,
+    // A blank description falls back to a generated summary, so a card always
+    // has something readable to show.
+    description: description || `${engine.target_cps} CPS | ${engine.click_type}`,
+    guard_settings: scope.guards ? readPresetModalGuards() : null,
+    hotkey_settings: scope.hotkeys ? readPresetModalHotkeys() : null,
+    ui_settings: scope.ui ? readPresetModalUi() : null,
+  };
 
   if (editId) {
     const idx = currentConfig.presets.findIndex(x => x.id === editId);
     if (idx !== -1) {
-      const points = window.SequenceEditor?.getPoints() || [];
-      currentConfig.presets[idx] = {
-        ...currentConfig.presets[idx],
-        name,
-        icon,
-        hotkey,
-        target_cps: cps,
-        jitter_percent: jitter,
-        click_type: clickType,
-        button,
-        position_mode: positionMode,
-        fixed_x: fixedX,
-        fixed_y: fixedY,
-        click_limit: clickLimit,
-        hold_duration_ms: holdDurationMs,
-        hold_interval_ms: holdIntervalMs,
-        repeat_mode: repeatMode,
-        repeat_count: repeatCount,
-        repeat_interval_ms: repeatIntervalMs,
-        start_delay_ms: startDelaySec * 1000,
-        stop_duration_ms: stopDurationMs,
-        stop_time_str: stopTimeStr,
-        stop_mode: presetMode,
-        outlier_prob: currentConfig.engine.outlier_prob ?? 0.02,
-        technique: normalizeTechnique(currentConfig.engine.technique),
-        points,
-      };
+      // The id survives an edit; everything else is replaced wholesale, so a
+      // group the user just turned OFF stops travelling with the preset.
+      currentConfig.presets[idx] = { ...currentConfig.presets[idx], ...record };
     }
   } else {
-    const points = window.SequenceEditor?.getPoints() || [];
-    const newId = "preset_" + Date.now();
-    currentConfig.presets.push({
-      id: newId,
-      name,
-      description: `${cps} CPS | ${clickType}`,
-      icon,
-      hotkey,
-      target_cps: cps,
-      jitter_percent: jitter,
-      jitter_radius_px: 0,
-      outlier_prob: currentConfig.engine.outlier_prob ?? 0.02,
-      technique: normalizeTechnique(currentConfig.engine.technique),
-      click_limit: clickLimit,
-      button,
-      click_type: clickType,
-      position_mode: positionMode,
-      fixed_x: fixedX,
-      fixed_y: fixedY,
-      repeat_mode: repeatMode,
-      repeat_count: repeatCount,
-      repeat_interval_ms: repeatIntervalMs,
-      start_delay_ms: startDelaySec * 1000,
-      stop_duration_ms: stopDurationMs,
-      stop_time_str: stopTimeStr,
-      stop_mode: presetMode,
-      hold_duration_ms: holdDurationMs,
-      hold_interval_ms: holdIntervalMs,
-      is_default: false,
-      points,
-    });
+    currentConfig.presets.push({ ...record, id: "preset_" + Date.now(), is_default: false });
   }
 
   renderPresetsGrid();
@@ -3608,29 +4018,19 @@ function setupPresetListeners() {
 
   bindPresetControl("createNewPresetBtn", "click", () => openPresetEditModal(null));
   bindPresetControl("saveCurrentAsPresetBtn", "click", () => {
+    // The draft is the CURRENT configuration, built by the same snapshot helper
+    // the export path uses — so a field the dashboard sets can never be dropped
+    // (this used to lose `jitter_radius_px`, `stop_duration_unit` and the scope).
+    // The scope starts engine-only; the user opts into guards/hotkeys/appearance
+    // on the "Capture scope" panel before saving.
     openPresetEditModal({
+      ...buildPresetSnapshot(normalizePresetScope(null)),
       id: "",
       name: "My Config",
       icon: "🎯",
-      target_cps: currentConfig.engine.target_cps,
-      jitter_percent: currentConfig.engine.jitter_percent,
-      click_limit: currentConfig.engine.click_limit,
-      button: currentConfig.engine.button,
-      click_type: currentConfig.engine.click_type,
-      position_mode: currentConfig.engine.position_mode,
-      fixed_x: currentConfig.engine.fixed_x,
-      fixed_y: currentConfig.engine.fixed_y,
-      hold_duration_ms: currentConfig.engine.hold_duration_ms,
-      hold_interval_ms: currentConfig.engine.hold_interval_ms,
-      outlier_prob: currentConfig.engine.outlier_prob ?? 0.02,
-      technique: normalizeTechnique(currentConfig.engine.technique),
-      repeat_mode: currentConfig.engine.repeat_mode,
-      repeat_count: currentConfig.engine.repeat_count,
-      repeat_interval_ms: currentConfig.engine.repeat_interval_ms,
-      start_delay_ms: currentConfig.engine.start_delay_ms,
-      stop_duration_ms: configuredStopDurationMs(currentConfig.engine),
-      stop_time_str: currentConfig.engine.stop_time_str,
-      points: Array.isArray(currentConfig.engine.sequence_points) ? JSON.parse(JSON.stringify(currentConfig.engine.sequence_points)) : []
+      category: "utility",
+      description: "",
+      hotkey: "",
     });
   });
   bindPresetControl("presetSaveBtn", "click", () => void savePresetFromModal());
@@ -3640,6 +4040,17 @@ function setupPresetListeners() {
   bindPresetControl("inspectCloseBtn", "click", () => {
     document.getElementById("presetInspectModal")?.classList.add("hidden");
   });
+
+  // Capture-scope checkboxes: an unchecked group collapses (and greys) its
+  // section — see refreshPresetSectionVisibility. The inherited value stays
+  // visible, which is the honest picture of "not captured".
+  ["presetScopeGuards", "presetScopeHotkeys", "presetScopeUi"].forEach(id => {
+    bindPresetControl(id, "change", refreshPresetSectionVisibility);
+  });
+
+  // Presets page toolbar: search + category filter rerender the grid.
+  bindPresetControl("presetSearchInput", "input", () => renderPresetsGrid());
+  bindPresetControl("presetCategoryFilter", "change", () => renderPresetsGrid());
 
   const presetHotkeyBtn = document.getElementById("presetHotkeyBtn");
   if (presetHotkeyBtn && !presetHotkeyBtn.dataset.presetBound) {
@@ -3716,46 +4127,24 @@ function setupPresetListeners() {
         const list = Array.isArray(parsed) ? parsed : parsed?.presets;
         if (!Array.isArray(list)) throw new Error("expected an array of presets");
 
+        // ONE normalizer for the whole bundle: it applies every clamp the editor
+        // applies (CPS 0.1-160, jitter ≤35, limit ≤1e6) and carries the scope and
+        // the three group snapshots through. A bundle exported by an older build
+        // has neither, and `withPresetDefaults` fills the engine-only default —
+        // so an old file can never arrive with two timers looking armed or with a
+        // 30 % jitter silently rewritten.
         const imported = list
           .filter(p => p && typeof p === "object" && String(p.name || "").trim() && Number.isFinite(Number(p.target_cps)))
-          .map(p => ({
-            id: `preset_${Date.now()}_${Math.floor(Math.random() * 100000)}`,
-            name: String(p.name).trim(),
-            description: String(p.description || `${p.target_cps} CPS`),
-            icon: p.icon || "🎯",
-            target_cps: Math.max(1, Math.min(160, Number(p.target_cps))),
-            jitter_percent: Math.max(0, Math.min(30, Number(p.jitter_percent) || 0)),
-            click_limit: Math.max(0, parseInt(p.click_limit, 10) || 0),
-            button: p.button || "left",
-            click_type: p.click_type || "single",
-            position_mode: p.position_mode || "cursor",
-            fixed_x: Number.isFinite(Number(p.fixed_x)) ? Number(p.fixed_x) : 100,
-            fixed_y: Number.isFinite(Number(p.fixed_y)) ? Number(p.fixed_y) : 100,
-            hold_duration_ms: Number(p.hold_duration_ms) || 500,
-            hold_interval_ms: Number(p.hold_interval_ms) || 1000,
-            outlier_prob: Number.isFinite(Number(p.outlier_prob)) ? Math.max(0, Math.min(0.10, Number(p.outlier_prob))) : 0.02,
-            technique: normalizeTechnique(p.technique),
-            repeat_mode: p.repeat_mode || "unlimited",
-            repeat_count: Math.max(0, parseInt(p.repeat_count, 10) || 0),
-            repeat_interval_ms: Math.max(0, Number(p.repeat_interval_ms) || 1000),
-            start_delay_ms: Math.max(0, Number(p.start_delay_ms) || 0),
-            // ms is the storage format; a bundle exported by an older build
-            // carries whole minutes instead, so migrate it here (mirrors
-            // `config::resolve_stop_duration_ms`).
-            stop_duration_ms: Math.max(
-              0,
-              Number(p.stop_duration_ms) || Math.round((Number(p.stop_duration_min) || 0) * 60000)
-            ),
-            stop_time_str: p.stop_time_str || "",
-            // Same rule as the editor: an explicit mode travels with the bundle,
-            // otherwise it is derived from the two values (duration first).
-            stop_mode: presetStopModeFor(
-              p.stop_mode,
-              Number(p.stop_duration_ms) || Math.round((Number(p.stop_duration_min) || 0) * 60000),
-              p.stop_time_str || ""
-            ),
-            is_default: false
-          }));
+          .map((p, i) => {
+            const full = withPresetDefaults(p);
+            return {
+              ...full,
+              id: `preset_${Date.now()}_${i}`,
+              name: String(p.name).trim(),
+              description: String(p.description || `${full.target_cps} CPS`),
+              is_default: false,
+            };
+          });
 
         if (imported.length === 0) throw new Error("no valid presets");
         ensurePresetsExist();

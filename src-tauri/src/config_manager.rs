@@ -384,6 +384,127 @@ pub struct SequencePoint {
     pub delay_ms: u32,
 }
 
+/// Which groups of settings a preset captures when it is applied.
+///
+/// `engine` is ON by default so every preset written before the scope existed
+/// keeps its historic meaning (a preset was always "the engine configuration").
+/// The other three groups are opt-in: a preset that carries them is a full
+/// working profile, and applying it may change global hotkeys, Smart Guard rules
+/// or the look of the app — so the user has to ask for that explicitly.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PresetScope {
+    #[serde(default = "default_true")]
+    pub engine: bool,
+    #[serde(default)]
+    pub guards: bool,
+    #[serde(default)]
+    pub hotkeys: bool,
+    #[serde(default)]
+    pub ui: bool,
+}
+
+impl Default for PresetScope {
+    fn default() -> Self {
+        PresetScope {
+            engine: true,
+            guards: false,
+            hotkeys: false,
+            ui: false,
+        }
+    }
+}
+
+fn default_preset_scope() -> PresetScope {
+    PresetScope::default()
+}
+
+/// Smart-Guard / app-scope settings captured by a preset (`scope.guards`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct GuardSnapshot {
+    #[serde(default)]
+    pub typing_pause_ms: u32,
+    #[serde(default)]
+    pub pause_on_focus_loss: bool,
+    #[serde(default = "default_app_filter_mode")]
+    pub app_filter_mode: String,
+    #[serde(default)]
+    pub app_filter_list: Vec<String>,
+}
+
+/// Global hotkey bindings captured by a preset (`scope.hotkeys`).
+///
+/// The nine `preset_hotkeys` slots are deliberately NOT part of this snapshot:
+/// a slot maps to a preset id, so storing the slots inside a preset would be
+/// recursive — a preset could rebind (or unbind) its own activation key.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HotkeySnapshot {
+    pub toggle: String,
+    pub mode_switch: String,
+    pub emergency_stop: String,
+    pub speed_up: String,
+    pub slow_down: String,
+    pub capture_pos: String,
+    pub record_toggle: bool,
+    pub record_hotkey: String,
+    /// Smart key memory TTL (100–5000 ms).
+    pub key_ttl_ms: u64,
+    pub smart_record: bool,
+    /// Toggle response time (ms) — stored in `EngineSettings` in the config,
+    /// but it belongs to this group because only the hotkey layer reads it.
+    pub hotkey_debounce_ms: u32,
+}
+
+impl HotkeySnapshot {
+    /// Capture every binding the hotkey layer owns except the preset slots.
+    /// `hotkey_debounce_ms` lives in `EngineSettings`, hence the extra argument.
+    pub fn from_settings(h: &HotkeySettings, hotkey_debounce_ms: u32) -> Self {
+        HotkeySnapshot {
+            toggle: h.toggle.clone(),
+            mode_switch: h.mode_switch.clone(),
+            emergency_stop: h.emergency_stop.clone(),
+            speed_up: h.speed_up.clone(),
+            slow_down: h.slow_down.clone(),
+            capture_pos: h.capture_pos.clone(),
+            record_toggle: h.record_toggle,
+            record_hotkey: h.record_hotkey.clone(),
+            key_ttl_ms: h.key_ttl_ms,
+            smart_record: h.smart_record,
+            hotkey_debounce_ms,
+        }
+    }
+}
+
+/// Appearance / feedback preferences captured by a preset (`scope.ui`).
+///
+/// Lifecycle settings (tray, deep sleep, autostart, window geometry, admin
+/// elevation) are deliberately excluded: applying a preset must never make the
+/// window vanish into the tray or switch on an autostart entry behind the
+/// user's back.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PresetUiSnapshot {
+    pub theme: String,
+    pub accent_color: String,
+    pub language: String,
+    pub always_on_top: bool,
+    pub visual_ripple: bool,
+    pub show_hud: bool,
+    pub show_notifications: bool,
+}
+
+impl PresetUiSnapshot {
+    pub fn from_ui(u: &UiSettings) -> Self {
+        PresetUiSnapshot {
+            theme: u.theme.clone(),
+            accent_color: u.accent_color.clone(),
+            language: u.language.clone(),
+            always_on_top: u.always_on_top,
+            visual_ripple: u.visual_ripple,
+            show_hud: u.show_hud,
+            show_notifications: u.show_notifications,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PresetItem {
     pub id: String,
@@ -448,6 +569,38 @@ pub struct PresetItem {
     /// Global hotkey bound directly to this preset (e.g. "Mouse4", "F7", "Ctrl+Mouse5").
     #[serde(default)]
     pub hotkey: String,
+    /// Which groups of settings this preset captures. Defaults to engine-only,
+    /// which is exactly what every preset written before the field existed meant.
+    #[serde(default = "default_preset_scope")]
+    pub scope: PresetScope,
+    /// Smart Guard snapshot, present only when `scope.guards` is on.
+    #[serde(default)]
+    pub guard_settings: Option<GuardSnapshot>,
+    /// Global hotkey snapshot, present only when `scope.hotkeys` is on.
+    #[serde(default)]
+    pub hotkey_settings: Option<HotkeySnapshot>,
+    /// Appearance snapshot, present only when `scope.ui` is on.
+    #[serde(default)]
+    pub ui_settings: Option<PresetUiSnapshot>,
+    /// GUI lock duration (ms). Lives in the engine config (the Start button's
+    /// anti-double-click window), so a preset that captures the engine owns it.
+    #[serde(default = "default_gui_lock_ms")]
+    pub gui_lock_ms: u64,
+    /// Unit the preset's `stop_duration_ms` is displayed in: ms/sec/min/hour.
+    /// Display-only, exactly like `EngineSettings::stop_duration_unit`.
+    #[serde(default = "default_stop_duration_unit")]
+    pub stop_duration_unit: String,
+    /// Free-form grouping label for the Presets grid (Combat / Utility / ...).
+    #[serde(default = "default_preset_category")]
+    pub category: String,
+}
+
+fn default_gui_lock_ms() -> u64 {
+    1500
+}
+
+fn default_preset_category() -> String {
+    "utility".into()
 }
 
 impl Default for PresetItem {
@@ -481,6 +634,13 @@ impl Default for PresetItem {
             is_default: false,
             points: Vec::new(),
             hotkey: String::new(),
+            scope: default_preset_scope(),
+            guard_settings: None,
+            hotkey_settings: None,
+            ui_settings: None,
+            gui_lock_ms: default_gui_lock_ms(),
+            stop_duration_unit: default_stop_duration_unit(),
+            category: default_preset_category(),
         }
     }
 }
@@ -524,6 +684,13 @@ fn default_presets() -> Vec<PresetItem> {
             is_default: true,
             points: Vec::new(),
             hotkey: String::new(),
+            scope: default_preset_scope(),
+            guard_settings: None,
+            hotkey_settings: None,
+            ui_settings: None,
+            gui_lock_ms: default_gui_lock_ms(),
+            stop_duration_unit: default_stop_duration_unit(),
+            category: "combat".into(),
         },
         PresetItem {
             id: "gaming_boost".into(),
@@ -554,6 +721,13 @@ fn default_presets() -> Vec<PresetItem> {
             is_default: true,
             points: Vec::new(),
             hotkey: String::new(),
+            scope: default_preset_scope(),
+            guard_settings: None,
+            hotkey_settings: None,
+            ui_settings: None,
+            gui_lock_ms: default_gui_lock_ms(),
+            stop_duration_unit: default_stop_duration_unit(),
+            category: "utility".into(),
         },
         PresetItem {
             id: "human_emulation".into(),
@@ -584,6 +758,13 @@ fn default_presets() -> Vec<PresetItem> {
             is_default: true,
             points: Vec::new(),
             hotkey: String::new(),
+            scope: default_preset_scope(),
+            guard_settings: None,
+            hotkey_settings: None,
+            ui_settings: None,
+            gui_lock_ms: default_gui_lock_ms(),
+            stop_duration_unit: default_stop_duration_unit(),
+            category: "utility".into(),
         },
         PresetItem {
             id: "afk_farm".into(),
@@ -614,6 +795,13 @@ fn default_presets() -> Vec<PresetItem> {
             is_default: true,
             points: Vec::new(),
             hotkey: String::new(),
+            scope: default_preset_scope(),
+            guard_settings: None,
+            hotkey_settings: None,
+            ui_settings: None,
+            gui_lock_ms: default_gui_lock_ms(),
+            stop_duration_unit: default_stop_duration_unit(),
+            category: "utility".into(),
         },
     ]
 }
