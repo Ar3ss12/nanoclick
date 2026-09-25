@@ -2455,6 +2455,8 @@ fn test_preset_field_coverage_matches_engine_settings() {
             cm_src.contains(&format!("pub {field}")),
             "PresetUiSnapshot must carry `{field}`"
         );
+    }
+}
 
 /// The scope sections are a PAINT, like the auto-stop lock: an unchecked group
 /// dims and collapses, but nothing is `disabled` in the JS, and the section is
