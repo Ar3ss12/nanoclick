@@ -2505,7 +2505,43 @@ fn test_preset_scope_sections_are_painted_not_hidden() {
     );
 }
 
+
+/// A truncated asset blob is reported as a MISSING asset, and no rebuild heals it.
+///
+/// `EmbeddedAssets::get` (`tauri-utils/src/assets.rs`) ends with
+/// `brotli::BrotliDecompress(&mut asdf, &mut buf).ok()?` — a failed decode becomes `None`, so
+/// every caller panics with "`<file> must be embedded`" even though the file is sitting in `src/`.
+/// `tauri-build` keys its blob cache on the blob file merely EXISTING, so a build killed mid-write
+/// leaves a 0-byte `.js`/`.css`/`.html` in `<OUT_DIR>/tauri-codegen-assets/` that every later
+/// rebuild happily reuses — which is how one killed `cargo check` snowballed into 21 red asset
+/// tests on a green tree. Detect it here, in the gate, instead of letting twenty tests blame the
+/// wrong file.
+#[test]
+fn test_embedded_asset_blobs_are_not_truncated() {
+    let dir = std::path::Path::new(env!("OUT_DIR")).join("tauri-codegen-assets");
+    let mut truncated: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let is_empty_blob = entry
+                .metadata()
+                .map(|m| m.is_file() && m.len() == 0)
+                .unwrap_or(false);
+            if is_empty_blob {
+                truncated.push(entry.file_name().to_string_lossy().into_owned());
+            }
+        }
     }
+    truncated.sort();
+    assert!(
+        truncated.is_empty(),
+        "truncated asset blob(s) in {}:\n  {}\n\n\
+         `EmbeddedAssets::get` turns a failed brotli decode into `None`, so these surface as \
+         \"<file> must be embedded\" in every asset test while src/ is perfectly fine. The blob \
+         cache is keyed on the file merely existing, so a plain rebuild cannot heal it.\n\
+         Cure: `cd src-tauri && cargo clean -p nanoclick`, then rebuild.",
+        dir.display(),
+        truncated.join("\n  ")
+    );
 }
 
 
