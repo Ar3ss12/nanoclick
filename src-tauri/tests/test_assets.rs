@@ -2543,8 +2543,10 @@ fn test_embedded_asset_blobs_are_not_truncated() {
         "truncated asset blob(s) in {}:\n  {}\n\n\
          `EmbeddedAssets::get` turns a failed brotli decode into `None`, so these surface as \
          \"<file> must be embedded\" in every asset test while src/ is perfectly fine. The blob \
-         cache is keyed on the file merely existing, so a plain rebuild cannot heal it.\n\
-         Cure: `cd src-tauri && cargo clean -p nanoclick`, then rebuild.",
+         cache is keyed on the file merely existing, so a plain rebuild cannot heal it — and \
+         `cargo clean -p nanoclick` does NOT remove it either (it leaves \
+         `build/nanoclick-<hash>/out/tauri-codegen-assets` untouched).\n\
+         Cure: `rmdir /s /q target\\release\\build\\nanoclick-*` then rebuild.",
         dir.display(),
         truncated.join("\n  ")
     );
