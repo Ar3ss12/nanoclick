@@ -2361,20 +2361,37 @@ fn test_preset_field_coverage_matches_engine_settings() {
     let cm_src = include_str!("../src/config_manager.rs");
     let sched_src = include_str!("../src/scheduler.rs");
 
-    let engine_struct = {
+    let engine_body = {
+        // Skip the declaration line itself: slicing from `pub struct …` would make
+        // the FIRST extracted "field" the literal `struct EngineSettings {`.
+        let decl = "pub struct EngineSettings {";
         let start = cm_src
-            .find("pub struct EngineSettings {")
-            .expect("EngineSettings must exist");
+            .find(decl)
+            .expect("EngineSettings must exist")
+            + decl.len();
         let rest = &cm_src[start..];
         let end = rest.find("\n}").expect("EngineSettings must be a struct");
         &rest[..end]
     };
-    let fields: Vec<&str> = engine_struct
+    let fields: Vec<&str> = engine_body
         .lines()
         .filter_map(|l| l.trim().strip_prefix("pub "))
         .filter_map(|l| l.split(':').next())
         .map(str::trim)
         .collect();
+    // Self-check: a bogus "field" (the struct declaration, an attribute line, a doc
+    // comment) must fail HERE, with a clear message, instead of being reported as a
+    // missing field further down.
+    for field in &fields {
+        assert!(
+            !field.is_empty()
+                && field
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_'),
+            "field extraction produced `{field}`, which is not an identifier — \
+             the slice still contains something other than field declarations"
+        );
+    }
     assert!(
         fields.len() >= 18,
         "field extraction broke ({} fields found)",
