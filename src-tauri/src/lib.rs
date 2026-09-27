@@ -809,7 +809,9 @@ fn report_tray_action(app: &AppHandle, msg: &str) {
 /// balloon: the same channel every other action uses when the interface is not on
 /// screen. The page's own modal still opens, so the user sees it when they come back.
 #[tauri::command]
-fn uipi_blocked_in_tray(app: AppHandle) {
+fn uipi_blocked_in_tray() {
+    // No `AppHandle` needed: `notify_balloon` writes through the tray's own
+    // cross-thread icon copy, and a missing icon makes it a no-op.
     tray::notify_balloon(
         "NanoClick",
         "Click blocked: the target window runs elevated (UIPI)",
