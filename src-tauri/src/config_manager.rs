@@ -667,7 +667,7 @@ fn default_3() -> u32 {
     3
 }
 
-fn default_presets() -> Vec<PresetItem> {
+pub(crate) fn default_presets() -> Vec<PresetItem> {
     vec![
         PresetItem {
             id: "fast_cps".into(),

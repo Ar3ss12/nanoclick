@@ -216,6 +216,53 @@ pub fn delete_macro(id: String, app: tauri::AppHandle) -> Result<Vec<Macro>, Str
     Ok(all)
 }
 
+// ─── Preset library store ────────────────────────────────────────
+// Presets have their own file (`presets.json`) since 1.2.2. They used to be one array inside
+// `config.json`, so saving one rewrote the whole config and a stale config copy could replace the
+// entire library. Every write below goes through `persistence::presets` and marks the watcher, so
+// our own writes never come back as "file changed outside" toasts.
+
+#[tauri::command]
+pub fn list_presets() -> Vec<crate::config_manager::PresetItem> {
+    persistence::presets::load_presets()
+}
+
+#[tauri::command]
+pub fn save_preset(
+    p: crate::config_manager::PresetItem,
+    app: tauri::AppHandle,
+) -> Result<Vec<crate::config_manager::PresetItem>, String> {
+    let all = persistence::presets::upsert_preset(p)?;
+    if let Some(w) = app.try_state::<crate::WatcherState>() {
+        w.0.mark_own_write("presets");
+    }
+    Ok(all)
+}
+
+#[tauri::command]
+pub fn delete_preset(
+    id: String,
+    app: tauri::AppHandle,
+) -> Result<Vec<crate::config_manager::PresetItem>, String> {
+    let all = persistence::presets::delete_preset(&id)?;
+    if let Some(w) = app.try_state::<crate::WatcherState>() {
+        w.0.mark_own_write("presets");
+    }
+    Ok(all)
+}
+
+#[tauri::command]
+pub fn replace_presets(
+    presets: Vec<crate::config_manager::PresetItem>,
+    app: tauri::AppHandle,
+) -> Result<Vec<crate::config_manager::PresetItem>, String> {
+    let all = persistence::presets::replace_presets(&presets)?;
+    if let Some(w) = app.try_state::<crate::WatcherState>() {
+        w.0.mark_own_write("presets");
+    }
+    Ok(all)
+}
+
 // ─── Recorder ────────────────────────────────────────────────────
 
 #[tauri::command]

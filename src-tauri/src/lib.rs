@@ -1555,6 +1555,18 @@ pub fn run() {
     if let Some(n) = macros_healing_notice(&macros_boot_action) {
         boot_notices.push(n);
     }
+    // Preset library: seeded into its own store (`presets.json`) on the first boot of this build,
+    // from the legacy `config.json.presets` array. From then on the store is the authority — a
+    // config write can no longer replace the library (see `persistence::presets`). An existing
+    // store is never overwritten by the config copy.
+    match crate::persistence::presets::ensure_store_seeded(&initial_app_cfg.presets) {
+        Ok(Some(n)) => debug_log_internal(
+            "info",
+            &format!("[Presets] library seeded with {n} preset(s) into presets.json"),
+        ),
+        Ok(None) => {}
+        Err(e) => debug_log_internal("warn", &format!("[Presets] store seeding failed: {e}")),
+    }
     let startup_notices = Mutex::new(boot_notices);
     let file_toasts = Mutex::new(Vec::<AppNotice>::new());
     let watcher = Arc::new(crate::watcher::Observer::new());
@@ -1568,6 +1580,11 @@ pub fn run() {
         "macros",
         crate::persistence::macros::macros_path(),
         crate::watcher::macros_bytes_valid,
+    );
+    watcher.watch(
+        "presets",
+        crate::persistence::presets::presets_path(),
+        crate::watcher::presets_bytes_valid,
     );
     let watcher_for_setup = Arc::clone(&watcher);
 
@@ -1890,6 +1907,11 @@ pub fn run() {
             commands::list_macros,
             commands::save_macro,
             commands::delete_macro,
+            // Preset library store (its own file — a config save can no longer replace it)
+            commands::list_presets,
+            commands::save_preset,
+            commands::delete_preset,
+            commands::replace_presets,
             commands::record_start,
             commands::record_stop,
             commands::record_cancel,

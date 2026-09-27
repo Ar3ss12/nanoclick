@@ -172,6 +172,15 @@ pub fn macros_bytes_valid(raw: &str) -> bool {
     serde_json::from_str::<crate::persistence::macros::MacroStore>(t).is_ok()
 }
 
+/// Strict validity for `presets.json` bytes (the preset library has its own file now).
+pub fn presets_bytes_valid(raw: &str) -> bool {
+    let t = raw.trim().trim_start_matches('\u{feff}');
+    if t.is_empty() {
+        return false;
+    }
+    serde_json::from_str::<crate::persistence::presets::PresetStore>(t).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
