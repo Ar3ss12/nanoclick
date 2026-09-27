@@ -483,5 +483,8 @@
   "notice_watch_invalid_title": "File looks broken",
   "notice_watch_invalid_msg": "{file} was edited outside the app and no longer parses. Fix it or it will be healed on next launch.",
   "toast_watch_changed": "{file} changed outside — valid.",
-  "toast_watch_invalid": "{file} changed outside — invalid, will heal on restart."
+  "toast_watch_invalid": "{file} changed outside — invalid, will heal on restart.",
+  "notice_cfg_backup_title": "Settings snapshot saved",
+  "notice_cfg_backup_msg": "A copy of your previous settings was saved before this session's first change. If a restart looks wrong, this file can be restored by hand (its path is in the log).",
+  "save_skipped_not_hydrated": "Settings were NOT saved: the config has not loaded yet — try again in a second."
 }

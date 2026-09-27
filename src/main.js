@@ -1943,6 +1943,18 @@ async function saveConfig() {
         message: "[SaveConfig] SKIPPED: config not hydrated yet (module defaults would be written)",
       })?.catch?.(() => {});
     } catch (_) { /* reporting must never break the caller */ }
+    // The user has to learn it NOW. The old behaviour was a silent write of the module
+    // defaults; even the fixed one would leave them wondering why a change "did not stick".
+    try {
+      showToast(
+        getI18nText(
+          "save_skipped_not_hydrated",
+          {},
+          "Settings were NOT saved: the config has not loaded yet — try again in a second.",
+        ),
+        "warn",
+      );
+    } catch (_) { /* a toast must never break the save path */ }
     return;
   }
   const op = stage("SaveConfig");

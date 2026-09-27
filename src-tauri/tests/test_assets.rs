@@ -3023,10 +3023,89 @@ fn test_no_config_save_before_hydration() {
         guard < write,
         "the hydration guard must run BEFORE the save command, or module defaults land on disk"
     );
+    // The skip branch itself must be traceable — in the log and in the window.
+    let branch = &rest[guard..(guard + 900).min(rest.len())];
     assert!(
-        rest[..guard].contains("debug_log") && rest[..guard].contains("level: \"warn\""),
+        branch.contains("debug_log") && branch.contains("level: \"warn\""),
         "a skipped save must leave a release-visible trace instead of vanishing silently"
     );
+    assert!(
+        branch.contains("showToast"),
+        "a skipped save must say so in the window too — the user has to learn it now, not \
+         after the restart"
+    );
+}
+
+/// The previous config is copied aside before a session's first write — and the user is
+/// told about it.
+///
+/// Insurance for the one case with no other safety net: a write that is wrong-but-VALID
+/// (the pre-hydration module default) leaves no corrupt file for the boot repair to
+/// notice, so the previous state has to exist somewhere BEFORE the overwrite.
+#[test]
+fn test_config_snapshot_before_the_first_save() {
+    fn section<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
+        let from = src.find(start).unwrap_or_else(|| panic!("`{start}` not found"));
+        match src[from..].find(end) {
+            Some(i) => &src[from..from + i],
+            None => &src[from..],
+        }
+    }
+
+    let cm_src = include_str!("../src/config_manager.rs");
+    assert!(
+        cm_src.contains("fn snapshot_before_first_save"),
+        "the manager must be able to snapshot the live config"
+    );
+    assert!(
+        cm_src.contains("SESSION_SNAPSHOT_DONE"),
+        "once per process: the first write of a session is the one that snapshots"
+    );
+    assert!(
+        cm_src.contains("json.bak-{stamp}"),
+        "the snapshot name must be timestamped, like the repair backups"
+    );
+
+    let lib_src = include_str!("../src/lib.rs");
+    assert!(
+        lib_src.contains("fn ensure_session_config_backup"),
+        "one owner for the snapshot + its notification"
+    );
+    let save = section(lib_src, "fn save_app_config", "fn toggle_mode");
+    let snap = save
+        .find("ensure_session_config_backup")
+        .expect("the page's save must take the snapshot");
+    let write = save
+        .find("config_manager.save")
+        .expect("save_app_config must write the config");
+    assert!(
+        snap < write,
+        "the snapshot must be taken BEFORE the write — after it the previous state is gone"
+    );
+    let persist = section(lib_src, "fn persist_window_visibility", "fn hide_secondary_windows");
+    assert!(
+        persist.contains("ensure_session_config_backup"),
+        "the backend's own config write needs the same insurance"
+    );
+    assert!(
+        lib_src.contains("notice_cfg_backup_title"),
+        "the snapshot must be announced, not silent"
+    );
+
+    for locale in ["ua.json", "ru.json", "en.json"] {
+        let dict = match locale {
+            "ua.json" => include_str!("../../src/locales/ua.json"),
+            "ru.json" => include_str!("../../src/locales/ru.json"),
+            _ => include_str!("../../src/locales/en.json"),
+        };
+        for key in [
+            "notice_cfg_backup_title",
+            "notice_cfg_backup_msg",
+            "save_skipped_not_hydrated",
+        ] {
+            assert!(dict.contains(key), "{locale} must translate {key}");
+        }
+    }
 }
 
 

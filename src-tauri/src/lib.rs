@@ -177,8 +177,41 @@ fn get_app_config(state: State<'_, AppState>) -> AppConfig {
     app_cfg
 }
 
+/// Copy the previous config aside before this session's first write, and TELL the user.
+///
+/// Once per process (guarded inside `ConfigManager`). The toast rides the existing
+/// `file_toasts` queue, which the page polls every 3 s — the same channel the file
+/// watcher uses; the path itself goes to the log at `warn` (release-visible).
+fn ensure_session_config_backup(app: &AppHandle) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let Some(path) = state.config_manager.snapshot_before_first_save() else {
+        return;
+    };
+    debug_log_internal(
+        "warn",
+        &format!("[Config] session snapshot: {}", path.display()),
+    );
+    if let Ok(mut q) = state.file_toasts.lock() {
+        if q.len() >= 8 {
+            q.remove(0);
+        }
+        q.push(AppNotice {
+            level: NoticeLevel::Info,
+            title: "notice_cfg_backup_title".into(),
+            message: "notice_cfg_backup_msg".into(),
+            details: Some(path.display().to_string()),
+        });
+    }
+}
+
 #[tauri::command]
 fn save_app_config(config: AppConfig, state: State<'_, AppState>, app: AppHandle) -> Result<AppConfig, String> {
+    // Insurance first: the previous file is copied aside before this session's first
+    // write, so a wrong-but-valid write (the class that cost a real profile) is always
+    // recoverable by hand.
+    ensure_session_config_backup(&app);
     let _ = crate::platform::set_always_run_as_admin(config.ui.always_run_as_admin);
     // Keep persisted UI prefs and the lazy WebViews in sync: toggling ripple/HUD
     // in Settings must create/destroy the WebView on demand, not just flip a flag.
@@ -944,6 +977,8 @@ fn persist_window_visibility(app: &AppHandle, visible: bool) {
     // that call has to see "the app is going to the tray" even though this very
     // window is still on screen for another few hundred milliseconds.
     MAIN_IN_TRAY.store(!visible, Ordering::Release);
+    // Same insurance as the page's save: the backend can overwrite the config too.
+    ensure_session_config_backup(app);
     let Some(state) = app.try_state::<AppState>() else {
         return;
     };

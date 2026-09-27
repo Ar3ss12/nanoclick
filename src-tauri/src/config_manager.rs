@@ -902,6 +902,11 @@ impl Default for AppConfig {
     }
 }
 
+/// Set once the session's pre-write snapshot has been attempted, so the FIRST write of
+/// a process is the one that copies the previous config aside.
+static SESSION_SNAPSHOT_DONE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 pub struct ConfigManager {
     config_path: PathBuf,
 }
@@ -1000,6 +1005,35 @@ impl ConfigManager {
             }
         }
         Ok(default_cfg)
+    }
+
+    /// Copy the live `config.json` aside **once per process**, before this session's
+    /// first write: `config.json.bak-<epoch>` (the naming `backup_corrupted_file` uses).
+    ///
+    /// Insurance, not hygiene. A bug that writes a wrong-but-VALID config — the
+    /// pre-hydration module default is the case that cost a real profile — leaves no
+    /// corrupt file for the boot repair to notice, so the previous state has to be kept
+    /// somewhere BEFORE the first overwrite. Returns the path only on the creating call.
+    pub fn snapshot_before_first_save(&self) -> Option<PathBuf> {
+        use std::sync::atomic::Ordering;
+        if SESSION_SNAPSHOT_DONE.swap(true, Ordering::AcqRel) {
+            return None;
+        }
+        if !self.config_path.exists() {
+            return None;
+        }
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let dest = self.config_path.with_extension(format!("json.bak-{stamp}"));
+        match fs::copy(&self.config_path, &dest) {
+            Ok(_) => Some(dest),
+            Err(e) => {
+                eprintln!("[config] session snapshot failed: {e}");
+                None
+            }
+        }
     }
 
     pub fn save(&self, config: &AppConfig) -> Result<(), String> {
