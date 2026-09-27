@@ -3271,6 +3271,24 @@ fn test_preset_writes_are_verified_and_cannot_be_silent() {
          it has to say so instead of looking normal"
     );
 
+    // 5. The factory-list injector is gone for good: no code path may put the factory presets
+    //    back into the library behind the user's back.
+    for line in js.lines() {
+        let code = line.trim_start();
+        if code.starts_with("//") {
+            continue;
+        }
+        assert!(
+            !code.contains("ensurePresetsExist("),
+            "the factory-preset injector is back — a lost or emptied library would silently \
+             become four factory cards again"
+        );
+    }
+    assert!(
+        js.contains("function presetLibrary()"),
+        "the empty-tolerant accessor must still exist"
+    );
+
     for locale in ["ua.json", "ru.json", "en.json"] {
         let dict = match locale {
             "ua.json" => include_str!("../../src/locales/ua.json"),
@@ -3281,6 +3299,7 @@ fn test_preset_writes_are_verified_and_cannot_be_silent() {
             "save_failed",
             "notice_cfg_load_failed_title",
             "notice_cfg_load_failed_msg",
+            "presets_export_empty",
         ] {
             assert!(dict.contains(key), "{locale} must translate {key}");
         }

@@ -2698,8 +2698,7 @@ listen("global-capture-pos", async (event) => {
 listen("global-preset-hotkey", async (event) => {
   const slot = Number(event.payload);
   if (!Number.isInteger(slot) || slot < 0 || slot > 8) return;
-  ensurePresetsExist();
-  const preset = currentConfig.presets?.[slot];
+  const preset = presetLibrary()[slot];
   if (!preset) {
     console.warn(`preset slot ${slot + 1} is empty`);
     return;
@@ -3133,89 +3132,20 @@ function buildPresetSnapshot(scope) {
 }
 
 // ── PRESETS MANAGER V2 ──────────────────────────────────────
-const defaultPresetList = [
-  {
-    id: "fast_cps",
-    name: "Fast CPS",
-    description: "29 CPS | 7.5% Jitter | Single Left",
-    icon: "⚡",
-    target_cps: 29.0,
-    jitter_percent: 7.5,
-    click_limit: 0,
-    button: "left",
-    click_type: "single",
-    position_mode: "cursor",
-    fixed_x: 100,
-    fixed_y: 100,
-    hold_duration_ms: 500,
-    hold_interval_ms: 1000,
-    outlier_prob: 0.02,
-    technique: "auto",
-    is_default: true
-  },
-  {
-    id: "gaming_boost",
-    name: "Gaming Boost",
-    description: "15 CPS | 5.0% Jitter | Single Left",
-    icon: "🎮",
-    target_cps: 15.0,
-    jitter_percent: 5.0,
-    click_limit: 0,
-    button: "left",
-    click_type: "single",
-    position_mode: "cursor",
-    fixed_x: 100,
-    fixed_y: 100,
-    hold_duration_ms: 500,
-    hold_interval_ms: 1000,
-    outlier_prob: 0.02,
-    technique: "auto",
-    is_default: true
-  },
-  {
-    id: "human_emulation",
-    name: "Human Emulation",
-    description: "8 CPS | 15.0% Jitter | Single Left",
-    icon: "👤",
-    target_cps: 8.0,
-    jitter_percent: 15.0,
-    click_limit: 0,
-    button: "left",
-    click_type: "single",
-    position_mode: "cursor",
-    fixed_x: 100,
-    fixed_y: 100,
-    hold_duration_ms: 500,
-    hold_interval_ms: 1000,
-    outlier_prob: 0.02,
-    technique: "auto",
-    is_default: true
-  },
-  {
-    id: "afk_farm",
-    name: "AFK Farm",
-    description: "2 CPS | 2.0% Jitter | Single Left",
-    icon: "🌾",
-    target_cps: 2.0,
-    jitter_percent: 2.0,
-    click_limit: 0,
-    button: "left",
-    click_type: "single",
-    position_mode: "cursor",
-    fixed_x: 100,
-    fixed_y: 100,
-    hold_duration_ms: 500,
-    hold_interval_ms: 1000,
-    outlier_prob: 0.02,
-    technique: "auto",
-    is_default: true
-  }
-];
+// The factory preset list is NOT duplicated here any more. It lives in Rust
+// (`default_presets()` in `config_manager.rs`) and reaches the page through `get_app_config` —
+// the backend is the only writer of `presets`. Keeping a JS copy existed for one purpose only:
+// re-injecting the factory four when the array looked empty. That is gone.
 
-function ensurePresetsExist() {
-  if (!currentConfig.presets || !Array.isArray(currentConfig.presets) || currentConfig.presets.length === 0) {
-    currentConfig.presets = JSON.parse(JSON.stringify(defaultPresetList));
-  }
+
+// The preset library is `currentConfig.presets` — an ARRAY that belongs to the USER. It is
+// never "repaired" by injecting the factory list: doing that made "no presets" unrepresentable
+// (a lost or deliberately emptied library silently became four factory cards, and those were
+// then written on the next save — the exact fingerprint found on a wiped profile). Callers only
+// need the array to exist, so that is all this guarantees.
+function presetLibrary() {
+  if (!Array.isArray(currentConfig.presets)) currentConfig.presets = [];
+  return currentConfig.presets;
 }
 
 // Build all preset cards into a single HTML string and attach handlers via
@@ -3363,8 +3293,7 @@ function renderPresetsGrid() {
 // Copy a preset (every captured group included) under a fresh id, so "make a
 // variant of this profile" does not mean re-entering twenty fields by hand.
 async function duplicatePreset(presetId) {
-  ensurePresetsExist();
-  const source = currentConfig.presets.find(x => x.id === presetId);
+  const source = presetLibrary().find(x => x.id === presetId);
   if (!source) return;
   const copy = JSON.parse(JSON.stringify(withPresetDefaults(source)));
   copy.id = "preset_" + Date.now();
@@ -3372,7 +3301,7 @@ async function duplicatePreset(presetId) {
   copy.is_default = false;
   // Two presets must never fight over one global hotkey.
   copy.hotkey = "";
-  currentConfig.presets.push(copy);
+  presetLibrary().push(copy);
   renderPresetsGrid();
   await saveConfig();
 }
@@ -3491,8 +3420,7 @@ async function applyPreset(presetId) {
   const op = stage("ApplyPreset");
   try {
     await op.run("lookup", () => {
-      ensurePresetsExist();
-      const p = currentConfig.presets.find(x => x.id === presetId);
+      const p = presetLibrary().find(x => x.id === presetId);
       if (!p) { op.log("not-found", presetId); return false; }
       op.log("loaded", `name="${p.name}" cps=${p.target_cps} jitter=${p.jitter_percent}%`);
       return true;
@@ -3625,8 +3553,7 @@ async function applyPreset(presetId) {
 // One-click "Run preset": apply settings + start autoclicker immediately.
 // Bridges Presets tab → Dashboard Start button → executeStartAutomation().
 async function runPreset(presetId) {
-  ensurePresetsExist();
-  const p = currentConfig.presets.find(x => x.id === presetId);
+  const p = presetLibrary().find(x => x.id === presetId);
   if (!p) return;
 
   // 1) apply preset values into currentConfig (same path as the ⚡ Apply button)
@@ -3662,8 +3589,7 @@ async function runPreset(presetId) {
 }
 
 function inspectPreset(presetId) {
-  ensurePresetsExist();
-  const p = currentConfig.presets.find(x => x.id === presetId);
+  const p = presetLibrary().find(x => x.id === presetId);
   if (!p) return;
 
   const modal = document.getElementById("presetInspectModal");
@@ -4102,7 +4028,7 @@ async function savePresetFromModal() {
   const engine = readPresetModalEngine();
   const scope = readPresetModalScope();
 
-  ensurePresetsExist();
+  const library = presetLibrary();
 
   const record = {
     ...engine,
@@ -4120,14 +4046,14 @@ async function savePresetFromModal() {
   };
 
   if (editId) {
-    const idx = currentConfig.presets.findIndex(x => x.id === editId);
+    const idx = library.findIndex(x => x.id === editId);
     if (idx !== -1) {
       // The id survives an edit; everything else is replaced wholesale, so a
       // group the user just turned OFF stops travelling with the preset.
-      currentConfig.presets[idx] = { ...currentConfig.presets[idx], ...record };
+      library[idx] = { ...library[idx], ...record };
     }
   } else {
-    currentConfig.presets.push({ ...record, id: "preset_" + Date.now(), is_default: false });
+    library.push({ ...record, id: "preset_" + Date.now(), is_default: false });
   }
 
   renderPresetsGrid();
@@ -4158,10 +4084,10 @@ async function verifyPresetsOnDisk() {
 }
 
 async function deletePreset(presetId) {
-  ensurePresetsExist();
-  currentConfig.presets = currentConfig.presets.filter(x => x.id !== presetId);
+  currentConfig.presets = presetLibrary().filter(x => x.id !== presetId);
   renderPresetsGrid();
-  await saveConfig();
+  const saved = await saveConfig();
+  if (saved) await verifyPresetsOnDisk();
 }
 
 // Hoisted out of setupPresetListeners(): it touches only `document`, so nesting
@@ -4275,8 +4201,14 @@ function setupPresetListeners() {
 
   bindPresetControl("exportPresetsBtn", "click", () => {
     try {
-      ensurePresetsExist();
-      const json = JSON.stringify(currentConfig.presets, null, 2);
+      const library = presetLibrary();
+      // An empty library exports NOTHING. It must not export the factory list as if it were the
+      // user's own work — that is exactly what the old injection did.
+      if (library.length === 0) {
+        showToast(getI18nText("presets_export_empty", {}, "No presets to export."), "warn");
+        return;
+      }
+      const json = JSON.stringify(library, null, 2);
       const blob = new Blob([json], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
@@ -4287,7 +4219,7 @@ function setupPresetListeners() {
       anchor.click();
       anchor.remove();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
-      console.log(`[Presets] exported ${currentConfig.presets.length} preset(s)`);
+      console.log(`[Presets] exported ${library.length} preset(s)`);
     } catch (err) {
       console.error("[Presets] export failed:", err);
       alert(getI18nText("dialog_alert_export_presets_fail", {}, "Failed to export presets."));
@@ -4326,10 +4258,10 @@ function setupPresetListeners() {
           });
 
         if (imported.length === 0) throw new Error("no valid presets");
-        ensurePresetsExist();
-        currentConfig.presets.push(...imported);
+        presetLibrary().push(...imported);
         renderPresetsGrid();
-        await saveConfig();
+        const saved = await saveConfig();
+        if (saved) await verifyPresetsOnDisk();
         alert(getI18nText("dialog_alert_import_presets_success", { count: imported.length }, `Successfully imported ${imported.length} presets`));
       } catch (err) {
         console.error("[Presets] import failed:", err);

@@ -490,5 +490,6 @@
   "toast_macro_recorded": "Recording saved as \"{name}\" ({count} actions) — click its name in My Macros to rename.",
   "save_failed": "Settings were NOT saved — the write failed. See %TEMP%\\nanoclick_web.log for the reason.",
   "notice_cfg_load_failed_title": "Settings could not be loaded",
-  "notice_cfg_load_failed_msg": "Your config.json could not be read, so the app is running on factory defaults and WILL NOT SAVE anything you change. Close the app, check that config.json is readable, and start it again — a backup of the previous file may be next to it (config.json.bak-*)."
+  "notice_cfg_load_failed_msg": "Your config.json could not be read, so the app is running on factory defaults and WILL NOT SAVE anything you change. Close the app, check that config.json is readable, and start it again — a backup of the previous file may be next to it (config.json.bak-*).",
+  "presets_export_empty": "No presets to export — the library is empty."
 }
