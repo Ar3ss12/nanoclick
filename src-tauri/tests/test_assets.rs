@@ -2803,4 +2803,65 @@ fn test_shutdown_is_idempotent_and_stops_the_backend_before_the_windows() {
     );
 }
 
+/// Nothing may bring the window back once the user closed it to the tray.
+///
+/// Two paths did exactly that:
+/// * `uipi_manager.js`'s `focusWindow()` — the UIPI alert. A click blocked by UIPI
+///   (a target point over an elevated process, throttled to one per 3 s while the
+///   clicker runs) called `unminimize()` + `show()` + `setFocus()` unconditionally,
+///   so the window popped back out of the tray every three seconds.
+/// * the close-time flush: `save_app_config` stamped the flag from the LIVE window,
+///   which is still visible while the page flushes, so it overwrote the tray exit
+///   and the NEXT start reopened the window.
+#[test]
+fn test_nothing_resurrects_a_window_the_user_put_in_the_tray() {
+    fn section<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
+        let from = src.find(start).unwrap_or_else(|| panic!("`{start}` not found"));
+        match src[from..].find(end) {
+            Some(i) => &src[from..from + i],
+            None => &src[from..],
+        }
+    }
+
+    let uipi_code = include_str!("../../src/uipi_manager.js");
+    let focus = section(uipi_code, "async focusWindow()", "showModal()");
+    assert!(
+        focus.contains("isVisible"),
+        "the UIPI alert must ask whether the window is on screen before focusing it"
+    );
+    assert!(
+        focus.find("isVisible").unwrap_or(usize::MAX)
+            < focus.find("win.show()").unwrap_or(usize::MAX),
+        "the visibility check must come BEFORE win.show()"
+    );
+    assert!(
+        focus.contains("uipi_blocked_in_tray"),
+        "with the window in the tray the alert goes through the backend balloon instead"
+    );
+
+    let lib_src = include_str!("../src/lib.rs");
+    assert!(
+        lib_src.contains("static MAIN_IN_TRAY"),
+        "the in-memory tray state must exist: the page's flush runs before the hide"
+    );
+    let persist = section(
+        lib_src,
+        "fn persist_window_visibility",
+        "fn hide_secondary_windows",
+    );
+    assert!(
+        persist.contains("MAIN_IN_TRAY.store(!visible"),
+        "the single writer of the decision must mirror it before the file write"
+    );
+    let save = section(lib_src, "fn save_app_config", "fn toggle_mode");
+    assert!(
+        save.contains("MAIN_IN_TRAY"),
+        "save_app_config must let the tray decision win over the live read"
+    );
+    assert!(
+        lib_src.contains("fn uipi_blocked_in_tray"),
+        "the balloon command the page calls while hidden must exist"
+    );
+}
+
 

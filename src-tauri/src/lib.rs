@@ -210,11 +210,14 @@ fn save_app_config(config: AppConfig, state: State<'_, AppState>, app: AppHandle
     }
     // The "was the window visible?" flag is stamped from the LIVE window for the
     // same reason the geometry is: the page never observes a tray hide or a deep
-    // sleep, so whatever it sent is stale by definition. Live read, keep on failure.
-    config.ui.window_was_visible = app
-        .get_webview_window("main")
-        .and_then(|w| w.is_visible().ok())
-        .unwrap_or(config.ui.window_was_visible);
+    // sleep, so whatever it sent is stale by definition. `MAIN_IN_TRAY` is checked
+    // first because the page's close-time flush runs while the window is still on
+    // screen — without it that flush reported "visible" and undid the tray exit.
+    config.ui.window_was_visible = !MAIN_IN_TRAY.load(Ordering::Acquire)
+        && app
+            .get_webview_window("main")
+            .and_then(|w| w.is_visible().ok())
+            .unwrap_or(false);
     state.config_manager.save(&config)?;
     // Swallow OUR OWN echo so the observer never toasts our save.
     if let Some(w) = app.try_state::<crate::WatcherState>() {
@@ -797,6 +800,26 @@ fn report_tray_action(app: &AppHandle, msg: &str) {
     }
 }
 
+/// A click blocked by UIPI while the interface lives in the tray.
+///
+/// The page reacts to a block with a chime plus a modal **inside the main window**,
+/// and it used to call `show()` so that modal would be readable — which dragged the
+/// window back out of the tray on every blocked click, undoing a close the user had
+/// asked for. The page now asks here instead, and the alert goes through the tray
+/// balloon: the same channel every other action uses when the interface is not on
+/// screen. The page's own modal still opens, so the user sees it when they come back.
+#[tauri::command]
+fn uipi_blocked_in_tray(app: AppHandle) {
+    tray::notify_balloon(
+        "NanoClick",
+        "Click blocked: the target window runs elevated (UIPI)",
+    );
+    debug_log_internal(
+        "warn",
+        "[UIPI] blocked click while the window lives in the tray (balloon, no window resurrected)",
+    );
+}
+
 /// What "Reload interface" must do.
 ///
 /// Pure on purpose (same pattern as `deep_sleep_allowed` / `WatchdogVerdict`):
@@ -870,6 +893,15 @@ pub(crate) fn restart_app_from_tray(app: &AppHandle) {
 // quits. The flag is therefore stamped from the live window — never from a
 // payload — on every hide/show transition and at the start of a shutdown.
 
+/// True while the app intends the interface to live in the tray (hidden, or
+/// destroyed by deep sleep). The in-memory mirror of `ui.window_was_visible == false`,
+/// and the reason `save_app_config` cannot be trusted with a live read alone: the
+/// page's close-time flush (`__nanoclick_tray_flush__` → `saveConfig()`) runs
+/// BEFORE the hide, so the window still reports visible and a naive stamp would
+/// overwrite the very decision we had just taken — which is how "close to the tray"
+/// turned into "reopens on the next start".
+static MAIN_IN_TRAY: AtomicBool = AtomicBool::new(false);
+
 /// Effective "start hidden" decision for a boot.
 ///
 /// An explicit `start_minimized` ("always start hidden") wins; otherwise
@@ -895,6 +927,11 @@ pub(crate) fn main_window_visible(app: &AppHandle) -> bool {
 /// A no-op when nothing changed: a tray round trip must not rewrite the config
 /// file. It marks its own write, so the config observer never toasts our save.
 fn persist_window_visibility(app: &AppHandle, visible: bool) {
+    // Mirror the decision FIRST, before the "nothing changed" shortcut below: the
+    // page may already have a flush in flight that will ask `save_app_config`, and
+    // that call has to see "the app is going to the tray" even though this very
+    // window is still on screen for another few hundred milliseconds.
+    MAIN_IN_TRAY.store(!visible, Ordering::Release);
     let Some(state) = app.try_state::<AppState>() else {
         return;
     };
@@ -1801,6 +1838,7 @@ pub fn run() {
             dump_input_diagnostics,
             frontend_ready,
             tray_flush_done,
+            uipi_blocked_in_tray,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

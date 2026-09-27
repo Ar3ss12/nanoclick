@@ -181,14 +181,26 @@ const UipiManager = {
     } catch (_) {}
   },
 
-  focusWindow() {
+  // Bring the window forward so the alert below is readable — but NEVER resurrect
+  // one that the app deliberately put in the tray. Closing to the tray is a
+  // decision the user made, and a blocked click (the clicker running while the
+  // window is hidden is the normal tray case) must not undo it: this used to call
+  // show() unconditionally, which is why the window kept coming back on its own.
+  // When the window is hidden the backend raises a tray balloon instead, so the
+  // alert still reaches the user; the modal stays open, ready for their return.
+  async focusWindow() {
     try {
-      if (window.__TAURI__?.window?.getCurrentWindow) {
-        const win = window.__TAURI__.window.getCurrentWindow();
-        win.unminimize();
-        win.show();
-        win.setFocus();
+      const win = window.__TAURI__?.window?.getCurrentWindow?.();
+      if (!win) return;
+      if (typeof win.isVisible === "function" && !(await win.isVisible())) {
+        if (window.__TAURI__?.core?.invoke) {
+          await window.__TAURI__.core.invoke("uipi_blocked_in_tray");
+        }
+        return;
       }
+      win.unminimize();
+      win.show();
+      win.setFocus();
     } catch (_) {}
   },
 
