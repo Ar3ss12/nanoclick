@@ -2863,6 +2863,21 @@ fn test_nothing_resurrects_a_window_the_user_put_in_the_tray() {
         lib_src.contains("fn uipi_blocked_in_tray"),
         "the balloon command the page calls while hidden must exist"
     );
+
+    // And the page's own exit path must not fire while the interface is in the tray:
+    // WebView2 raises `beforeunload` asynchronously, so the suspension's guard is
+    // already cleared by the time `exit_app` arrives.
+    let exit_app = section(lib_src, "fn exit_app", "// ── Tray + process lifetime");
+    assert!(
+        exit_app.contains("MAIN_IN_TRAY"),
+        "exit_app must refuse while the interface lives in the tray, or the beforeunload \
+         fallback kills the app right after a close to the tray"
+    );
+    assert!(
+        exit_app.find("MAIN_IN_TRAY").unwrap_or(usize::MAX)
+            < exit_app.find("shutdown_application").unwrap_or(usize::MAX),
+        "the guard must come BEFORE the shutdown call"
+    );
 }
 
 /// Starting the clicker must never spin up a WebView for an interface that is not
@@ -2933,9 +2948,10 @@ fn test_tray_switch_reports_both_flags() {
         "moving the master switch must write deep_sleep_to_tray too"
     );
     assert!(
-        !main_js.contains("let trayLifeInitial") && !main_js.contains("trayLifeInitial = null"),
-        "the `trayLifeInitial` trick is what left a half-enabled config looking ON — the \
-         variable must be gone, only the history comment may mention it"
+        main_js.contains("trayLifeCheckbox.checked !== trayLifeHydrated"),
+        "an untouched master switch must never rewrite the tray flags: writing them from the \
+         computed checkbox turned a factory config (minimize=true, deep_sleep=false) into \
+         \"close quits the app\" on the very first save"
     );
     // The legacy state is explained, not silent.
     let hint = section(&main_js, "function paintTrayLifeHint", "if (trayLifeCheckbox) trayLifeCheckbox.addEventListener");
@@ -2972,6 +2988,44 @@ fn test_tray_switch_reports_both_flags() {
     assert!(
         lib_src.matches("deep_sleep_skip_reason(&app_handle)").count() >= 2,
         "both the close and the minimize path must log why deep sleep was skipped"
+    );
+}
+
+/// A config save must never run before a real config has been loaded.
+///
+/// `currentConfig` starts as the page's module default — a factory profile with
+/// `first_run: true` — and one early save replaced a live profile with it: the file
+/// came back with `language: "ua"` (the Rust default, NOT the factory `"en"`),
+/// `preset_hotkeys: []` (the serde default for a field the payload never carried) and
+/// `first_run: true` — so the onboarding wizard reappeared and then overwrote the
+/// engine with a starter preset. `configHydrated` existed since the status-payload
+/// bug but guarded exactly ONE caller; it now guards the only door to disk.
+#[test]
+fn test_no_config_save_before_hydration() {
+    let main_js = {
+        let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
+        let key = tauri::utils::assets::AssetKey::from("main.js");
+        let bytes = ctx.assets().get(&key).expect("main.js must be embedded");
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+
+    let start = main_js
+        .find("async function saveConfig()")
+        .expect("saveConfig must exist");
+    let rest = &main_js[start..];
+    let guard = rest
+        .find("!configHydrated")
+        .expect("saveConfig must refuse to write before the config is loaded");
+    let write = rest
+        .find("invoke(\"save_app_config\"")
+        .expect("saveConfig must reach the backend command");
+    assert!(
+        guard < write,
+        "the hydration guard must run BEFORE the save command, or module defaults land on disk"
+    );
+    assert!(
+        rest[..guard].contains("debug_log") && rest[..guard].contains("level: \"warn\""),
+        "a skipped save must leave a release-visible trace instead of vanishing silently"
     );
 }
 

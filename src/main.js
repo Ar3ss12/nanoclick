@@ -569,6 +569,11 @@ const autostartCheckbox       = document.getElementById("autostartCheckbox");
 // it can only happen on a close that "minimize to tray" is responsible for,
 // so "deep sleep ON + minimize OFF" was a setting that did nothing.
 const trayLifeCheckbox        = document.getElementById("trayLifeCheckbox");
+// The master's state as hydrated (both flags read together). `collect` compares
+// against it, so ONLY a real user move writes the tray flags: an untouched switch
+// must never rewrite them — that is how a factory config silently lost
+// `minimize_to_tray` on an unrelated save.
+let trayLifeHydrated = null;
 const notificationsCheckbox   = document.getElementById("notificationsCheckbox");
 const pauseFocusLossCheckbox  = document.getElementById("pauseFocusLossCheckbox");
 const rememberPosCheckbox     = document.getElementById("rememberPosCheckbox");
@@ -1416,6 +1421,7 @@ function updateUiFromConfig(config) {
     const minimizeWanted = config.ui.minimize_to_tray !== false;
     const deepSleepWanted = config.ui.deep_sleep_to_tray !== false;
     trayLifeCheckbox.checked = minimizeWanted && deepSleepWanted;
+    trayLifeHydrated = trayLifeCheckbox.checked;
     paintTrayLifeHint(minimizeWanted, deepSleepWanted);
   }
   if (notificationsCheckbox) notificationsCheckbox.checked = config.ui.show_notifications !== false;
@@ -1923,6 +1929,22 @@ function saveConfigThrottled() {
 }
 
 async function saveConfig() {
+  // NEVER write before a real config has been loaded. `currentConfig` starts as the
+  // module default — a factory profile with `first_run: true` — and a save from here
+  // has silently replaced a live profile with it: language "ua" (the Rust default,
+  // NOT the factory "en"), `preset_hotkeys: []` (the serde default for a field the
+  // payload never carried), `key_ttl_ms: 500`, and `first_run: true`, which made the
+  // onboarding wizard reappear and then overwrite the engine with a starter preset.
+  // Reported at `warn` so a skip is visible in release builds, never silent.
+  if (!configHydrated) {
+    try {
+      window.__TAURI__?.core?.invoke("debug_log", {
+        level: "warn",
+        message: "[SaveConfig] SKIPPED: config not hydrated yet (module defaults would be written)",
+      })?.catch?.(() => {});
+    } catch (_) { /* reporting must never break the caller */ }
+    return;
+  }
   const op = stage("SaveConfig");
   try {
     await op.run("collect-input", () => {
@@ -1997,12 +2019,15 @@ async function saveConfig() {
       // window on save, because the page never observes a hide to the tray.
       if (autostartCheckbox) currentConfig.ui.autostart = autostartCheckbox.checked;
       if (trayLifeCheckbox) {
-        // ONE switch, BOTH flags — that is what its label promises, and the only
-        // state the UI can produce. `trayLifeInitial` no longer gates this write:
-        // it was the reason a factory config (minimize=true, deep_sleep=false) kept
-        // showing ON while closing freed nothing at all.
-        currentConfig.ui.minimize_to_tray = trayLifeCheckbox.checked;
-        currentConfig.ui.deep_sleep_to_tray = trayLifeCheckbox.checked;
+        // ONE switch, BOTH flags — but ONLY when the user actually moved it. An
+        // unrelated save must leave the tray flags exactly as they are: writing them
+        // from the computed checkbox turned a factory profile (minimize=true,
+        // deep_sleep=false, i.e. the switch displays OFF) into "close quits the app"
+        // on the very first save.
+        if (trayLifeCheckbox.checked !== trayLifeHydrated) {
+          currentConfig.ui.minimize_to_tray = trayLifeCheckbox.checked;
+          currentConfig.ui.deep_sleep_to_tray = trayLifeCheckbox.checked;
+        }
       }
       if (notificationsCheckbox) currentConfig.ui.show_notifications = notificationsCheckbox.checked;
       if (pauseFocusLossCheckbox) currentConfig.ui.pause_on_focus_loss = pauseFocusLossCheckbox.checked;

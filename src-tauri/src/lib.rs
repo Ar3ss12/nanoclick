@@ -489,8 +489,18 @@ fn exit_app(app: AppHandle) {
     // A page being suspended calls this from its `beforeunload` fallback. That
     // unload is deliberate (deep sleep), so the call must not kill the backend
     // we just decided to keep alive.
-    if TRAY_SUSPEND_ARMED.load(Ordering::Acquire) {
-        debug_log_internal("info", "[Tray] exit_app ignored: WebView suspension in flight");
+    //
+    // `MAIN_IN_TRAY` covers the same unload one step later: the suspension clears
+    // `TRAY_SUSPEND_ARMED` as soon as the destroy loop returns, while WebView2 fires
+    // `beforeunload` asynchronously — the call then landed after the guard was gone
+    // and took the whole app down ("it quits right after I close it to the tray").
+    // A page-driven exit is never legitimate while the interface lives in the tray;
+    // the tray's own Quit calls `shutdown_application` directly.
+    if TRAY_SUSPEND_ARMED.load(Ordering::Acquire) || MAIN_IN_TRAY.load(Ordering::Acquire) {
+        debug_log_internal(
+            "info",
+            "[Tray] exit_app ignored: the interface lives in the tray",
+        );
         return;
     }
     shutdown_application(&app);
