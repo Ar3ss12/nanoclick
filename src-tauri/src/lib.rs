@@ -1197,6 +1197,35 @@ fn deep_sleep_allowed_now(app: &AppHandle) -> bool {
     deep_sleep_allowed(enabled, clicking, macro_running, recording)
 }
 
+/// Why deep sleep is not available right now, for the log.
+///
+/// A silent `-> hidden to tray` is indistinguishable from a broken switch: the user
+/// closes the window, 120 MB stay resident, and nothing anywhere says that deep
+/// sleep was skipped on purpose. Same four inputs as `deep_sleep_allowed_now` —
+/// this is the explanation, that one is the decision.
+fn deep_sleep_skip_reason(app: &AppHandle) -> &'static str {
+    let Some(state) = app.try_state::<AppState>() else {
+        return "app state unavailable";
+    };
+    if !state.config_manager.load().ui.deep_sleep_to_tray {
+        return "deep sleep is OFF in the config";
+    }
+    if state.scheduler.is_active() {
+        return "the clicker is running";
+    }
+    if crate::core::global().map(|e| e.is_running()).unwrap_or(false) {
+        return "a macro is running";
+    }
+    let recording = app
+        .try_state::<crate::commands::MacroState>()
+        .map(|s| s.recorder.lock().map(|slot| slot.is_some()).unwrap_or(true))
+        .unwrap_or(false);
+    if recording {
+        return "a recording is in progress";
+    }
+    "unknown (state changed between the check and the log)"
+}
+
 /// Sent by the page when it finished persisting pending state.
 #[tauri::command]
 fn tray_flush_done() {
@@ -1874,7 +1903,14 @@ pub fn run() {
                             }
                             hide_secondary_windows(&app_handle);
                             start_tray_if_needed(&app_handle);
-                            debug_log_internal("info", "[Tray] close requested -> hidden to tray");
+                            debug_log_internal(
+                                "warn",
+                                &format!(
+                                    "[Tray] close requested -> hidden to tray \
+                                     (deep sleep skipped: {})",
+                                    deep_sleep_skip_reason(&app_handle)
+                                ),
+                            );
                         }
                     } else {
                         shutdown_application(&app_handle);
@@ -1908,7 +1944,14 @@ pub fn run() {
                         }
                         hide_secondary_windows(&app_handle);
                         start_tray_if_needed(&app_handle);
-                        debug_log_internal("info", "[Tray] minimize requested -> hidden to tray");
+                        debug_log_internal(
+                            "warn",
+                            &format!(
+                                "[Tray] minimize requested -> hidden to tray \
+                                 (deep sleep skipped: {})",
+                                deep_sleep_skip_reason(&app_handle)
+                            ),
+                        );
                     }
                 }
             }

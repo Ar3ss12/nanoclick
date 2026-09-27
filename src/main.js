@@ -570,9 +570,6 @@ const autostartCheckbox       = document.getElementById("autostartCheckbox");
 // so "deep sleep ON + minimize OFF" was a setting that did nothing.
 const trayLifeCheckbox        = document.getElementById("trayLifeCheckbox");
 const notificationsCheckbox   = document.getElementById("notificationsCheckbox");
-// The master's value at hydrate time: deep sleep is only written together with
-// it once the user actually moved the switch (see `collect`).
-let trayLifeInitial = null;
 const pauseFocusLossCheckbox  = document.getElementById("pauseFocusLossCheckbox");
 const rememberPosCheckbox     = document.getElementById("rememberPosCheckbox");
 const alwaysOnTopCheckbox     = document.getElementById("alwaysOnTopCheckbox");
@@ -1410,12 +1407,16 @@ function updateUiFromConfig(config) {
   if (rememberStateCheckbox) rememberStateCheckbox.checked = config.ui.remember_last_window_state !== false;
   paintRememberStateLock();
   if (autostartCheckbox) autostartCheckbox.checked = !!config.ui.autostart;
-  // The master mirrors the PRIMARY flag (close → tray); deep sleep is written
-  // with it on the next explicit change, so a config that still says
-  // "minimize ON / deep sleep OFF" keeps behaving as before until then.
+  // The switch promises BOTH halves of the tray lifestyle ("close → tray + deep
+  // sleep"), so it must not show ON for a config where deep sleep is off: a
+  // factory config (minimize=true, deep_sleep=false) used to look enabled while
+  // closing freed nothing. Mixed state = OFF, plus a hint that says why and how to
+  // fix it in one click.
   if (trayLifeCheckbox) {
-    trayLifeCheckbox.checked = config.ui.minimize_to_tray !== false;
-    trayLifeInitial = trayLifeCheckbox.checked;
+    const minimizeWanted = config.ui.minimize_to_tray !== false;
+    const deepSleepWanted = config.ui.deep_sleep_to_tray !== false;
+    trayLifeCheckbox.checked = minimizeWanted && deepSleepWanted;
+    paintTrayLifeHint(minimizeWanted, deepSleepWanted);
   }
   if (notificationsCheckbox) notificationsCheckbox.checked = config.ui.show_notifications !== false;
   if (pauseFocusLossCheckbox) pauseFocusLossCheckbox.checked = !!config.ui.pause_on_focus_loss;
@@ -1996,13 +1997,12 @@ async function saveConfig() {
       // window on save, because the page never observes a hide to the tray.
       if (autostartCheckbox) currentConfig.ui.autostart = autostartCheckbox.checked;
       if (trayLifeCheckbox) {
+        // ONE switch, BOTH flags — that is what its label promises, and the only
+        // state the UI can produce. `trayLifeInitial` no longer gates this write:
+        // it was the reason a factory config (minimize=true, deep_sleep=false) kept
+        // showing ON while closing freed nothing at all.
         currentConfig.ui.minimize_to_tray = trayLifeCheckbox.checked;
-        // Deep sleep follows the master — but only once the user moved it.
-        // Otherwise an unrelated save would silently switch deep sleep on for a
-        // config that deliberately had it off.
-        if (trayLifeInitial === null || trayLifeCheckbox.checked !== trayLifeInitial) {
-          currentConfig.ui.deep_sleep_to_tray = trayLifeCheckbox.checked;
-        }
+        currentConfig.ui.deep_sleep_to_tray = trayLifeCheckbox.checked;
       }
       if (notificationsCheckbox) currentConfig.ui.show_notifications = notificationsCheckbox.checked;
       if (pauseFocusLossCheckbox) currentConfig.ui.pause_on_focus_loss = pauseFocusLossCheckbox.checked;
@@ -2726,9 +2726,35 @@ if (startMinimizedCheckbox) startMinimizedCheckbox.addEventListener("change", ()
   saveConfig();
 });
 if (rememberStateCheckbox) rememberStateCheckbox.addEventListener("change", saveConfig);
+// The master switch is the ONLY owner of both tray flags — its label promises both
+// halves. A config that predates the merge (minimize=true, deep_sleep=false) is
+// therefore shown as OFF with this hint, so "it looks enabled but closing frees
+// nothing" can never be silent again. Painted as text, never `disabled`.
+function paintTrayLifeHint(minimizeWanted, deepSleepWanted) {
+  const row = trayLifeCheckbox ? trayLifeCheckbox.closest(".checkbox-row") : null;
+  if (!row) return;
+  const mixed = minimizeWanted && !deepSleepWanted;
+  let hint = document.getElementById("trayLifeHint");
+  if (!mixed) {
+    if (hint) hint.remove();
+    return;
+  }
+  if (!hint) {
+    hint = document.createElement("div");
+    hint.id = "trayLifeHint";
+    hint.className = "settings-hint";
+    row.insertAdjacentElement("afterend", hint);
+  }
+  hint.textContent = getI18nText(
+    "settings_tray_life_mixed_hint",
+    {},
+    "Deep sleep is off for this config: closing the window keeps ~120 MB alive. Toggle this switch off and on once to enable it.",
+  );
+}
+
 if (trayLifeCheckbox) trayLifeCheckbox.addEventListener("change", () => {
   // Touching the master is the explicit "set both flags together" intent.
-  trayLifeInitial = null;
+  paintTrayLifeHint(trayLifeCheckbox.checked, trayLifeCheckbox.checked);
   saveConfig();
 });
 if (notificationsCheckbox) notificationsCheckbox.addEventListener("change", saveConfig);

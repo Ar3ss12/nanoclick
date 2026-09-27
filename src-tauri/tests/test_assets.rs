@@ -1599,8 +1599,9 @@ fn test_tray_hardening_and_input_diagnostics_wiring() {
         "main.js must offer the diagnostics dump"
     );
     assert!(
-        main_js.contains("trayLifeCheckbox") && main_js.contains("trayLifeInitial"),
-        "one master switch drives minimize + deep sleep, without silent writes"
+        main_js.contains("trayLifeCheckbox")
+            && main_js.contains("currentConfig.ui.deep_sleep_to_tray = trayLifeCheckbox.checked"),
+        "one master switch drives minimize + deep sleep, writing both flags together"
     );
     assert!(
         main_js.contains("admin_restart_required"),
@@ -2861,6 +2862,116 @@ fn test_nothing_resurrects_a_window_the_user_put_in_the_tray() {
     assert!(
         lib_src.contains("fn uipi_blocked_in_tray"),
         "the balloon command the page calls while hidden must exist"
+    );
+}
+
+/// Starting the clicker must never spin up a WebView for an interface that is not
+/// on screen.
+///
+/// The ripple overlay is pre-created at click-START (`scheduler.rs`): fine while the
+/// window is visible, but with the app in the tray (hidden, or released by deep
+/// sleep) that call respawned the ENTIRE WebView2 runtime — ~6
+/// `msedgewebview2.exe`, ~120 MB — for a window the ready gate deliberately keeps
+/// hidden. Users see it as "the processes came back right after I closed it".
+#[test]
+fn test_click_start_never_spins_up_a_webview_in_the_tray() {
+    let sched_src = include_str!("../src/scheduler.rs");
+    let from = sched_src
+        .find("// LAZY overlay: pre-create the ripple WebView")
+        .expect("the click-start pre-create must exist");
+    let rest = &sched_src[from..];
+    let end = rest
+        .find("let emit_ripple_if_enabled")
+        .expect("the click loop must follow the pre-create");
+    let pre_create = &rest[..end];
+
+    let gate = pre_create
+        .find("main_window_visible")
+        .expect("the click-start pre-create must ask whether the main window is on screen");
+    let create = pre_create
+        .find("ensure_overlay_window")
+        .expect("the pre-create must still build the overlay when the UI is visible");
+    assert!(
+        gate < create,
+        "the visibility gate must come BEFORE the WebView is created, or the tray spin-up \
+         happens anyway"
+    );
+}
+
+/// The tray master switch owns BOTH flags — and it must not lie about them.
+///
+/// It displayed ON from `minimize_to_tray` alone, so a factory config
+/// (`deep_sleep_to_tray = false`) looked enabled while closing the window freed
+/// nothing: "the setting does not work" with nothing anywhere explaining why. The
+/// displayed state is now the conjunction, one write sets both, the half-enabled
+/// legacy state gets a visible hint, and a skipped deep sleep says so in the log.
+#[test]
+fn test_tray_switch_reports_both_flags() {
+    fn section<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
+        let from = src.find(start).unwrap_or_else(|| panic!("`{start}` not found"));
+        match src[from..].find(end) {
+            Some(i) => &src[from..from + i],
+            None => &src[from..],
+        }
+    }
+
+    let main_js = {
+        let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
+        let key = tauri::utils::assets::AssetKey::from("main.js");
+        let bytes = ctx.assets().get(&key).expect("main.js must be embedded");
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+
+    // Hydrate: the switch is ON only when BOTH halves are on.
+    assert!(
+        main_js.contains("minimizeWanted && deepSleepWanted"),
+        "the master switch must show the conjunction, not `minimize_to_tray` alone"
+    );
+    // Collect: one switch writes both flags (its label promises both).
+    assert!(
+        main_js.contains("currentConfig.ui.deep_sleep_to_tray = trayLifeCheckbox.checked"),
+        "moving the master switch must write deep_sleep_to_tray too"
+    );
+    assert!(
+        !main_js.contains("let trayLifeInitial") && !main_js.contains("trayLifeInitial = null"),
+        "the `trayLifeInitial` trick is what left a half-enabled config looking ON — the \
+         variable must be gone, only the history comment may mention it"
+    );
+    // The legacy state is explained, not silent.
+    let hint = section(main_js, "function paintTrayLifeHint", "if (trayLifeCheckbox) trayLifeCheckbox.addEventListener");
+    assert!(
+        hint.contains("trayLifeHint") && hint.contains("settings_tray_life_mixed_hint"),
+        "a minimize-only config must render the hint that says deep sleep is off"
+    );
+    assert!(
+        !hint.contains("disabled"),
+        "the hint is painted text — it must not disable the switch that fixes the state"
+    );
+    assert!(
+        include_str!("../../src/style.css").contains(".settings-hint {"),
+        "the hint needs its own rule, or it renders as body text"
+    );
+    for locale in ["ua.json", "ru.json", "en.json"] {
+        let dict = match locale {
+            "ua.json" => include_str!("../../src/locales/ua.json"),
+            "ru.json" => include_str!("../../src/locales/ru.json"),
+            _ => include_str!("../../src/locales/en.json"),
+        };
+        assert!(
+            dict.contains("settings_tray_life_mixed_hint"),
+            "{locale} must translate the half-enabled hint"
+        );
+    }
+
+    // And a skipped deep sleep names its reason in the release-visible log.
+    let lib_src = include_str!("../src/lib.rs");
+    assert!(
+        lib_src.contains("fn deep_sleep_skip_reason"),
+        "the reason a close did not free memory must be explainable"
+    );
+    assert!(
+        lib_src.matches("deep_sleep_skip_reason(&app_handle)").count() >= 2,
+        "both the close and the minimize path must log why deep sleep was skipped"
     );
 }
 

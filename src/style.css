@@ -1593,6 +1593,16 @@ button {
   transition: opacity 0.15s ease;
 }
 
+/* One-line explanation under a settings row (e.g. why the tray master switch is
+   OFF while minimize-to-tray is still on). Dim and small — never interactive, and
+   never a substitute for a control. */
+.settings-hint {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-dim);
+  margin: 2px 0 6px 26px;
+}
+
 .timer-option--locked {
   /* A soft dim, not a disappearing act: the row still shows its value and stays
      clickable/typable, because that is how you arm it again. */

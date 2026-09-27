@@ -318,6 +318,7 @@
   "settings_always_run_admin_hint": "Writes the Windows compatibility flag for this executable. It cannot elevate the RUNNING process — the app starts elevated after the next launch.",
   "settings_tray_life": "Live in the Tray (close → tray + deep sleep)",
   "settings_tray_life_hint": "One switch for the whole tray lifestyle: closing or minimizing the window moves it to the tray, and deep sleep releases the interface there (~120 MB → ~5 MB) until you click the icon. Off = the X button quits. Deep sleep is skipped while clicking, while a macro plays or a recording runs, and unsaved macro drafts are lost.",
+  "settings_tray_life_mixed_hint": "Deep sleep is off for this profile: closing the window keeps ~120 MB in memory. Toggle this switch off and on once to enable it.",
   "admin_restart_required": "Restart required: administrator rights apply after the next launch",
   "settings_show_notifications": "Show Notifications",
   "settings_pause_focus_loss": "Auto-Pause on Focus Loss",

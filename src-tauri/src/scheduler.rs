@@ -1100,10 +1100,20 @@ impl ClickScheduler {
             // this runs once before the loop, never per click.
             if visual_ripple.load(Ordering::Relaxed) {
                 if let Some(ref app) = app_handle {
-                    let app_clone = app.clone();
-                    std::thread::spawn(move || {
-                        let _ = crate::overlay::ensure_overlay_window(&app_clone);
-                    });
+                    // NEVER spin up a WebView for an interface that is not on screen.
+                    // With the app in the tray (hidden, or released by deep sleep)
+                    // the ripple could not be shown anyway — the ready gate keeps it
+                    // hidden — and creating it here respawns the whole WebView2 tree
+                    // (~6 msedgewebview2.exe, ~120 MB) behind the user's back, which
+                    // is exactly what "the processes came back after I closed it"
+                    // looked like. One owner builds it: `show_secondary_windows`,
+                    // the moment the main window is back.
+                    if crate::main_window_visible(app) {
+                        let app_clone = app.clone();
+                        std::thread::spawn(move || {
+                            let _ = crate::overlay::ensure_overlay_window(&app_clone);
+                        });
+                    }
                 }
             }
 
