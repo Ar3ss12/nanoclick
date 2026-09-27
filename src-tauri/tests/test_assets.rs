@@ -3108,4 +3108,85 @@ fn test_config_snapshot_before_the_first_save() {
     }
 }
 
+/// A recording must reach the disk the moment recording stops.
+///
+/// The old flow asked for a name through the WebView2 host script dialog and wrote to disk
+/// only when the answer was non-empty: a suppressed dialog (or a plain cancel) dropped the
+/// whole recording with no file, no log and no toast — `macros.json` simply never changed.
+/// This pins the persist-first contract, the empty-recording guard and the localized report.
+#[test]
+fn test_recorded_macro_is_persisted_without_a_host_prompt() {
+    fn section<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
+        let from = src.find(start).unwrap_or_else(|| panic!("`{start}` not found"));
+        let rest = &src[from..];
+        let to = rest
+            .find(end)
+            .unwrap_or_else(|| panic!("`{end}` not found after `{start}`"));
+        &rest[..to]
+    }
+
+    let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
+    let key = tauri::utils::assets::AssetKey::from("main.js");
+    let bytes = ctx.assets().get(&key).expect("main.js not embedded");
+    let js = String::from_utf8_lossy(&bytes);
+
+    // 1. No host script dialog anywhere in executable code (full-line comments may discuss
+    //    it, which is why the scan skips them): it is host-dependent inside WebView2 and a
+    //    suppressed one is indistinguishable from a cancel.
+    for (n, line) in js.lines().enumerate() {
+        if line.trim_start().starts_with("//") {
+            continue;
+        }
+        assert!(
+            !line.contains("prompt("),
+            "main.js line {}: the host script dialog cannot be trusted with data that must be \
+             persisted — use the in-app UI instead",
+            n + 1
+        );
+    }
+
+    let finish = section(
+        &js,
+        "async function finishRecordedMacros",
+        "async function toggleRecordingFromHotkey",
+    );
+
+    // 2. The macro is written unconditionally; naming is a separate, non-destructive step.
+    let named = finish
+        .find("m.name = m.name && m.name.trim()")
+        .expect("the auto-generated name must be applied before saving");
+    let saved = finish
+        .find("await saveMacro(m)")
+        .expect("the recording must be written to disk unconditionally");
+    assert!(
+        named < saved,
+        "the name is applied first, then the macro is saved — never the other way round"
+    );
+
+    // 3. An accidental toggle (record hotkey pressed twice, nothing captured) is not a macro.
+    assert!(
+        finish.contains("actions === 0"),
+        "an empty recording must be detected and reported, not saved as an empty macro"
+    );
+
+    // 4. A saved recording must be observable: in the log and in the window.
+    assert!(
+        finish.contains("logCall(\"→MACRO\"") && finish.contains("showToast("),
+        "a saved recording must be announced in the log and in the UI"
+    );
+
+    // 5. The announcement is localized in all three dictionaries.
+    for locale in ["ua.json", "ru.json", "en.json"] {
+        let dict = match locale {
+            "ua.json" => include_str!("../../src/locales/ua.json"),
+            "ru.json" => include_str!("../../src/locales/ru.json"),
+            _ => include_str!("../../src/locales/en.json"),
+        };
+        assert!(
+            dict.contains("toast_macro_recorded"),
+            "{locale} must translate toast_macro_recorded"
+        );
+    }
+}
+
 

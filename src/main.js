@@ -2567,13 +2567,28 @@ async function finishRecordedMacros(macros, source = "recording") {
   const arr = Array.isArray(macros) ? macros : [];
   if (arr.length === 0) return 0;
   const m = arr[0];
-  const name = prompt("Name this macro:", m.name || "Untitled");
-  if (name && name.trim()) {
-    m.name = name.trim();
-    await saveMacro(m);
-    await renderMacroList();
-    logCall("→MACRO", `saved recorded macro from ${source}`, `${m.name} (${m.actions?.length || 0} actions)`);
+  const actions = Array.isArray(m.actions) ? m.actions.length : 0;
+  // An accidental toggle (the record hotkey pressed twice with nothing in between) is not
+  // a macro: there is nothing worth keeping and nothing to report.
+  if (actions === 0) {
+    logCall("→MACRO", `recorded macro from ${source} was empty`, "0 actions - nothing saved");
+    return arr.length;
   }
+  // Persist FIRST, name later. The old flow asked for a name through the HOST `prompt()`
+  // and wrote to disk only when the answer was non-empty: a suppressed script dialog (or a
+  // plain cancel) dropped the whole recording silently - no file, no log, no toast, and the
+  // macro the user believed they had never existed. A recording that was started and stopped
+  // must exist on disk the moment it ends; renaming is a separate, non-destructive step
+  // (click the macro name in My Macros).
+  m.name = m.name && m.name.trim() ? m.name.trim() : "Untitled macro";
+  await saveMacro(m);
+  await renderMacroList();
+  logCall("→MACRO", `saved recorded macro from ${source}`, `${m.name} (${actions} actions)`);
+  showToast(
+    getI18nText("toast_macro_recorded", { name: m.name, count: actions },
+      `Recording saved as "${m.name}" (${actions} actions) - click its name in My Macros to rename`),
+    "info"
+  );
   return arr.length;
 }
 
