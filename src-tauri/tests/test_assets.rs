@@ -3270,14 +3270,22 @@ fn test_preset_writes_are_verified_and_cannot_be_silent() {
     // 3. Rendering must not mutate the library: "no presets" has to be representable.
     let grid = section(&js, "function renderPresetsGrid", "\n  // Build the whole grid");
     assert!(
-        !grid.contains("ensurePresetsExist()"),
-        "renderPresetsGrid must not inject the factory presets — that made the empty state \
-         unreachable and turned a lost library into four normal-looking cards"
-    );
-    assert!(
         grid.contains("presetsEmptyState"),
         "the empty state must stay reachable"
     );
+    // Code lines only: the section explains in a comment what it used to call, and a naive
+    // substring search counts that mention as a real call.
+    for line in grid.lines() {
+        let code = line.trim_start();
+        if code.starts_with("//") {
+            continue;
+        }
+        assert!(
+            !code.contains("ensurePresetsExist("),
+            "renderPresetsGrid must not inject the factory presets — that made the empty state \
+             unreachable and turned a lost library into four normal-looking cards"
+        );
+    }
 
     // 4. A config load that failed is not allowed to look healthy.
     let load = section(&js, "async function loadConfig", "// ── Deadbolt Modal");
