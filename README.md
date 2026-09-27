@@ -44,7 +44,7 @@ Built with **Tauri 2 + Rust + vanilla JS**. No Electron, no bundler, no bloat: t
 - **Presets & Statistics** — save, import/export full engine presets and persist total click analytics across application updates
 
 ### 🌍 100% Tri-Lingual Internationalization (i18n)
-- **Comprehensive coverage** across 🇺🇦 Ukrainian, 🇷🇺 Russian, and 🇬🇧 English (372 symmetric keys).
+- **Comprehensive coverage** across 🇺🇦 Ukrainian, 🇷🇺 Russian, and 🇬🇧 English (493 symmetric keys).
 - **Zero-overhead memory footprint** — lazy loads only the chosen JSON locale on demand (~12 KB).
 - **Instant reactive updates** — all static UI and dynamic runtime strings adapt immediately without restart.
 - **One-Screen Welcome Matrix** — tri-lingual cyberpunk onboarding overlay with instant language switching and starter presets.
@@ -148,7 +148,7 @@ cargo test --release -j 1 -- --skip physical_
 ```
 
 The test suite covers:
-- **i18n Key Symmetry & DOM Validation** — 100% 3-way synchronization across UA, RU, and EN (394 keys × 3 locales, 15 of them notice keys)
+- **i18n Key Symmetry & DOM Validation** — 100% 3-way synchronization across UA, RU, and EN (493 keys × 3 locales, 15 of them notice keys)
 - **Windows UIPI & Elevation Integration** — token privilege checks and app manifests
 - **Stats Triple-Redundancy** — `config.json` + `stats.json` + `localStorage` fallback
 - **Stats Session Lifecycle** — exactly-once finalize (no double-flush twins), junk-run filter (`<5 clicks & <1s` skipped from chart), dirty-flag 5s flush (zero disk writes in idle), ring-capped history (50 entries, ~6 KB ceiling)
@@ -223,7 +223,7 @@ watchdog is the only detection that survives a module which cannot execute at al
 ```
 nanoclick/
 ├── src/                  # Frontend (no bundler):
-│   ├── locales/          #   i18n JSON dictionaries: ua.json, ru.json, en.json (394 keys)
+│   ├── locales/          #   i18n JSON dictionaries: ua.json, ru.json, en.json (493 keys)
 │   ├── boot_guard.js     #   CLASSIC-script crash trap + boot watchdog (must load first)
 │   ├── i18n.js           #   Zero-dependency lightweight lazy-loading i18n engine
 │   ├── stats.js          #   Modular analytics & live Canvas CPS chart engine
