@@ -72,7 +72,11 @@ pub fn overlay_ready(app: AppHandle) -> Result<(), String> {
         // Restore persisted preference: show only if the user enabled ripple.
         // Default ON (matches UiSettings::default visual_ripple=true) so a fresh
         // profile keeps current behaviour; cold boot with ripple disabled stays hidden.
-        if is_ripple_enabled(&app) {
+        // F6: and only while the main window is on screen — this signal arrives
+        // after the overlay's DOM rendered, which can be AFTER the app went to the
+        // tray, and a fullscreen always-on-top window over that tray is exactly
+        // the leak this gate closes.
+        if is_ripple_enabled(&app) && crate::main_window_visible(&app) {
             let _ = win.show();
         }
         crate::debug_log_internal("info", "[Overlay] ready signal received; overlay window visible and click-through");
@@ -124,6 +128,13 @@ pub fn ensure_overlay_window(app: &AppHandle) -> Result<tauri::WebviewWindow, St
 #[tauri::command]
 pub fn toggle_overlay(app: AppHandle, show: bool) -> Result<(), String> {
     if show {
+        // F6: the overlay is a satellite of the main window. While the app lives
+        // in the tray (main hidden, or destroyed by deep sleep) the preference is
+        // only stored; `restore_main_window` builds it when the main window is back.
+        if !crate::main_window_visible(&app) {
+            crate::debug_log_internal("info", "[Overlay] show deferred: main window is not visible");
+            return Ok(());
+        }
         let already_existed = app.get_webview_window("overlay").is_some();
         let win = ensure_overlay_window(&app)?;
         let _ = win.set_ignore_cursor_events(true);

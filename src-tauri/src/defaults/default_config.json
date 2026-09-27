@@ -63,6 +63,8 @@
     "show_notifications": true,
     "pause_on_focus_loss": false,
     "remember_window_position": true,
+    "remember_last_window_state": true,
+    "window_was_visible": true,
     "window_x": null,
     "window_y": null,
     "window_w": null,

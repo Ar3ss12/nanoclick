@@ -311,6 +311,8 @@
   "settings_accent_label": "Accent Color",
   "settings_group_behavior": "BEHAVIOR",
   "settings_start_minimized": "Start Minimized to Tray",
+  "settings_remember_state": "Reopen the Window as I Closed It",
+  "settings_remember_state_tip": "Overridden by “Start Minimized to Tray”",
   "settings_run_on_startup": "Run on Windows Startup",
   "settings_always_run_admin": "Always Run as Administrator (UAC / UIPI)",
   "settings_always_run_admin_hint": "Writes the Windows compatibility flag for this executable. It cannot elevate the RUNNING process — the app starts elevated after the next launch.",

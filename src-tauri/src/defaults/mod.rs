@@ -545,6 +545,8 @@ pub fn repair_and_patch_value(user_val: &Value) -> Result<(AppConfig, Vec<String
             "show_notifications",
             "pause_on_focus_loss",
             "remember_window_position",
+            "remember_last_window_state",
+            "window_was_visible",
             "always_run_as_admin",
         ];
         for k in bool_keys {

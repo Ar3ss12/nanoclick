@@ -208,6 +208,13 @@ fn save_app_config(config: AppConfig, state: State<'_, AppState>, app: AppHandle
         config.ui.window_w = None;
         config.ui.window_h = None;
     }
+    // The "was the window visible?" flag is stamped from the LIVE window for the
+    // same reason the geometry is: the page never observes a tray hide or a deep
+    // sleep, so whatever it sent is stale by definition. Live read, keep on failure.
+    config.ui.window_was_visible = app
+        .get_webview_window("main")
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(config.ui.window_was_visible);
     state.config_manager.save(&config)?;
     // Swallow OUR OWN echo so the observer never toasts our save.
     if let Some(w) = app.try_state::<crate::WatcherState>() {
@@ -540,8 +547,10 @@ pub(crate) fn restore_main_window(app: &AppHandle) {
         let _ = win.unminimize();
         let _ = win.show();
         let _ = win.set_focus();
-        // F2: the HUD/overlay were hidden together with the main window, so they
-        // come back with it (the restore path is the same one for both).
+        // The state the next start replays, and the satellites that follow the
+        // main window back (F6: they are created here if a staggered boot path
+        // skipped them because the app went to the tray first).
+        persist_window_visibility(app, true);
         show_secondary_windows(app);
         debug_log_internal("info", "[Tray] main window restored");
         return;
@@ -607,19 +616,10 @@ fn rebuild_main_window(app: &AppHandle) -> Result<(), String> {
             "info",
             "[Tray] main window rebuilt (hidden until frontend_ready)",
         );
-        // The overlay died with the rest. Restore it the same way the boot path
-        // does: staggered, off the restore path, only if the user wants ripples.
-        let ripples = app
-            .try_state::<AppState>()
-            .map(|s| s.config_manager.load().ui.visual_ripple)
-            .unwrap_or(false);
-        if ripples {
-            let h = app.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(1200));
-                let _ = overlay::ensure_overlay_window(&h);
-            });
-        }
+        // The overlay died with the rest and is NOT restored from here: the
+        // rebuild path owns no second copy of that decision. `frontend_ready`
+        // shows the window and then calls `show_secondary_windows`, which is the
+        // one place that knows whether ripples are wanted right now.
         Ok(())
     })();
     MAIN_REBUILDING.store(false, Ordering::Release);
@@ -699,14 +699,28 @@ pub(crate) fn toggle_hud_from_tray(app: &AppHandle) {
     if let Err(e) = state.config_manager.save(&cfg) {
         debug_log_internal("warn", &format!("[Tray] HUD setting not persisted: {e}"));
     }
-    let _ = toggle_hud_window(app.clone(), show);
+    let applied = main_window_visible(app);
+    if applied {
+        let _ = toggle_hud_window(app.clone(), show);
+    }
     // The BEHAVIOR checkbox on the page mirrors this WITHOUT saving: the tray
     // already persisted the value, and a page-side save would write its stale
     // checkbox back to disk and silently undo the menu choice.
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.emit("tray-hud-changed", show);
     }
-    report_tray_action(app, if show { "HUD shown" } else { "HUD hidden" });
+    // Never claim "HUD shown" for a window that was deliberately not created:
+    // the app is in the tray, so the HUD will appear together with the window.
+    report_tray_action(
+        app,
+        if !applied {
+            "HUD will appear with the window"
+        } else if show {
+            "HUD shown"
+        } else {
+            "HUD hidden"
+        },
+    );
     debug_log_internal("info", &format!("[Tray] HUD -> {show}"));
 }
 
@@ -849,6 +863,59 @@ pub(crate) fn restart_app_from_tray(app: &AppHandle) {
     app.restart();
 }
 
+// ── Window state across restarts, and the satellites' visibility rule ─────
+//
+// "Reopen the way I closed it" is a BACKEND feature, not a page one: the page is
+// gone exactly when the app lives in the tray, and gone again while the process
+// quits. The flag is therefore stamped from the live window — never from a
+// payload — on every hide/show transition and at the start of a shutdown.
+
+/// Effective "start hidden" decision for a boot.
+///
+/// An explicit `start_minimized` ("always start hidden") wins; otherwise
+/// "reopen the way I closed it" replays the last observed state.
+fn start_hidden_at_boot(ui: &config_manager::UiSettings) -> bool {
+    ui.start_minimized || (ui.remember_last_window_state && !ui.window_was_visible)
+}
+
+/// Is the main window on screen right now?
+///
+/// The single gate every secondary window (floating HUD, ripple overlay)
+/// consults before it shows itself: they are satellites of the main window and
+/// must never be left on the desktop without a visible owner. `false` on any
+/// doubt — an absent or unreadable window is not a visible one.
+pub(crate) fn main_window_visible(app: &AppHandle) -> bool {
+    app.get_webview_window("main")
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false)
+}
+
+/// Persist "the window was / was not visible", so the next start can replay it.
+///
+/// A no-op when nothing changed: a tray round trip must not rewrite the config
+/// file. It marks its own write, so the config observer never toasts our save.
+fn persist_window_visibility(app: &AppHandle, visible: bool) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let mut cfg = state.config_manager.load();
+    if cfg.ui.window_was_visible == visible {
+        return;
+    }
+    cfg.ui.window_was_visible = visible;
+    if let Err(e) = state.config_manager.save(&cfg) {
+        debug_log_internal("warn", &format!("[Tray] window state not persisted: {e}"));
+        return;
+    }
+    if let Some(w) = app.try_state::<crate::WatcherState>() {
+        w.0.mark_own_write("config");
+    }
+    debug_log_internal(
+        "info",
+        &format!("[Tray] remembered window state: visible={visible}"),
+    );
+}
+
 /// Hide the secondary windows together with the main one.
 ///
 /// F2: the HUD and the ripple overlay are separate top-level windows, so hiding
@@ -863,20 +930,40 @@ fn hide_secondary_windows(app: &AppHandle) {
     }
 }
 
-/// Bring the HUD / overlay back with the main window — only the ones the config
-/// still wants (mirror of `hide_secondary_windows`).
+/// Bring the HUD / overlay back with the main window.
+///
+/// Mirror of `hide_secondary_windows`, plus the one thing a restore cannot
+/// assume: the window may not exist at all (deep-sleep rebuild, or a staggered
+/// boot path that skipped its work because the app went to the tray first). Only
+/// the windows the config still wants are created/shown, and only while the main
+/// window is actually on screen — the caller shows it first, then calls this.
 fn show_secondary_windows(app: &AppHandle) {
+    // Only EXISTENCE is checked here, not visibility: this is called by the paths
+    // that just showed the main window (`restore_main_window`, `frontend_ready`),
+    // and `show()` dispatches to the main thread — an `is_visible()` read from a
+    // foreign thread can still see `false` a moment later. A satellite created
+    // here stays hidden until its own ready signal, which DOES require a visible
+    // main window (`hud_ready` / `overlay_ready`).
+    if app.get_webview_window("main").is_none() {
+        return;
+    }
     let Some(state) = app.try_state::<AppState>() else {
         return;
     };
     let cfg = state.config_manager.load();
-    if cfg.ui.show_hud {
-        if let Some(win) = app.get_webview_window("hud") {
+    if cfg.ui.visual_ripple {
+        if app.get_webview_window("overlay").is_none() {
+            // Created hidden; `overlay_ready` shows it once the transparent DOM
+            // has rendered (Zero-Flash, same rule as the boot path).
+            let _ = overlay::ensure_overlay_window(app);
+        } else if let Some(win) = app.get_webview_window("overlay") {
             let _ = win.show();
         }
     }
-    if cfg.ui.visual_ripple {
-        if let Some(win) = app.get_webview_window("overlay") {
+    if cfg.ui.show_hud {
+        if app.get_webview_window("hud").is_none() {
+            let _ = toggle_hud_window(app.clone(), true);
+        } else if let Some(win) = app.get_webview_window("hud") {
             let _ = win.show();
         }
     }
@@ -952,6 +1039,11 @@ fn frontend_ready(app: AppHandle) {
         if let Some(win) = app.get_webview_window("main") {
             let _ = win.show();
             let _ = win.set_focus();
+            // The window is on screen now, so the satellites may follow it back —
+            // created here if the staggered boot path skipped its work (the app
+            // went to the tray before it woke up). One owner for that decision.
+            persist_window_visibility(&app, true);
+            show_secondary_windows(&app);
             debug_log_internal("info", "[Tray] rebuilt window shown after frontend_ready");
         }
     }
@@ -986,6 +1078,10 @@ fn spawn_frontend_watchdog(app: AppHandle) {
                         if let Some(win) = app.get_webview_window("main") {
                             let _ = win.show();
                             let _ = win.set_focus();
+                            // Shown anyway, so this is the state the next start
+                            // replays. No satellites: the page is broken, and a
+                            // floating counter over a broken app is noise.
+                            persist_window_visibility(&app, true);
                         }
                     }
                     debug_log_internal(
@@ -1093,6 +1189,8 @@ pub(crate) fn suspend_main_webview_to_tray(app: &AppHandle) {
     if app.get_webview_window("main").is_none() {
         return;
     }
+    // The app is going to the tray: that is the state the next start replays.
+    persist_window_visibility(app, false);
     TRAY_SUSPEND_ARMED.store(true, Ordering::Release);
     TRAY_FLUSH_ACK.store(false, Ordering::Release);
     if let Some(win) = app.get_webview_window("main") {
@@ -1127,45 +1225,54 @@ pub(crate) fn suspend_main_webview_to_tray(app: &AppHandle) {
 }
 
 pub(crate) fn shutdown_application(app: &AppHandle) {
+    // Idempotent. Destroying the main window fires its `beforeunload`, and the
+    // page's fallback calls `exit_app` — which lands right back here. The first
+    // caller wins; a re-entry must not destroy/exit twice or spawn a second exit
+    // watchdog. `ExitRequested` reads the same latch, so it is already satisfied.
+    if SHUTTING_DOWN.swap(true, Ordering::AcqRel) {
+        debug_log_internal("info", "[Shutdown] already in progress; ignoring re-entry");
+        return;
+    }
     debug_log_internal("info", "[Shutdown] Initiating clean application shutdown");
 
-    // Latch first: `app.exit(0)` below raises ExitRequested, and an unlatched
-    // prevent_exit() would make this shutdown a no-op.
-    SHUTTING_DOWN.store(true, Ordering::Release);
+    // 0. Remember the state we are leaving in — before a single window goes away,
+    //    so "reopen the way I closed it" has something true to replay.
+    let was_visible = main_window_visible(app);
+    persist_window_visibility(app, was_visible);
 
-    // 0. Drop the tray icon before the windows go away, so Windows never has to
+    // 1. Drop the tray icon before the windows go away, so Windows never has to
     //    reap a ghost icon and the pump thread is joined while state is alive.
     stop_tray();
 
-    // 1. Hide main window immediately so UI feels instantaneous
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.hide();
-    }
-
-    // 2. Destroy secondary windows so their WebView2 processes terminate
-    if let Some(overlay) = app.get_webview_window("overlay") {
-        let _ = overlay.destroy();
-    }
-    if let Some(hud) = app.get_webview_window("hud") {
-        let _ = hud.destroy();
-    }
-
-    // 3. Stop scheduler clicking loop
+    // 2. STOP THE BACKEND FIRST — strictly before any window is destroyed. This is
+    //    the reverse of the startup order on purpose: the native LL hooks and the
+    //    clicker must no longer generate or catch events when the WebView that
+    //    receives their status emissions starts tearing down its message loop and
+    //    COM objects. A hook firing `emit` into a half-destroyed window is how a
+    //    process ends up as a zombie that never releases its resources.
     if let Some(state) = app.try_state::<AppState>() {
         state.scheduler.set_active(false, None);
     }
-
-    // 4. Stop native input hooks, recorder, and macro executor
     platform::default_input_backend_hotkey_stop();
     platform::stop_recorder_hooks();
     if let Some(exec) = crate::core::global() {
         exec.stop();
     }
 
-    // 5. Request Tauri runtime exit
+    // 3. Only now destroy the windows: satellites first, `main` LAST (it is the
+    //    one the hooks and the page talk to). `hide()` is not enough here — it
+    //    leaves the WebView2 helpers alive until the process image disappears
+    //    (measured: hiding frees nothing, 122.8 MB stays resident).
+    for label in ["overlay", "hud", "main"] {
+        if let Some(win) = app.get_webview_window(label) {
+            let _ = win.destroy();
+        }
+    }
+
+    // 4. Request Tauri runtime exit
     app.exit(0);
 
-    // 6. Watchdog: give 300ms for clean background file I/O flush, then trim working set
+    // 5. Watchdog: give 300ms for clean background file I/O flush, then trim working set
     // memory and guarantee complete process termination so no zombie background processes remain.
     std::thread::spawn(|| {
         std::thread::sleep(std::time::Duration::from_millis(300));
@@ -1181,6 +1288,15 @@ pub(crate) fn shutdown_application(app: &AppHandle) {
 #[tauri::command]
 fn toggle_hud_window(app: AppHandle, show: bool) -> Result<(), String> {
     if show {
+        // F6: the HUD is a satellite of the main window, never a standalone one.
+        // While the app lives in the tray (main hidden, or destroyed by deep
+        // sleep) the preference is only stored — the window is built when the
+        // main window comes back (`restore_main_window`). Creating it here left an
+        // always-on-top counter floating over the desktop with no owner.
+        if !main_window_visible(&app) {
+            debug_log_internal("info", "[HUD] show deferred: main window is not visible");
+            return Ok(());
+        }
         let already_existed = app.get_webview_window("hud").is_some();
         ensure_hud_window(&app)?;
         if let Some(win) = app.get_webview_window("hud") {
@@ -1236,7 +1352,11 @@ fn hud_ready(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let cfg = state.config_manager.load();
     if let Some(win) = app.get_webview_window("hud") {
         let _ = win.set_ignore_cursor_events(true);
-        if cfg.ui.show_hud {
+        // F6: only with the main window on screen. This signal arrives after the
+        // HUD's DOM rendered, which can be AFTER the app went to the tray — a
+        // `show()` here used to put the floating counter back on the desktop
+        // while its owner claimed to be asleep.
+        if cfg.ui.show_hud && main_window_visible(&app) {
             let _ = win.show();
             debug_log_internal("info", "[HUD] hud_ready: restored HUD visibility from config");
         }
@@ -1452,31 +1572,41 @@ pub fn run() {
                     // apps that were active when we launched (especially
                     // single-instance scenarios where we are the second proc).
                     let _ = win.unminimize();
-                    if initial_app_cfg.ui.start_minimized {
-                        // "Start minimized to tray": the window exists (the
-                        // backend needs it for HUD/position prefs) but stays
-                        // hidden until the tray icon is clicked. `visible: false`
-                        // in tauri.conf.json means nothing was painted before
-                        // this point, so there is no flash.
+                    let start_hidden = start_hidden_at_boot(&initial_app_cfg.ui);
+                    if start_hidden {
+                        // Either an explicit "always start hidden", or "reopen the
+                        // way I closed it" replaying an exit from the tray. The
+                        // window exists (the backend needs it for HUD/position
+                        // prefs) but stays hidden until the tray icon is clicked;
+                        // `visible: false` in tauri.conf.json means nothing was
+                        // painted before this point, so there is no flash.
                         let _ = win.hide();
                         debug_log_internal(
                             "info",
-                            "[Startup] start_minimized: window stays in the tray",
+                            "[Startup] starting in the tray (start_minimized / last state)",
                         );
                     } else {
                         let _ = win.show();
                         let _ = win.set_focus();
                     }
+                    // Store what we actually did: a start already hidden is a state
+                    // the next "reopen the way I closed it" must be able to replay.
+                    persist_window_visibility(&handle, !start_hidden);
                 } else {
                     debug_log_internal("error", "[Startup] main window MISSING from registry");
                 }
             }
 
             // ── System tray (native Win32; no tray-icon/muda crate) ────────
-            // Only when the feature is reachable: with both "close to tray" and
-            // "start minimized" off, the app never hides, so an icon would be
-            // dead weight (one more window handle + one more thread).
-            if initial_app_cfg.ui.minimize_to_tray || initial_app_cfg.ui.start_minimized {
+            // Only when the feature is reachable: with "close to tray" off, "start
+            // minimized" off and no remembered tray state, the app never hides, so
+            // an icon would be dead weight (one more window handle + one more
+            // thread). "Reopen the way I closed it" counts: this start may be a
+            // hidden one, and then the icon is the only way back in.
+            if initial_app_cfg.ui.minimize_to_tray
+                || initial_app_cfg.ui.start_minimized
+                || initial_app_cfg.ui.remember_last_window_state
+            {
                 start_tray_if_needed(&handle);
             }
 
@@ -1485,10 +1615,11 @@ pub fn run() {
             // is still hidden gets shown so the in-page boot banner is visible.
             spawn_frontend_watchdog(handle.clone());
 
-            // "Start minimized" + deep sleep is the whole point of autostart: be
+            // "Start hidden" + deep sleep is the whole point of autostart: be
             // weightless. Wait for the page to report ready (its flush hook must
-            // exist before the WebView can be torn down), then let it go.
-            if initial_app_cfg.ui.start_minimized && initial_app_cfg.ui.deep_sleep_to_tray {
+            // exist before the WebView can be torn down), then let it go. This
+            // covers an explicit "always in the tray" and a replayed tray exit.
+            if start_hidden_at_boot(&initial_app_cfg.ui) && initial_app_cfg.ui.deep_sleep_to_tray {
                 let h = handle.clone();
                 std::thread::spawn(move || {
                     for _ in 0..60 {
@@ -1558,7 +1689,20 @@ pub fn run() {
                     // WebViews at the exact same instant doubles the startup
                     // memory spike we are trying to avoid.
                     std::thread::sleep(std::time::Duration::from_millis(2500));
-                    let _ = overlay::ensure_overlay_window(&h);
+                    // Re-check both inputs after the sleep. The setting may have
+                    // been turned off meanwhile (creating the overlay anyway would
+                    // leak a hidden fullscreen WebView), and the app may already
+                    // live in the tray: its main window hidden or destroyed, which
+                    // is exactly when a satellite must not appear.
+                    // `restore_main_window` creates it instead, the moment the main
+                    // window is back on screen.
+                    let wanted = h
+                        .try_state::<AppState>()
+                        .map(|s| s.config_manager.load().ui.visual_ripple)
+                        .unwrap_or(false);
+                    if wanted && main_window_visible(&h) {
+                        let _ = overlay::ensure_overlay_window(&h);
+                    }
                 });
             }
             // ── Observer watcher thread (eyes only, hands off) ──────────
@@ -1671,6 +1815,10 @@ pub fn run() {
                 if label == "main" {
                     if should_minimize_to_tray(&app_handle) {
                         api.prevent_close();
+                        // The state the next start replays — written now, not only
+                        // on a clean exit: a Task Manager kill or a power loss must
+                        // not resurrect a window the user had put in the tray.
+                        persist_window_visibility(&app_handle, false);
                         // Two ways to live in the tray: plain hide (instant and,
                         // measured, free — private working set stays ~120 MB) or
                         // deep sleep (destroys the WebView, rebuilds it on the
@@ -1709,6 +1857,7 @@ pub fn run() {
                         .unwrap_or(false)
                     && should_minimize_to_tray(&app_handle)
                 {
+                    persist_window_visibility(&app_handle, false);
                     if deep_sleep_allowed_now(&app_handle) {
                         start_tray_if_needed(&app_handle);
                         suspend_main_webview_to_tray(&app_handle);

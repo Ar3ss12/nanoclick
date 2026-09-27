@@ -311,6 +311,8 @@
   "settings_accent_label": "Колір акценту",
   "settings_group_behavior": "ПОВЕДІНКА",
   "settings_start_minimized": "Запускати згорнутим у трей",
+  "settings_remember_state": "Відкривати вікно так, як я закрив",
+  "settings_remember_state_tip": "Перекривається опцією «Запускати згорнутим у трей»",
   "settings_run_on_startup": "Автозапуск при старті Windows",
   "settings_always_run_admin": "Завжди запускати як Адміністратор (UAC / UIPI)",
   "settings_always_run_admin_hint": "Пише прапорець сумісності Windows для цього exe. Він не може підняти права ВЖЕ ЗАПУЩЕНОГО процесу — застосунок стартує з правами адміністратора після наступного запуску.",

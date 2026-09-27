@@ -269,6 +269,18 @@ pub struct UiSettings {
     pub window_w: Option<i32>,
     #[serde(default)]
     pub window_h: Option<i32>,
+    /// Reopen the window the way the app was closed (BEHAVIOR card, default ON).
+    /// With this on, a restart replays the last state: the window comes back if it
+    /// was open at exit, and the app starts in the tray if that is where it was
+    /// living. An explicit `start_minimized` wins over it.
+    #[serde(default = "default_true")]
+    pub remember_last_window_state: bool,
+    /// Was the main window visible when the app last went away? Owned by the
+    /// BACKEND: stamped from the live window on every hide/show transition and at
+    /// the start of a shutdown. A page never observes a tray hide, so its copy of
+    /// this field is always stale — it must not be able to write it back.
+    #[serde(default = "default_true")]
+    pub window_was_visible: bool,
     /// Typing Guard: while the user is typing, a toggle hotkey pressed within
     /// this window is ignored — a single-key hotkey sitting inside a word
     /// ("go rush B" → the `r`) must not switch the clicker on. Gameplay keys
@@ -325,6 +337,8 @@ impl Default for UiSettings {
             window_y: None,
             window_w: None,
             window_h: None,
+            remember_last_window_state: true,
+            window_was_visible: true,
             typing_pause_ms: 600,
             app_filter_mode: default_app_filter_mode(),
             app_filter_list: Vec::new(),

@@ -559,6 +559,10 @@ const openConfigFolderBtn = document.getElementById("openConfigFolderBtn");
 const dumpInputDiagBtn = document.getElementById("dumpInputDiagBtn");
 
 const startMinimizedCheckbox  = document.getElementById("startMinimizedCheckbox");
+// "Reopen the way I closed it": the backend remembers whether the window was
+// visible at exit and starts accordingly. An explicit Start Minimized wins over
+// it, so this row is painted as overridden while that one is on.
+const rememberStateCheckbox   = document.getElementById("rememberStateCheckbox");
 const autostartCheckbox       = document.getElementById("autostartCheckbox");
 // ONE master switch for "live in the tray": it drives BOTH `minimize_to_tray`
 // and `deep_sleep_to_tray`. Merged because deep sleep on its own was inert —
@@ -1403,6 +1407,8 @@ function updateUiFromConfig(config) {
     applyAlwaysOnTop(config.ui?.always_on_top);
   }
   if (startMinimizedCheckbox) startMinimizedCheckbox.checked = !!config.ui.start_minimized;
+  if (rememberStateCheckbox) rememberStateCheckbox.checked = config.ui.remember_last_window_state !== false;
+  paintRememberStateLock();
   if (autostartCheckbox) autostartCheckbox.checked = !!config.ui.autostart;
   // The master mirrors the PRIMARY flag (close → tray); deep sleep is written
   // with it on the next explicit change, so a config that still says
@@ -1985,6 +1991,9 @@ async function saveConfig() {
       if (!currentConfig.ui) currentConfig.ui = {};
       if (alwaysOnTopCheckbox) currentConfig.ui.always_on_top = alwaysOnTopCheckbox.checked;
       if (startMinimizedCheckbox) currentConfig.ui.start_minimized = startMinimizedCheckbox.checked;
+      if (rememberStateCheckbox) currentConfig.ui.remember_last_window_state = rememberStateCheckbox.checked;
+      // `window_was_visible` is NOT collected: the backend stamps it from the live
+      // window on save, because the page never observes a hide to the tray.
       if (autostartCheckbox) currentConfig.ui.autostart = autostartCheckbox.checked;
       if (trayLifeCheckbox) {
         currentConfig.ui.minimize_to_tray = trayLifeCheckbox.checked;
@@ -2698,7 +2707,25 @@ if (alwaysOnTopCheckbox) {
     saveConfig();
   });
 }
-if (startMinimizedCheckbox) startMinimizedCheckbox.addEventListener("change", saveConfig);
+// The two startup switches are a pair: an explicit "always start hidden" wins over
+// "reopen the way I closed it". The overridden row is painted — dimmed with a
+// localized hint — never `disabled` and never `pointer-events: none`, so it keeps
+// its value and clicking it still works (AGENTS.md §2.13, same rule as the
+// auto-stop pair). Enforcement lives in the backend: `start_hidden_at_boot()`.
+function paintRememberStateLock() {
+  const row = document.getElementById("rememberStateRow");
+  if (!row) return;
+  const locked = !!startMinimizedCheckbox?.checked;
+  row.classList.toggle("timer-option--locked", locked);
+  if (locked) row.title = getI18nText("settings_remember_state_tip", {}, "Overridden by Start Minimized to Tray");
+  else row.removeAttribute("title");
+}
+
+if (startMinimizedCheckbox) startMinimizedCheckbox.addEventListener("change", () => {
+  paintRememberStateLock();
+  saveConfig();
+});
+if (rememberStateCheckbox) rememberStateCheckbox.addEventListener("change", saveConfig);
 if (trayLifeCheckbox) trayLifeCheckbox.addEventListener("change", () => {
   // Touching the master is the explicit "set both flags together" intent.
   trayLifeInitial = null;

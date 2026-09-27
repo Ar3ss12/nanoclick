@@ -2569,4 +2569,238 @@ fn test_embedded_asset_blobs_are_not_truncated() {
     );
 }
 
+/// The window state across restarts — and the rule that keeps every satellite with
+/// its owner.
+///
+/// Two defects this pins:
+/// 1. Nothing remembered whether the main window was visible at exit, so a restart
+///    could only replay a hardcoded setting — `start_minimized` means "always
+///    hidden", never "the way I left it".
+/// 2. The HUD / ripple overlay could be SHOWN while the main window was hidden or
+///    destroyed by deep sleep: `hud_ready`, `toggle_hud_window`, `overlay_ready`
+///    and `toggle_overlay` all showed a window without asking whether its owner was
+///    on screen.
+#[test]
+fn test_remember_window_state_wiring() {
+    fn section<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
+        let from = src.find(start).unwrap_or_else(|| panic!("`{start}` not found"));
+        match src[from..].find(end) {
+            Some(i) => &src[from..from + i],
+            None => &src[from..],
+        }
+    }
+
+    let cm_src = include_str!("../src/config_manager.rs");
+    for field in ["remember_last_window_state", "window_was_visible"] {
+        assert!(cm_src.contains(field), "UiSettings must carry `{field}`");
+    }
+
+    let defaults_src = include_str!("../src/defaults/mod.rs");
+    for key in ["\"remember_last_window_state\"", "\"window_was_visible\""] {
+        assert!(
+            defaults_src.contains(key),
+            "the repair/merge keep-list must carry {key}, or an update resets it"
+        );
+    }
+    let factory = include_str!("../src/defaults/default_config.json");
+    for key in ["remember_last_window_state", "window_was_visible"] {
+        assert!(factory.contains(key), "the factory default must contain `{key}`");
+    }
+
+    let lib_src = include_str!("../src/lib.rs");
+    assert!(
+        lib_src.contains("fn start_hidden_at_boot"),
+        "the boot decision must be one pure function the gate can read"
+    );
+    assert!(
+        lib_src.contains("fn persist_window_visibility"),
+        "exactly one backend owner writes the remembered state"
+    );
+    // Explicit "always start hidden" wins over the replay.
+    let boot = section(lib_src, "fn start_hidden_at_boot", "fn main_window_visible");
+    assert!(
+        boot.contains("ui.start_minimized ||"),
+        "`start_minimized` must take precedence over the remembered state"
+    );
+    assert!(
+        boot.contains("remember_last_window_state") && boot.contains("window_was_visible"),
+        "the replay must read both flags"
+    );
+
+    // The page must not be able to move it: it never observes a hide to the tray.
+    let save = section(lib_src, "fn save_app_config", "fn toggle_mode");
+    assert!(
+        save.contains("window_was_visible"),
+        "save_app_config must stamp the LIVE visibility instead of trusting the payload"
+    );
+    // Written on the tray transitions too, not only on a clean exit: a Task Manager
+    // kill must not resurrect a window the user had put in the tray.
+    assert!(
+        lib_src
+            .matches("persist_window_visibility(&app_handle, false)")
+            .count()
+            >= 2,
+        "the close path and the minimize path must both persist the tray state"
+    );
+    // A preset must never change how the app starts (tech.md §Presets).
+    let sched_src = include_str!("../src/scheduler.rs");
+    assert!(
+        !sched_src.contains("window_was_visible")
+            && !sched_src.contains("remember_last_window_state"),
+        "applying a preset must not flip the startup behaviour"
+    );
+
+    let html = include_str!("../../src/index.html");
+    assert!(
+        html.contains("rememberStateCheckbox") && html.contains("settings_remember_state"),
+        "the BEHAVIOR card must expose the switch with an i18n label"
+    );
+    let main_js = {
+        let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
+        let key = tauri::utils::assets::AssetKey::from("main.js");
+        let bytes = ctx.assets().get(&key).expect("main.js must be embedded");
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    assert!(
+        main_js.contains("rememberStateCheckbox") && main_js.contains("remember_last_window_state"),
+        "main.js must hydrate, collect and save the switch"
+    );
+    assert!(
+        !main_js.contains("window_was_visible ="),
+        "the page must never write the backend-owned visibility flag"
+    );
+    // The overridden row is painted, never disabled (AGENTS.md §2.13).
+    let painter = section(main_js, "function paintRememberStateLock", "if (startMinimizedCheckbox)");
+    assert!(
+        painter.contains("timer-option--locked")
+            && !painter.contains("disabled")
+            && !painter.contains("pointerEvents"),
+        "the overridden row is dimmed, not dead-ended"
+    );
+    for locale in ["ua.json", "ru.json", "en.json"] {
+        let dict = match locale {
+            "ua.json" => include_str!("../../src/locales/ua.json"),
+            "ru.json" => include_str!("../../src/locales/ru.json"),
+            _ => include_str!("../../src/locales/en.json"),
+        };
+        for key in ["settings_remember_state", "settings_remember_state_tip"] {
+            assert!(dict.contains(key), "{locale} must translate {key}");
+        }
+    }
+}
+
+/// A satellite window must never outlive its owner on the desktop.
+///
+/// The bug class: the app hides to the tray (or destroys the WebView in deep
+/// sleep) while a staggered thread is still asleep, and wakes up to CREATE a
+/// window — or a page's ready signal arrives late and SHOWS one. Both used to
+/// happen without ever asking whether the main window was on screen.
+#[test]
+fn test_secondary_windows_never_outlive_the_main_window() {
+    fn section<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
+        let from = src.find(start).unwrap_or_else(|| panic!("`{start}` not found"));
+        match src[from..].find(end) {
+            Some(i) => &src[from..from + i],
+            None => &src[from..],
+        }
+    }
+
+    let lib_src = include_str!("../src/lib.rs");
+    let overlay_src = include_str!("../src/overlay.rs");
+    assert!(
+        lib_src.contains("pub(crate) fn main_window_visible"),
+        "one shared gate must exist for every secondary-window show path"
+    );
+
+    let hud_ready = section(lib_src, "fn hud_ready", "struct UpdateInfo");
+    assert!(
+        hud_ready.contains("main_window_visible"),
+        "hud_ready must not show the HUD while the main window is away"
+    );
+    let toggle_hud = section(lib_src, "fn toggle_hud_window", "fn ensure_hud_window");
+    assert!(
+        toggle_hud.contains("main_window_visible"),
+        "toggle_hud_window must not create a standalone HUD"
+    );
+    let show_secondary = section(lib_src, "fn show_secondary_windows", "fn should_minimize_to_tray");
+    assert!(
+        show_secondary.contains("get_webview_window(\"main\").is_none()"),
+        "the restore path must refuse to build satellites without a main window"
+    );
+    assert!(
+        overlay_src.contains("crate::main_window_visible"),
+        "overlay_ready / toggle_overlay must consult the same gate"
+    );
+
+    // The staggered boot thread must re-read BOTH inputs after its sleep: the
+    // setting may be off by then, and the app may already live in the tray.
+    let boot_thread = section(
+        lib_src,
+        "// Re-check both inputs after the sleep",
+        "// ── Observer watcher",
+    );
+    assert!(
+        boot_thread.contains("visual_ripple") && boot_thread.contains("main_window_visible(&h)"),
+        "a sleepy thread must re-check the setting and the main window before creating a window"
+    );
+    // And the rebuild path owns no second copy of that decision.
+    let rebuild = section(
+        lib_src,
+        "fn rebuild_main_window",
+        "pub(crate) fn toggle_clicking_from_tray",
+    );
+    assert!(
+        !rebuild.contains("ensure_overlay_window"),
+        "the rebuild must leave satellite restoration to `show_secondary_windows` (one owner)"
+    );
+}
+
+/// Quit must leave nothing behind: no re-entrant shutdown, no window that was only
+/// hidden, and the backend stopped BEFORE the windows start tearing down.
+#[test]
+fn test_shutdown_is_idempotent_and_stops_the_backend_before_the_windows() {
+    fn section<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
+        let from = src.find(start).unwrap_or_else(|| panic!("`{start}` not found"));
+        match src[from..].find(end) {
+            Some(i) => &src[from..from + i],
+            None => &src[from..],
+        }
+    }
+
+    let lib_src = include_str!("../src/lib.rs");
+    let shut = section(lib_src, "fn shutdown_application", "fn toggle_hud_window");
+
+    assert!(
+        shut.contains("SHUTTING_DOWN.swap(true"),
+        "shutdown must be re-entry safe: destroying `main` fires beforeunload, whose \
+         fallback calls exit_app and lands back here"
+    );
+
+    // Reverse of the startup order: hooks first, then windows. A native LL hook
+    // emitting into a WebView that is already destroying its message loop is how a
+    // process ends up as a zombie that never releases its resources.
+    let hooks = shut
+        .find("default_input_backend_hotkey_stop")
+        .expect("the shutdown must stop the native hooks");
+    let destroy = shut.find(".destroy()").expect("windows must be destroyed");
+    assert!(
+        hooks < destroy,
+        "the backend must stop before any window is destroyed"
+    );
+
+    // Every window we own, satellites first, `main` last.
+    let overlay_at = shut.find("\"overlay\"").expect("overlay must be destroyed");
+    let hud_at = shut.find("\"hud\"").expect("hud must be destroyed");
+    let main_at = shut.find("\"main\"").expect("main must be destroyed");
+    assert!(
+        overlay_at < hud_at && hud_at < main_at,
+        "destroy the satellites first and `main` last"
+    );
+    assert!(
+        !shut.contains("let _ = win.hide()"),
+        "hide() leaves the main window (and six WebView2 helpers) alive until the \
+         process image disappears — measured: hiding frees nothing"
+    );
+}
+
 
