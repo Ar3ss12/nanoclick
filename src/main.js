@@ -1737,6 +1737,26 @@ async function loadConfig() {
     try { applyStatusUpdate(await invoke("get_status")); } catch { /* best-effort: never block boot */ }
   } catch (err) {
     console.error("Failed to load app config:", err);
+    // A page that never hydrated is NOT healthy, it only looks like it: `currentConfig` is
+    // still the module default, so the engine shows factory values, the onboarding wizard
+    // appears and the preset library shows the four factory cards. `configHydrated` stays
+    // false, so `saveConfig()` refuses to write — a silent dead end for the user. Say both
+    // facts out loud here. The swallow used to be a `console.error` only, and release builds
+    // never record it: `enqueueLog` is gated by DEBUG_UI, and this call happens before
+    // DEBUG_UI is enabled — measured: `get_app_config` occurs 0 times in 30 842 log lines.
+    sendClientError(
+      "error",
+      `[Config] get_app_config FAILED — the page runs on factory defaults and will refuse to save: ${err?.message ?? err}`,
+    );
+    try {
+      showDeadboltQueue([
+        {
+          level: "critical",
+          title: "notice_cfg_load_failed_title",
+          message: "notice_cfg_load_failed_msg",
+        },
+      ]);
+    } catch (_) { /* a boot notice must never break boot */ }
   }
 }
 
@@ -1861,11 +1881,18 @@ function showToast(message, level) {
   try {
     const host = ensureToastHost();
     if (!host) return;
+    const lvl = String(level || "info").toLowerCase();
     const el = document.createElement("div");
-    el.className = "toast toast-" + String(level || "info").toLowerCase();
+    el.className = "toast toast-" + lvl;
     el.textContent = String(message == null ? "" : message);
+    // Severity has to be SEEN, not merely named. The stylesheet has no `.toast-*` rule at all
+    // (the inline cssText below is the whole look), so an error toast used to be pixel-identical
+    // to an informational one — which is how a failed save stayed invisible.
+    const border = lvl === "error" ? "rgba(239,68,68,0.70)"
+                 : lvl === "warn"  ? "rgba(245,158,11,0.65)"
+                 : "rgba(255,255,255,.12)";
     el.style.cssText = "pointer-events:auto;margin-top:8px;padding:10px 14px;border-radius:8px;" +
-      "background:rgba(20,24,32,.95);border:1px solid rgba(255,255,255,.12);" +
+      "background:rgba(20,24,32,.95);border:1px solid " + border + ";" +
       "font-size:13px;line-height:1.4;max-width:340px;box-shadow:0 8px 24px rgba(0,0,0,.45)";
     host.appendChild(el);
     setTimeout(() => { if (el.parentNode) el.parentNode.removeChild(el); }, 6000);
@@ -1955,7 +1982,7 @@ async function saveConfig() {
         "warn",
       );
     } catch (_) { /* a toast must never break the save path */ }
-    return;
+    return false;
   }
   const op = stage("SaveConfig");
   try {
@@ -2056,9 +2083,27 @@ async function saveConfig() {
 
     await op.run("write-to-disk", () => invoke("save_app_config", { config: currentConfig }));
     op.ok();
+    return true;
   } catch (err) {
     op.fail("save-config", err);
     console.error("[SaveConfig] aborted:", err);
+    // A failed write must be VISIBLE. `console.error` reaches only the WebView console, and
+    // `enqueueLog` is gated by DEBUG_UI (off in release builds) — so until now a failed save
+    // was indistinguishable from a successful one: the caller had already painted the result
+    // from the in-memory copy, and the lie only surfaced at the next start. Report through
+    // the log the app actually writes AND through a toast, and answer the caller honestly.
+    sendClientError("error", `[SaveConfig] FAILED: ${err?.message ?? err}`);
+    try {
+      showToast(
+        getI18nText(
+          "save_failed",
+          {},
+          "Settings were NOT saved — the write failed. See %TEMP%\\nanoclick_web.log for the reason.",
+        ),
+        "error",
+      );
+    } catch (_) { /* a toast must never break the caller */ }
+    return false;
   }
 }
 
@@ -3180,10 +3225,17 @@ function renderPresetsGrid() {
   const container = document.getElementById("presetGridContainer");
   if (!container) return;
 
-  ensurePresetsExist();
   const emptyState = document.getElementById("presetsEmptyState");
 
-  if (currentConfig.presets.length === 0) {
+  // Read-only view: this used to call `ensurePresetsExist()`, which INJECTED the four factory
+  // presets into the config the moment the array looked empty. Two consequences, both real:
+  // the empty state below was unreachable (a lost library always rendered as four normal
+  // cards, indistinguishable from a healthy one), and the injected array was then written on
+  // the next save — "no presets" was not a state the app could keep. Rendering must not
+  // mutate state; the injection belongs to the boot path, not to a repaint.
+  const all = Array.isArray(currentConfig.presets) ? currentConfig.presets : [];
+
+  if (all.length === 0) {
     container.innerHTML = "";
     if (emptyState) emptyState.classList.remove("hidden");
     return;
@@ -3194,7 +3246,7 @@ function renderPresetsGrid() {
   // is only a VIEW of it, so a filtered-out row is never "gone".
   const query = (presetEl("presetSearchInput")?.value || "").trim().toLowerCase();
   const categoryFilter = presetEl("presetCategoryFilter")?.value || "all";
-  const visible = currentConfig.presets
+  const visible = all
     .map(withPresetDefaults)
     .filter(p => categoryFilter === "all" || p.category === categoryFilter)
     .filter(p => !query
@@ -4036,7 +4088,7 @@ function openPresetEditModal(p = null) {
   setTimeout(() => window.SequenceEditor?.draw(), 50);
 }
 
-function savePresetFromModal() {
+async function savePresetFromModal() {
   const editId = document.getElementById("presetEditId")?.value;
   const name = presetEl("presetNameInput")?.value?.trim() || "Preset";
   const icon = presetEl("presetIconSelect")?.value || "⚡";
@@ -4079,8 +4131,30 @@ function savePresetFromModal() {
   }
 
   renderPresetsGrid();
-  saveConfig();
+  // Persist BEFORE closing. This used to be a bare `saveConfig()` — no `await`, no `.catch` —
+  // with the modal hidden on the next line, so a rejected write became an unhandled rejection
+  // while the card (rendered from the in-memory array) stayed on screen and nothing told the
+  // user. Now a failure keeps the modal open and toasts; only a confirmed write closes it.
+  const saved = await saveConfig();
+  if (!saved) return;
+  // The grid is a view of the PAGE's copy, so confirm against the file and render that.
+  await verifyPresetsOnDisk();
   document.getElementById("presetEditModal")?.classList.add("hidden");
+}
+
+// Read the presets back from disk and render THOSE, so the grid cannot keep showing a
+// preset that was never persisted. Mirrors what the macro list already does with
+// `list_macros`; `saveConfig`'s own result is reported by the caller.
+async function verifyPresetsOnDisk() {
+  try {
+    const fresh = await invoke("get_app_config");
+    if (fresh && Array.isArray(fresh.presets)) {
+      currentConfig.presets = fresh.presets;
+      renderPresetsGrid();
+    }
+  } catch (err) {
+    console.warn("[Presets] verification read failed:", err);
+  }
 }
 
 async function deletePreset(presetId) {

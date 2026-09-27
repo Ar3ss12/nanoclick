@@ -3189,4 +3189,102 @@ fn test_recorded_macro_is_persisted_without_a_host_prompt() {
     }
 }
 
+/// A preset write must be verifiable, and a failed write must be visible.
+///
+/// The preset library has no store of its own: a preset is one element of `config.json.presets`,
+/// and the only way to write it is a full-config save. That save used to be fired
+/// fire-and-forget from the editor (`saveConfig();` with no `await` and no `.catch`), the grid
+/// was painted from the page's in-memory copy, and `renderPresetsGrid()` itself injected the four
+/// factory presets whenever the array looked empty — so a failed write was indistinguishable
+/// from a good one until the next start, and a lost library rendered as four normal cards.
+#[test]
+fn test_preset_writes_are_verified_and_cannot_be_silent() {
+    fn section<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
+        let from = src.find(start).unwrap_or_else(|| panic!("`{start}` not found"));
+        let rest = &src[from..];
+        let to = rest
+            .find(end)
+            .unwrap_or_else(|| panic!("`{end}` not found after `{start}`"));
+        &rest[..to]
+    }
+
+    let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
+    let key = tauri::utils::assets::AssetKey::from("main.js");
+    let bytes = ctx.assets().get(&key).expect("main.js not embedded");
+    let js = String::from_utf8_lossy(&bytes);
+
+    // 1. The editor awaits the write, and the modal closes only after a confirmed one.
+    let modal = section(
+        &js,
+        "async function savePresetFromModal",
+        "async function verifyPresetsOnDisk",
+    );
+    let awaited = modal
+        .find("await saveConfig()")
+        .expect("the editor must await the write");
+    let closed = modal
+        .find("presetEditModal\")?.classList.add(\"hidden\")")
+        .expect("the modal must still be closable");
+    assert!(
+        awaited < closed,
+        "the modal closes only AFTER a confirmed write — a failed save must not look saved"
+    );
+    assert!(
+        modal.contains("if (!saved) return;"),
+        "a refused/failed write must abort before the modal is hidden"
+    );
+    assert!(
+        modal.contains("verifyPresetsOnDisk"),
+        "the grid must be re-rendered from what is on disk, not from the page's own copy"
+    );
+
+    // 2. `saveConfig` answers its caller and reports a failure in the log AND in the window.
+    let save = section(&js, "async function saveConfig()", "if (limitRange)");
+    assert!(
+        save.contains("return true;") && save.contains("return false;"),
+        "saveConfig must return its outcome — otherwise no caller can tell a failed write \
+         from a successful one"
+    );
+    assert!(
+        save.contains("sendClientError(\"error\"") && save.contains("showToast("),
+        "a failed write must reach the release-visible log and the user, not only console.error \
+         (which release builds never record)"
+    );
+
+    // 3. Rendering must not mutate the library: "no presets" has to be representable.
+    let grid = section(&js, "function renderPresetsGrid", "\n  // Build the whole grid");
+    assert!(
+        !grid.contains("ensurePresetsExist()"),
+        "renderPresetsGrid must not inject the factory presets — that made the empty state \
+         unreachable and turned a lost library into four normal-looking cards"
+    );
+    assert!(
+        grid.contains("presetsEmptyState"),
+        "the empty state must stay reachable"
+    );
+
+    // 4. A config load that failed is not allowed to look healthy.
+    let load = section(&js, "async function loadConfig", "// ── Deadbolt Modal");
+    assert!(
+        load.contains("sendClientError(") && load.contains("showDeadboltQueue("),
+        "a page that never hydrated runs on factory defaults and cannot save anything — \
+         it has to say so instead of looking normal"
+    );
+
+    for locale in ["ua.json", "ru.json", "en.json"] {
+        let dict = match locale {
+            "ua.json" => include_str!("../../src/locales/ua.json"),
+            "ru.json" => include_str!("../../src/locales/ru.json"),
+            _ => include_str!("../../src/locales/en.json"),
+        };
+        for key in [
+            "save_failed",
+            "notice_cfg_load_failed_title",
+            "notice_cfg_load_failed_msg",
+        ] {
+            assert!(dict.contains(key), "{locale} must translate {key}");
+        }
+    }
+}
+
 
