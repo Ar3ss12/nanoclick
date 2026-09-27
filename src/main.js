@@ -1716,6 +1716,19 @@ async function loadConfig() {
   try {
     const config = await invoke("get_app_config");
     updateUiFromConfig(config);
+    // The library is a FILE OF ITS OWN now (`presets.json`): fetch it and keep
+    // `currentConfig.presets` as the in-memory VIEW of that store. Every reader keeps using the
+    // array, but nothing writes it through the config save any more — a config-level write can
+    // no longer replace the library (that is how the four factory presets came back).
+    try {
+      const presets = await invoke("list_presets");
+      if (Array.isArray(presets)) {
+        currentConfig.presets = presets;
+        renderPresetsGrid();
+      }
+    } catch (err) {
+      console.warn("[Presets] library load failed:", err);
+    }
     const path = await invoke("get_config_path");
     _configPath = path || "";
     updateConfigFolderTooltip();
@@ -3301,9 +3314,17 @@ async function duplicatePreset(presetId) {
   copy.is_default = false;
   // Two presets must never fight over one global hotkey.
   copy.hotkey = "";
-  presetLibrary().push(copy);
+  try {
+    const stored = await invoke("save_preset", { p: copy });
+    if (Array.isArray(stored)) currentConfig.presets = stored;
+  } catch (err) {
+    console.error("[Presets] duplicate failed:", err);
+    showToast(
+      getI18nText("save_failed", {}, "Settings were NOT saved — the write failed. See %TEMP%\\nanoclick_web.log for the reason."),
+      "error",
+    );
+  }
   renderPresetsGrid();
-  await saveConfig();
 }
 
 // ── VISUAL EDITOR HELPERS ─────────────────────────────────────────────────
@@ -4045,49 +4066,52 @@ async function savePresetFromModal() {
     ui_settings: scope.ui ? readPresetModalUi() : null,
   };
 
-  if (editId) {
-    const idx = library.findIndex(x => x.id === editId);
-    if (idx !== -1) {
-      // The id survives an edit; everything else is replaced wholesale, so a
-      // group the user just turned OFF stops travelling with the preset.
-      library[idx] = { ...library[idx], ...record };
+  // ONE preset at a time, through the library store: the config save is not involved, so a
+  // config-level write can never replace the library. The store answers with the whole new
+  // library, which becomes the rendered truth; a failed write keeps the modal open.
+  const existing = editId ? library.find((x) => x.id === editId) : null;
+  const entry = {
+    ...record,
+    id: existing ? existing.id : "preset_" + Date.now(),
+    is_default: existing ? !!existing.is_default : false,
+  };
+  try {
+    const stored = await invoke("save_preset", { p: entry });
+    if (Array.isArray(stored)) {
+      currentConfig.presets = stored;
     }
-  } else {
-    library.push({ ...record, id: "preset_" + Date.now(), is_default: false });
+  } catch (err) {
+    console.error("[Presets] save_preset failed:", err);
+    sendClientError("error", `[Presets] save_preset FAILED: ${err?.message ?? err}`);
+    showToast(
+      getI18nText("save_failed", {}, "Settings were NOT saved — the write failed. See %TEMP%\\nanoclick_web.log for the reason."),
+      "error",
+    );
+    return;
   }
-
   renderPresetsGrid();
-  // Persist BEFORE closing. This used to be a bare `saveConfig()` — no `await`, no `.catch` —
-  // with the modal hidden on the next line, so a rejected write became an unhandled rejection
-  // while the card (rendered from the in-memory array) stayed on screen and nothing told the
-  // user. Now a failure keeps the modal open and toasts; only a confirmed write closes it.
-  const saved = await saveConfig();
-  if (!saved) return;
-  // The grid is a view of the PAGE's copy, so confirm against the file and render that.
-  await verifyPresetsOnDisk();
   document.getElementById("presetEditModal")?.classList.add("hidden");
 }
 
-// Read the presets back from disk and render THOSE, so the grid cannot keep showing a
-// preset that was never persisted. Mirrors what the macro list already does with
-// `list_macros`; `saveConfig`'s own result is reported by the caller.
-async function verifyPresetsOnDisk() {
-  try {
-    const fresh = await invoke("get_app_config");
-    if (fresh && Array.isArray(fresh.presets)) {
-      currentConfig.presets = fresh.presets;
-      renderPresetsGrid();
-    }
-  } catch (err) {
-    console.warn("[Presets] verification read failed:", err);
-  }
-}
+// Every store write answers with the whole new library, and that reply is what gets rendered — so
+// the reply IS the disk truth and a separate "verify" read is redundant. (The old helper re-read
+// the presets from the config, which was the writer we removed.)
 
 async function deletePreset(presetId) {
-  currentConfig.presets = presetLibrary().filter(x => x.id !== presetId);
-  renderPresetsGrid();
-  const saved = await saveConfig();
-  if (saved) await verifyPresetsOnDisk();
+  try {
+    const stored = await invoke("delete_preset", { id: presetId });
+    if (Array.isArray(stored)) {
+      currentConfig.presets = stored;
+    }
+    renderPresetsGrid();
+  } catch (err) {
+    console.error("[Presets] delete_preset failed:", err);
+    sendClientError("error", `[Presets] delete_preset FAILED: ${err?.message ?? err}`);
+    showToast(
+      getI18nText("save_failed", {}, "Settings were NOT saved — the write failed. See %TEMP%\\nanoclick_web.log for the reason."),
+      "error",
+    );
+  }
 }
 
 // Hoisted out of setupPresetListeners(): it touches only `document`, so nesting
@@ -4258,10 +4282,11 @@ function setupPresetListeners() {
           });
 
         if (imported.length === 0) throw new Error("no valid presets");
-        presetLibrary().push(...imported);
+        // Bulk write through the store, not through a config save: the library file is the
+        // authority and the store returns what it actually holds.
+        const stored = await invoke("replace_presets", { presets: [...presetLibrary(), ...imported] });
+        if (Array.isArray(stored)) currentConfig.presets = stored;
         renderPresetsGrid();
-        const saved = await saveConfig();
-        if (saved) await verifyPresetsOnDisk();
         alert(getI18nText("dialog_alert_import_presets_success", { count: imported.length }, `Successfully imported ${imported.length} presets`));
       } catch (err) {
         console.error("[Presets] import failed:", err);

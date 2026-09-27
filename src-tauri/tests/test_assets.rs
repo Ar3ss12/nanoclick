@@ -3213,29 +3213,31 @@ fn test_preset_writes_are_verified_and_cannot_be_silent() {
     let bytes = ctx.assets().get(&key).expect("main.js not embedded");
     let js = String::from_utf8_lossy(&bytes);
 
-    // 1. The editor awaits the write, and the modal closes only after a confirmed one.
+    // 1. The editor writes through the LIBRARY STORE (never through a config save), and the modal
+    //    closes only after the store confirmed the write.
     let modal = section(
         &js,
         "async function savePresetFromModal",
-        "async function verifyPresetsOnDisk",
+        "// Every store write answers with the whole new library",
     );
-    let awaited = modal
-        .find("await saveConfig()")
-        .expect("the editor must await the write");
+    let written = modal
+        .find("await invoke(\"save_preset\"")
+        .expect("the editor must write through the preset store");
     let closed = modal
         .find("presetEditModal\")?.classList.add(\"hidden\")")
         .expect("the modal must still be closable");
     assert!(
-        awaited < closed,
+        written < closed,
         "the modal closes only AFTER a confirmed write — a failed save must not look saved"
     );
     assert!(
-        modal.contains("if (!saved) return;"),
-        "a refused/failed write must abort before the modal is hidden"
+        modal.contains("return;"),
+        "a failed write must abort before the modal is hidden"
     );
     assert!(
-        modal.contains("verifyPresetsOnDisk"),
-        "the grid must be re-rendered from what is on disk, not from the page's own copy"
+        !modal.contains("saveConfig"),
+        "a preset write must NOT go through the config save — that is how a config-level write \
+         replaced the whole library"
     );
 
     // 2. `saveConfig` answers its caller and reports a failure in the log AND in the window.
@@ -3249,6 +3251,20 @@ fn test_preset_writes_are_verified_and_cannot_be_silent() {
         save.contains("sendClientError(\"error\"") && save.contains("showToast("),
         "a failed write must reach the release-visible log and the user, not only console.error \
          (which release builds never record)"
+    );
+
+    // 2b. The library has its own file: every mutation and the boot read go through the store.
+    assert!(
+        js.contains("await invoke(\"delete_preset\", { id: presetId })"),
+        "deleting a preset must go through the store, not a config save"
+    );
+    assert!(
+        js.contains("await invoke(\"replace_presets\", { presets:"),
+        "bulk preset writes (import) must go through the store"
+    );
+    assert!(
+        js.contains("const presets = await invoke(\"list_presets\")"),
+        "the boot must load the library from its own store"
     );
 
     // 3. Rendering must not mutate the library: "no presets" has to be representable.
