@@ -193,17 +193,23 @@ fn ensure_session_config_backup(app: &AppHandle) {
         "warn",
         &format!("[Config] session snapshot: {}", path.display()),
     );
-    if let Ok(mut q) = state.file_toasts.lock() {
-        if q.len() >= 8 {
-            q.remove(0);
-        }
-        q.push(AppNotice {
-            level: NoticeLevel::Info,
-            title: "notice_cfg_backup_title".into(),
-            message: "notice_cfg_backup_msg".into(),
-            details: Some(path.display().to_string()),
-        });
+    // Bind the guard in its own statement on purpose: `if let Ok(..) = state.file_toasts.lock()`
+    // keeps the `Result` temporary alive until the end of the block, and that outlives the
+    // `State` borrow (E0597). Same pattern as `start_tray_if_needed`.
+    let mut queue = match state.file_toasts.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    // Cap: drop oldest, keep the queue bounded (the watcher's rule).
+    if queue.len() >= 8 {
+        queue.remove(0);
     }
+    queue.push(AppNotice {
+        level: NoticeLevel::Info,
+        title: "notice_cfg_backup_title".into(),
+        message: "notice_cfg_backup_msg".into(),
+        details: Some(path.display().to_string()),
+    });
 }
 
 #[tauri::command]
