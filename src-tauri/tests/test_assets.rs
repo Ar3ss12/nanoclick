@@ -2938,7 +2938,7 @@ fn test_tray_switch_reports_both_flags() {
          variable must be gone, only the history comment may mention it"
     );
     // The legacy state is explained, not silent.
-    let hint = section(main_js, "function paintTrayLifeHint", "if (trayLifeCheckbox) trayLifeCheckbox.addEventListener");
+    let hint = section(&main_js, "function paintTrayLifeHint", "if (trayLifeCheckbox) trayLifeCheckbox.addEventListener");
     assert!(
         hint.contains("trayLifeHint") && hint.contains("settings_tray_life_mixed_hint"),
         "a minimize-only config must render the hint that says deep sleep is off"
