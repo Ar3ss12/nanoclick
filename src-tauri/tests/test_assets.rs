@@ -2670,7 +2670,7 @@ fn test_remember_window_state_wiring() {
         "the page must never write the backend-owned visibility flag"
     );
     // The overridden row is painted, never disabled (AGENTS.md §2.13).
-    let painter = section(main_js, "function paintRememberStateLock", "if (startMinimizedCheckbox)");
+    let painter = section(&main_js, "function paintRememberStateLock", "if (startMinimizedCheckbox)");
     assert!(
         painter.contains("timer-option--locked")
             && !painter.contains("disabled")
