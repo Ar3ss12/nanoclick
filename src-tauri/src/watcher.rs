@@ -11,11 +11,27 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// How often the observer thread polls file mtimes.
-pub const POLL_INTERVAL_MS: u64 = 1000;
+///
+/// 2026-09-27: raised 1000 → 2000 ms. The poll does only `exists()`+`metadata()`
+/// per watched file, but each tick is still a thread wake-up for the entire life
+/// of the process, and the user-visible cost of a slower poll is one extra second
+/// of latency on a toast about an EXTERNAL edit (never on our own writes, which
+/// are swallowable by the grace window). Halving the wake-ups is worth that.
+/// 2026-09-28: raised 2000 → 5000 ms. Wake-up rate drops from 30/min to 12/min;
+/// additional toast latency ≤ 4 s — acceptable for the rare external-edit case.
+pub const POLL_INTERVAL_MS: u64 = 5000;
 /// Settle time: a file must be stable this long before we judge it.
 pub const DEBOUNCE_MS: u64 = 750;
 /// Ignore window after OUR OWN write (tmp+rename shows up as a change).
-pub const OWN_WRITE_GRACE_MS: u64 = 2500;
+///
+/// **This MUST exceed `POLL_INTERVAL_MS + DEBOUNCE_MS`, and `own_write_grace_covers
+/// the_poll_interval` pins that with a real constant comparison.** The observer
+/// only sees our echo on its NEXT poll, i.e. up to `POLL_INTERVAL_MS` after the
+/// write; if the grace closes first, `poll_once` clears `own_write_at` and judges
+/// our own save as an external edit. That mismatch shipped the false "File changed
+/// outside NanoClick" toast: the cadence was raised 2000 → 5000 ms on 2026-09-28
+/// and this constant stayed at 2500, so roughly half of all saves were reported.
+pub const OWN_WRITE_GRACE_MS: u64 = POLL_INTERVAL_MS + DEBOUNCE_MS + 5_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileHealth {
@@ -192,6 +208,21 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nanoclick_watch_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         dir.join(name)
+    }
+
+    /// THE invariant behind the false "File changed outside NanoClick" toast.
+    /// The echo of our own write is only visible on the observer's NEXT poll, so
+    /// the grace window must outlive one full poll plus the debounce. When the
+    /// cadence was raised 2000 → 5000 ms without raising this constant, roughly
+    /// half of all saves were judged as external edits.
+    #[test]
+    fn own_write_grace_covers_the_poll_interval() {
+        assert!(
+            OWN_WRITE_GRACE_MS > POLL_INTERVAL_MS + DEBOUNCE_MS,
+            "grace {OWN_WRITE_GRACE_MS}ms must exceed one poll ({POLL_INTERVAL_MS}ms) \
+             plus the debounce ({DEBOUNCE_MS}ms), or our own writes are reported as \
+             external edits"
+        );
     }
 
     #[test]

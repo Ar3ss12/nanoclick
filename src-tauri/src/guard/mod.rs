@@ -17,11 +17,18 @@
 
 pub mod app_filter;
 pub mod focus_watch;
+pub mod key_policy;
 pub mod typing;
 
 pub use app_filter::{AppFilter, ForegroundCache};
 pub use focus_watch::{spawn_focus_watcher, FocusWatchStop};
-pub use typing::{is_text_keypress_vk, is_typable_vk, TypingGuard, TYPING_FREEZE_MS};
+pub use key_policy::{IgnoreKeyReport, KeyPolicy, KeyPolicyReport};
+pub use typing::TypingGuard;
+// The static classifiers stay reachable for tests and for pure-function call
+// sites ONLY. Production hook code must use `KeyPolicy` — it cannot see the
+// user's bindings, which is what caused the "J kills my own clicker" bug.
+#[allow(unused_imports)]
+pub use typing::{is_text_keypress_vk, is_typable_vk, TYPING_FREEZE_MS};
 
 /// Smart Guard default freeze window for the UI checkbox (milliseconds).
 pub fn default_typing_freeze_ms() -> u32 {

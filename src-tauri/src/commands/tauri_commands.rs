@@ -386,8 +386,79 @@ fn uuid_like_id() -> String {
 
 // ── Full backup: config + presets + macros in one file ──────
 
+/// Write a backup straight to disk and return the path.
+///
+/// The page used to build a `blob:` URL and click a hidden anchor with a
+/// `download` attribute. In the Tauri WebView2 that navigation is silently
+/// dropped — the IPC succeeded (measured: `export_full_backup ✓ 7.5ms` in the
+/// log) and then nothing happened, with no exception for the `catch` to see.
+/// Writing from Rust removes the browser download path entirely.
+#[tauri::command]
+pub fn export_full_backup_to_disk(state: State<'_, crate::AppState>) -> Result<String, String> {
+    let json = export_full_backup_payload(&state)?;
+    let desktop = std::env::var("USERPROFILE")
+        .map(|p| std::path::PathBuf::from(p).join("Desktop"))
+        .unwrap_or_else(|_| std::env::temp_dir());
+    let stamp = chrono_like_stamp();
+    let path = desktop.join(format!("nanoclick_backup_{stamp}.json"));
+    std::fs::write(&path, json).map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// `YYYY-MM-DD` without pulling in a date-time crate.
+fn chrono_like_stamp() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // Days since epoch -> civil date (Howard Hinnant's algorithm).
+    let days = (secs / 86_400) as i64;
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Write the preset library to disk and return the path.
+///
+/// Same reason as `export_full_backup_to_disk`: a `blob:` anchor download is
+/// silently dropped by WebView2, so this button silently did nothing.
+#[tauri::command]
+pub fn export_presets_to_disk(state: State<'_, crate::AppState>) -> Result<String, String> {
+    let library = state
+        .scheduler
+        .get_config()
+        .presets;
+    if library.is_empty() {
+        return Err("no presets to export".into());
+    }
+    let json = serde_json::to_string_pretty(&library)
+        .map_err(|e| format!("serialize presets: {e}"))?;
+    let desktop = std::env::var("USERPROFILE")
+        .map(|p| std::path::PathBuf::from(p).join("Desktop"))
+        .unwrap_or_else(|_| std::env::temp_dir());
+    let stamp = chrono_like_stamp();
+    let path = desktop.join(format!("nanoclick_presets_{stamp}.json"));
+    std::fs::write(&path, json).map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
 #[tauri::command]
 pub fn export_full_backup(state: State<'_, crate::AppState>) -> Result<String, String> {
+    export_full_backup_payload(&state)
+}
+
+/// The backup document itself, shared by the IPC form and the on-disk writer.
+/// Serialization of a `serde_json::Value` cannot realistically fail, but the
+/// signature stays `Result` so a future non-Value payload cannot panic a command.
+fn export_full_backup_payload(state: &State<'_, crate::AppState>) -> Result<String, String> {
     let app_cfg = state.config_manager.load();
     let macros = crate::persistence::macros::load_macros();
     let backup = serde_json::json!({
@@ -445,6 +516,43 @@ pub fn import_full_backup(
     }
     Ok(format!("restored: {}", restored.join(", ")))
 }
+// ── Key policy (layer B: user-editable ignored keys) ──────────────────
+// See `docs/IGNORED_KEYS_FEATURE.md`. All three are read-only or list-scoped
+// and none of them is on a hot path.
+
+/// Diagnostics for Settings → Input diagnostics: which keys the Typing Guard
+/// currently ignores, split into the hardcoded seed and everything added on top
+/// (the user's list plus the automatic binding shield).
+#[tauri::command]
+pub fn get_key_policy(state: tauri::State<'_, crate::AppState>) -> crate::guard::KeyPolicyReport {
+    state.scheduler.key_policy().report()
+}
+
+/// Check a candidate key BEFORE it is added to the ignored list.
+///
+/// Explains the refusal instead of silently rejecting: a protected key reports
+/// `already_ignored`, and a key the user already bound to a hotkey reports
+/// `already_bound` (layer A — adding it is pointless, removing it is impossible).
+#[tauri::command]
+pub fn validate_ignore_key(
+    label: String,
+    already_in_list: bool,
+    state: tauri::State<'_, crate::AppState>,
+) -> crate::guard::IgnoreKeyReport {
+    let report = crate::guard::key_policy::check_ignore_label(&label, already_in_list);
+    // Layer A can only be answered with the live bindings.
+    crate::guard::IgnoreKeyReport {
+        already_bound: report.ok && state.scheduler.key_policy().is_exempt(report.vk),
+        ..report
+    }
+}
+
+/// The canonical hardcoded seed as labels, for a "Reset to defaults" action.
+#[tauri::command]
+pub fn get_default_ignored_keys() -> Vec<String> {
+    crate::guard::key_policy::default_ignored_labels()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

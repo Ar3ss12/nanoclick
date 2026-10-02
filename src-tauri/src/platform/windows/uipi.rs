@@ -110,6 +110,61 @@ pub fn is_window_elevated(hwnd: HWND) -> bool {
     }
 }
 
+/// Minimum gap between two UIPI alerts (milliseconds).
+///
+/// Every click passes through [`uipi_guard_check`], so this is what keeps the
+/// expensive part off the hot path: `WindowFromPoint` + `OpenProcess` +
+/// `GetTokenInformation` run at most this often instead of at 150 CPS.
+pub const UIPI_ALERT_THROTTLE_MS: u64 = 3000;
+
+/// Throttled UIPI check for the shared click path.
+///
+/// **THROTTLE FIRST, SYSCALLS SECOND.** The timestamp comparison is one relaxed
+/// atomic load; only when it passes do we touch the elevation state. The
+/// previous code checked elevation and then throttled only the *notification*,
+/// which meant three syscalls per click whenever the target was elevated.
+///
+/// `is_current_process_elevated()` cannot be skipped before the throttle — it is
+/// itself a `GetTokenInformation` pair — but caching it here keeps the
+/// not-elevated case (the overwhelming majority) down to the throttle alone.
+pub fn uipi_guard_check(x: i32, y: i32) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static LAST_CHECK: AtomicU64 = AtomicU64::new(0);
+    static SELF_ELEVATED: AtomicU64 = AtomicU64::new(u64::MAX); // sentinel = unknown
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    // Throttle BEFORE any syscall.
+    if now_ms.saturating_sub(LAST_CHECK.load(Ordering::Relaxed)) < UIPI_ALERT_THROTTLE_MS {
+        return;
+    }
+
+    // Our own elevation never changes while running, so resolve it once.
+    let elevated = match SELF_ELEVATED.load(Ordering::Relaxed) {
+        u64::MAX => {
+            let value = u64::from(is_current_process_elevated());
+            SELF_ELEVATED.store(value, Ordering::Relaxed);
+            value
+        }
+        cached => cached,
+    };
+    if elevated == 1 {
+        return;
+    }
+
+    if !is_target_point_elevated(x, y) {
+        return;
+    }
+
+    LAST_CHECK.store(now_ms, Ordering::Relaxed);
+    play_warning_sound();
+    crate::platform::windows::trigger_uipi_block_notification(x, y);
+}
+
 /// Check if the target screen point (x, y) resides over a window of an elevated process.
 pub fn is_target_point_elevated(x: i32, y: i32) -> bool {
     unsafe {

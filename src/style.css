@@ -96,6 +96,10 @@ body {
   font-size: 13px;
   user-select: none;
   -webkit-user-select: none;
+  /* Off-screen compositing hint: while the window is hidden the Chromium
+     compositor may skip painting the entire document, reducing GPU process
+     CPU from ~3-6 ms/16 ms to near-zero. No effect on visible renders. */
+  content-visibility: auto;
 }
 
 input, textarea, [contenteditable="true"] {
@@ -3612,3 +3616,19 @@ button {
 }
 
 
+/* ── Runtime file-health toasts ────────────────────────────────────────────
+   `showFileToast` (main.js) builds these with inline styles and no stylesheet
+   rules at all, which is why the title and the body used to render as one run
+   of text ("outsideconfig") and why severity was invisible. The inline box
+   stays; these rules only give the two blocks their own line and weight. */
+.toast-file-health__title {
+  font-weight: 600;
+  color: var(--text-bright);
+  margin-bottom: 2px;
+}
+
+.toast-file-health__body {
+  font-weight: 400;
+  color: var(--text-dim);
+  opacity: .92;
+}

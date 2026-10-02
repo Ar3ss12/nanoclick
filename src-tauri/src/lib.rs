@@ -258,10 +258,9 @@ fn save_app_config(config: AppConfig, state: State<'_, AppState>, app: AppHandle
             .and_then(|w| w.is_visible().ok())
             .unwrap_or(false);
     state.config_manager.save(&config)?;
-    // Swallow OUR OWN echo so the observer never toasts our save.
-    if let Some(w) = app.try_state::<crate::WatcherState>() {
-        w.0.mark_own_write("config");
-    }
+    // OUR OWN echo is swallowed inside `ConfigManager::save()` (it marks before
+    // writing), so no call site has to remember it — the previous manual call
+    // here ran AFTER the write, which is one poll too late to be useful.
     state
         .scheduler
         .set_config(config::Config::from(config.clone()));
@@ -997,9 +996,7 @@ fn persist_window_visibility(app: &AppHandle, visible: bool) {
         debug_log_internal("warn", &format!("[Tray] window state not persisted: {e}"));
         return;
     }
-    if let Some(w) = app.try_state::<crate::WatcherState>() {
-        w.0.mark_own_write("config");
-    }
+    // Marked inside `save()` — no manual call needed.
     debug_log_internal(
         "info",
         &format!("[Tray] remembered window state: visible={visible}"),
@@ -1378,6 +1375,21 @@ pub(crate) fn shutdown_application(app: &AppHandle) {
         exec.stop();
     }
 
+    // 2b. LAST CONFIG WRITE OF THE SESSION: pin the golden snapshot to the state
+    //     we are leaving with. The read path no longer promotes on every load
+    //     (that meant ~40 rewrites a minute while the app sat idle in the tray)
+    //     and the app-profile thread stops touching the config as soon as
+    //     SHUTTING_DOWN latches, so this is the place that guarantees "the
+    //     snapshot is never older than the last run". Step 0 already wrote the
+    //     final window state into config.json, so the snapshot captures it too.
+    //     A `taskkill` skips this by definition — then the snapshot from the last
+    //     successful save stands, which is the honest fallback.
+    if let Some(state) = app.try_state::<AppState>() {
+        let cfg = state.config_manager.load();
+        crate::defaults::refresh_last_good_snapshot(&state.config_manager.config_path(), &cfg);
+        debug_log_internal("info", "[Shutdown] golden snapshot refreshed from the live config");
+    }
+
     // 3. Only now destroy the windows: satellites first, `main` LAST (it is the
     //    one the hooks and the page talk to). `hide()` is not enough here — it
     //    leaves the WebView2 helpers alive until the process image disappears
@@ -1587,6 +1599,10 @@ pub fn run() {
         crate::watcher::presets_bytes_valid,
     );
     let watcher_for_setup = Arc::clone(&watcher);
+    // Every `ConfigManager::save()` now marks its own write, so no call site can
+    // forget it (six did: onboarding, reset, HUD toggle, mode toggle, image
+    // trigger, backup import — each toasted falsely on every invocation).
+    config_manager.attach_observer(Arc::clone(&watcher));
 
     let scheduler = Arc::new(ClickScheduler::new());
     scheduler.set_config(config::Config::from(initial_app_cfg.clone()));
@@ -1771,35 +1787,75 @@ pub fn run() {
             }
 
             // ── App-profile auto-switch thread ────────────────────────
-            // Every 500 ms: read the foreground window title; when it matches
-            // an enabled app_profile rule whose preset differs from the last
-            // applied one, emit 'app-profile-activate' with the preset id.
+            // Three gates, cheapest first: (1) an mtime check on `config.json`
+            // — no config touch while the file is untouched; (2) a parse only on
+            // a real change, kept only when the *relevant* rules differ, so a
+            // changed CPS/theme never costs a foreground lookup; (3) the
+            // foreground match itself.
+            //
+            // MEASURED PROBLEM (2026-09-27): this loop called `cm.load()` every
+            // 1500 ms UNCONDITIONALLY — even with the factory's empty
+            // `app_profiles` — and `load()` is not a read: it parses the file and
+            // (until the same day) rewrote `config.last_good.json` on every call.
+            // That was ~40 disk writes and two JSON parses a minute in a process
+            // that claims to be asleep in the tray, and it is what showed up as
+            // the idle CPU/disk sawtooth.
+            //
+            // `config.json` stays the single source of truth: the vector below is
+            // a cache of what the last read said, never a second store
+            // (AGENTS.md §2.9). A rule that gets re-armed fires again, because the
+            // cache is dropped the moment the rule set changes.
             {
                 let cm = config_manager_arc.clone();
                 let h = handle.clone();
                 std::thread::spawn(move || {
+                    let config_path = cm.config_path();
+                    // (title_contains, preset_id) of the rules we act on.
+                    let mut profiles: Vec<(String, String)> = Vec::new();
+                    let mut last_seen_mtime: Option<std::time::SystemTime> = None;
                     let mut last_preset: Option<String> = None;
                     loop {
                         std::thread::sleep(std::time::Duration::from_millis(1500));
-                        let profiles = {
+                        // The shutdown flush owns the last write; do not race it.
+                        if SHUTTING_DOWN.load(Ordering::Acquire) {
+                            return;
+                        }
+                        // Gate 1 + 2: only when `config.json` actually moved do we
+                        // parse it — and only a changed RULE SET invalidates the
+                        // cached list (a changed CPS/theme must not cost anything).
+                        // The gate removes the config work, NOT the window match:
+                        // matching the foreground title every tick is the feature.
+                        let mtime = std::fs::metadata(&config_path)
+                            .and_then(|m| m.modified())
+                            .ok();
+                        if !(mtime.is_some() && mtime == last_seen_mtime) {
+                            last_seen_mtime = mtime;
                             let cfg = cm.load();
-                            if cfg.app_profiles.is_empty() {
-                                continue;
-                            }
-                            cfg.app_profiles
+                            let current: Vec<(String, String)> = cfg
+                                .app_profiles
                                 .into_iter()
                                 .filter(|p| p.enabled && !p.title_contains.is_empty())
-                                .collect::<Vec<_>>()
-                        };
+                                .map(|p| (p.title_contains, p.preset_id))
+                                .collect();
+                            if current != profiles {
+                                profiles = current;
+                                // A newly (re-)armed rule must be able to fire again.
+                                last_preset = None;
+                            }
+                        }
+                        if profiles.is_empty() {
+                            continue;
+                        }
+                        // Gate 3: the foreground lookup, once per tick, no I/O.
                         let Some(title) = platform::get_foreground_window_title() else {
                             continue;
                         };
                         let lower = title.to_lowercase();
-                        for p in profiles {
-                            if lower.contains(&p.title_contains.to_lowercase()) {
-                                if last_preset.as_deref() != Some(p.preset_id.as_str()) {
-                                    last_preset = Some(p.preset_id.clone());
-                                    let _ = h.emit("app-profile-activate", p.preset_id);
+                        for (needle, preset_id) in &profiles {
+                            if lower.contains(&needle.to_lowercase()) {
+                                if last_preset.as_deref() != Some(preset_id.as_str()) {
+                                    last_preset = Some(preset_id.clone());
+                                    let _ = h.emit("app-profile-activate", preset_id.clone());
                                 }
                                 break;
                             }
@@ -1842,7 +1898,7 @@ pub fn run() {
                 });
             }
             // ── Observer watcher thread (eyes only, hands off) ──────────
-            // 1s poll, 750ms debounce, own-write grace: external edits in
+            // 2 s poll, 750 ms debounce, own-write grace: external edits in
             // Notepad surface as toasts, never as file rewrites. Healing is
             // boot-time only — no war with the editor mid-keystroke.
             // Heavy parse runs on THIS thread; toast push is a short lock.
@@ -1898,6 +1954,8 @@ pub fn run() {
             set_windows_autostart,
             toggle_hud_window,
             commands::export_full_backup,
+            commands::export_full_backup_to_disk,
+            commands::export_presets_to_disk,
             commands::import_full_backup,
             commands::set_image_trigger,
             commands::pick_screen_pixel,
@@ -1934,6 +1992,10 @@ pub fn run() {
             commands::capture_foreground_app,
             commands::get_smart_guard_defaults,
             commands::get_smart_guard_status,
+            // Key policy (layer B): the user-editable ignored-key list.
+            commands::get_key_policy,
+            commands::validate_ignore_key,
+            commands::get_default_ignored_keys,
             commands::list_installed_and_running_apps,
             overlay::overlay_ready,
             overlay::toggle_overlay,

@@ -11,20 +11,22 @@ pub use windows_hooks::{stop_recorder_hooks, WindowsRecorderBackend};
 use crate::core::action::{KeyCode, Modifiers, MouseButton};
 use crate::scheduler::ClickScheduler;
 use rand::Rng;
+use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex as StdMutex, Once, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
-use windows::Win32::Foundation::{LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{FALSE, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::{GetDC, GetPixel, ReleaseDC};
 use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetCursorPos, GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId,
-    MSG, PM_REMOVE, PeekMessageW, SetCursorPos, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
-    KBDLLHOOKSTRUCT, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL,
+    CallNextHookEx, DispatchMessageW, GetCursorPos, GetForegroundWindow, GetWindowTextW,
+    GetWindowThreadProcessId, MSG, PM_REMOVE, PeekMessageW, PostThreadMessageW, QS_ALLINPUT,
+    SetCursorPos, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
+    KBDLLHOOKSTRUCT, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_QUIT,
 };
 
 /// Parse a config button label into the neutral MouseButton type.
@@ -167,6 +169,14 @@ impl crate::platform::backend::InputBackend for WindowsBackend {
     }
 
     fn mouse_down(&self, button: MouseButton) {
+        // The UIPI check lives HERE, in the one choke point every click passes
+        // through, not only in the `Hold` branch of `click_mouse`. With
+        // `click_type: single` the regular loop used `mouse_guard.press_down()`
+        // -> `mouse_down`, which never ran the check at all: no alert, no
+        // balloon, nothing (docs/FIELD_BUG_REPORT.md §5).
+        // Throttle-first inside the helper keeps this off the hot path.
+        let (x, y) = get_cursor_pos();
+        uipi_guard_check(x, y);
         mouse_down(button);
     }
 
@@ -197,20 +207,10 @@ impl crate::platform::backend::InputBackend for WindowsBackend {
             crate::platform::backend::PositionMode::Cursor => (orig_x, orig_y),
         };
 
-        // UIPI check: if non-elevated, check if target window belongs to an elevated process
-        if !is_current_process_elevated() && is_target_point_elevated(target_x, target_y) {
-            static LAST_UIPI_ALERT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
-            let last = LAST_UIPI_ALERT.load(Ordering::Relaxed);
-            if now_ms.saturating_sub(last) > 3000 {
-                LAST_UIPI_ALERT.store(now_ms, Ordering::Relaxed);
-                play_warning_sound();
-                trigger_uipi_block_notification(target_x, target_y);
-            }
-        }
+        // UIPI: handled in `mouse_down`, the single choke point every click passes
+        // through (regular single/double, multi-point, macro executor and the
+        // Hold branch below all funnel there). Keeping a second copy here left
+        // the default `click_type: single` path with no check at all.
 
         if spec.jitter_radius > 0 {
             let radius = spec.jitter_radius as i32;
@@ -319,19 +319,55 @@ pub fn spawn_global_hotkey_listener(scheduler: Arc<ClickScheduler>, app_handle: 
 }
 
 /// Stop the global hook and release its channel. Safe to call repeatedly.
+///
+/// The event channel needs no explicit teardown: `HOTKEY_TX` is a thread-local of
+/// the hook thread, the loop exits on the flag below, and the sender is dropped
+/// when that thread ends — which closes the channel. A late callback cannot happen
+/// because the hooks are unhooked before the thread returns.
 pub fn shutdown_global_hotkey_listener() {
     GLOBAL_HOTKEY_STOP.store(true, Ordering::Release);
-    if let Some(channel) = GLOBAL_HOTKEY_TX.get() {
-        *channel.lock().unwrap() = None;
+    // Wake the hook thread's MsgWaitForMultipleObjects immediately instead of
+    // waiting up to HOTKEY_IDLE_WAIT_MS (20 ms) for it to notice the flag.
+    let tid = GLOBAL_HOTKEY_THREAD_ID.load(Ordering::Acquire);
+    if tid != 0 {
+        unsafe {
+            let _ = PostThreadMessageW(tid, WM_QUIT, WPARAM(0), LPARAM(0));
+        }
     }
 }
+
+/// Fallback cadence of the hotkey listener loop, in milliseconds — how long the
+/// thread may park in `MsgWaitForMultipleObjects` when nothing is happening.
+///
+/// NOT the hotkey latency and NOT a system-wide input delay: the loop blocks in
+/// `MsgWaitForMultipleObjects(…, QS_ALLINPUT)`, which returns the instant a key or
+/// mouse event lands in the thread's Win32 queue, and the `WH_KEYBOARD_LL` callback
+/// — which runs inside the SYSTEM input chain — fires during the very next
+/// `PeekMessageW`. The timeout only bounds the *housekeeping* tick: the stale-key
+/// cleanup (`held.retain`) and noticing `GLOBAL_HOTKEY_STOP` from a caller that does
+/// not post `WM_QUIT`.
+///
+/// MEASURED PROBLEM this replaced (2026-09-27): the old `recv_timeout` design slept
+/// in a Rust channel, so nothing pumped the Win32 queue while it waited, and its
+/// timeout branch ran a `GetAsyncKeyState` scan of EVERY binding on each tick of a
+/// 50–200 Hz loop, on this `HIGHEST`-priority thread — tens of syscalls per tick to
+/// re-detect combos nobody was pressing. Both are gone: no combo scan at all, and a
+/// true kernel sleep.
+pub const HOTKEY_IDLE_WAIT_MS: u64 = 20;
+
+/// Shorter fallback cadence: used right after an event was seen, or while a
+/// typing-guard confirmation is pending — the window in which the guard needs a
+/// timely re-check rather than a 20 ms tick.
+pub const HOTKEY_BURST_WAIT_MS: u64 = 5;
 
 fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
     crate::debug_log_internal("stage-ok", "[Hotkeys] starting global listener");
 
     let (event_tx, event_rx) = mpsc::channel::<GlobalKeyEvent>();
-    let channel = GLOBAL_HOTKEY_TX.get_or_init(|| StdMutex::new(None));
-    *channel.lock().unwrap() = Some(event_tx);
+    // Give the callbacks a lock-free handle. This thread is the one the OS calls
+    // back on, so a thread-local clone is all that is needed — no global mutex and
+    // therefore no way to drop an event (see `send_hook_event`).
+    HOTKEY_TX.with(|cell| *cell.borrow_mut() = Some(event_tx));
 
     unsafe extern "system" fn keyboard_proc(
         n_code: i32,
@@ -344,20 +380,12 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
             let is_down = message == 0x0100 || message == 0x0104;
             let is_up = message == 0x0101 || message == 0x0105;
             if (is_down || is_up) && kb.vkCode != 0 {
-                if let Some(lock) = GLOBAL_HOTKEY_TX.get() {
-                    // v4.2 hardening: try_lock fast path — this callback runs
-                    // synchronously for the WHOLE SYSTEM. If the channel mutex
-                    // is momentarily contended, skip: the listener's
-                    // GetAsyncKeyState fallback poll re-detects held combos.
-                    if let Ok(guard) = lock.try_lock() {
-                        if let Some(sender) = guard.as_ref() {
-                            let _ = sender.send(GlobalKeyEvent {
-                                vk: kb.vkCode as u16,
-                                is_down,
-                            });
-                        }
-                    }
-                }
+                // Lock-free hand-over: no `try_lock`, so the event cannot be
+                // dropped while this callback holds up the system input chain.
+                send_hook_event(GlobalKeyEvent {
+                    vk: kb.vkCode as u16,
+                    is_down,
+                });
             }
         }
         CallNextHookEx(None, n_code, w_param, l_param)
@@ -370,7 +398,7 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
             hh
         }
         Err(e) => {
-            *channel.lock().unwrap() = None;
+            HOTKEY_TX.with(|cell| *cell.borrow_mut() = None);
             crate::debug_log_internal(
                 "error",
                 &format!("[Hotkeys] WH_KEYBOARD_LL install failed: {:?}", e),
@@ -405,13 +433,7 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
         };
         if vk != 0 {
             let is_down = msg == 0x020B || msg == 0x0207;
-            if let Some(lock) = GLOBAL_HOTKEY_TX.get() {
-                if let Ok(guard) = lock.try_lock() {
-                    if let Some(sender) = guard.as_ref() {
-                        let _ = sender.send(GlobalKeyEvent { vk, is_down });
-                    }
-                }
-            }
+            send_hook_event(GlobalKeyEvent { vk, is_down });
         }
         CallNextHookEx(None, n_code, w_param, l_param)
     }
@@ -433,6 +455,13 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
 
     crate::debug_log_internal("stage-ok", "[Hotkeys] entering event-driven loop");
 
+    // Store thread ID so shutdown_global_hotkey_listener can wake us immediately
+    // via PostThreadMessageW(WM_QUIT) instead of waiting for the next timeout.
+    let hook_thread_id = unsafe {
+        windows::Win32::System::Threading::GetCurrentThreadId()
+    };
+    GLOBAL_HOTKEY_THREAD_ID.store(hook_thread_id, Ordering::Release);
+
     // Parse-once contract: bindings are parsed from scheduler strings only at
     // startup and after the scheduler bumps its hotkeys_version (a save).
     // No per-poll string cloning or re-parsing.
@@ -449,6 +478,9 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
     // reset + assignment comments inside the loop). Lives here so the state
     // survives across poll iterations while the confirmation is pending.
     let mut toggle_deferred_killed_clicker = false;
+    // Lifetime count of hook events this loop already reported as undeliverable;
+    // a change means the diag ring should get a fresh line (see `HOTKEY_TX_FAILED`).
+    let mut last_tx_failures: u64 = 0;
 
     while !GLOBAL_HOTKEY_STOP.load(Ordering::Acquire) {
         poll_iter += 1;
@@ -460,9 +492,9 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
         // so no individual key-down (a letter!) ever reaches the typing
         // guard; only the GetAsyncKeyState fallback below worked, which is
         // why toggles worked but typing detection was completely deaf.
-        // PeekMessageW is non-blocking: the recv_timeout below still wakes
-        // up every ~20 ms to service the channel, the deferred-toggle poll
-        // and the stop flag.
+        // PeekMessageW is non-blocking; the true blocking wait happens below
+        // via MsgWaitForMultipleObjects which sleeps at 0% CPU until a key
+        // event or WM_QUIT arrives.
         let mut msg = MSG::default();
         while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.into() {
             unsafe {
@@ -471,31 +503,31 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
             }
         }
 
+        // ── DRAIN EVENT CHANNEL ──────────────────────────────────────
+        // keyboard_proc / mouse_hotkey_proc push here synchronously;
+        // by the time we get here all pending callbacks have already
+        // fired (PeekMessage above drained the Win32 queue). try_recv
+        // is non-blocking and zero-cost when the channel is empty.
         let mut events: Vec<GlobalKeyEvent> = Vec::new();
-        // Drain the entire queue so fast combos and simultaneous keypresses
-        // never back up behind the timeout loop.
-        match event_rx.recv_timeout(Duration::from_millis(5)) {
-            Ok(first) => {
-                events.push(first);
-                while let Ok(next) = event_rx.try_recv() {
-                    events.push(next);
-                }
-            }
-            Err(_) => {
-                // Fallback polling only runs when the hook queue is idle
-                held.retain(|&key| key_down(key));
-                for group in bindings.all_groups().iter() {
-                    for combo in group.iter() {
-                        if key_down(combo.trigger) && combo.required.iter().all(|key| key_down(*key)) {
-                            events.push(GlobalKeyEvent {
-                                vk: combo.trigger,
-                                is_down: true,
-                            });
-                        }
-                    }
-                }
-            }
+        while let Ok(ev) = event_rx.try_recv() {
+            events.push(ev);
         }
+
+        // ── IDLE FALLBACK: stale-key cleanup only ────────────────────
+        // When no events arrived, remove any keys from `held` that are
+        // no longer physically pressed (e.g. released during a system-
+        // modal dialog that blocked our message pump). One GetAsyncKeyState
+        // call per currently-tracked key; zero calls when the queue is busy.
+        // NOTE: the GetAsyncKeyState COMBO SCAN from the old recv_timeout
+        // Err branch has been removed — the LL hook is reliable, and that
+        // scan ran 200+ times per second even while the app sat idle in
+        // the tray at THREAD_PRIORITY_HIGHEST (see AGENTS.md §0).
+        if events.is_empty() {
+            held.retain(|&key| key_down(key));
+        }
+
+        // Decide the NEXT wait cadence.
+        let had_events = !events.is_empty();
 
         let current_version = scheduler.hotkeys_version();
         if current_version != seen_version {
@@ -503,6 +535,15 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
             let snapshot = HotkeySnapshot::from_scheduler(&scheduler);
             bindings = HotkeyBindings::from_snapshot(&snapshot);
             log_bindings(&bindings);
+            // Layer A of the key policy: every key the user bound to a hotkey is
+            // exempt from the Typing Guard. This is what stops a toggle bound to
+            // `J` from stopping the clicker (kill-switch) and refusing to start
+            // it (guard veto) on the same press — see docs/KEY_POLICY.md §1.
+            //
+            // ORDERING IS THE CONTRACT: layer B (`rebuild`, driven by
+            // `set_config`) may run in between, but this call always comes last,
+            // so no config save can ever un-exempt a bound hotkey.
+            scheduler.key_policy().exempt_all(bindings.policy_keys());
             hotkey_diag_push(format!("bindings re-parsed on version {current_version}"));
         }
         // v4.3 typing kill-switch integration: set while the current pending
@@ -572,7 +613,9 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
                     let toggle_is_typable = bindings.toggle.iter().any(|combo| {
                         combo.required.is_empty()
                             && combo.trigger_matches(event.vk)
-                            && crate::guard::is_typable_vk(combo.trigger)
+                            && scheduler
+                                .key_policy()
+                                .is_typable(combo.trigger)
                     });
 
                     // Set when this very press opened a confirmation window:
@@ -595,7 +638,12 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
                     //
                     // Runs BEFORE the toggle gate below, so the dead press
                     // and the kill never see each other's state.
-                    if crate::guard::is_text_keypress_vk(event.vk) && !toggle_deferred {
+                    //
+                    // `key_policy` (not the static `is_text_keypress_vk`): a key
+                    // the user bound to a hotkey is exempt, so pressing the
+                    // toggle must never stop the clicker on its way to starting
+                    // it. This single call was the `J` bug.
+                    if scheduler.key_policy().is_text_keypress(event.vk) && !toggle_deferred {
                         let was_active = scheduler.is_active();
                         scheduler.set_active(false, Some(&app_handle));
                         if let Some(exec) = crate::core::global() {
@@ -726,7 +774,7 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
                     // held-back press is proven to be a letter inside a word.
                     // Gameplay keys (WASD, hotbar digits, arrows, ...) never
                     // arm or cancel anything.
-                    if crate::guard::is_text_keypress_vk(event.vk) && !toggle_deferred {
+                    if scheduler.key_policy().is_text_keypress(event.vk) && !toggle_deferred {
                         scheduler.typing_guard().note();
                         hotkey_diag_push(format!("armed_guard vk=0x{:02X}", event.vk));
                     }
@@ -774,6 +822,47 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
         if poll_iter % 100 == 0 {
             hotkey_diag_push("heartbeat".into());
         }
+
+        // Hook-event hand-over failures (the channel is closed, i.e. shutdown).
+        // The CALLBACK only bumps the counter — it runs inside the system input
+        // chain, where file I/O is forbidden — and this loop must not log either
+        // (`hook_loop_contains_no_file_logging`), so the number goes to the diag
+        // ring, which Settings → Input diagnostics dumps into the log. A non-zero
+        // value here means a key event was LOST: that is the exact failure the old
+        // `try_lock` design could produce and the removed fallback used to hide.
+        let tx_failures = HOTKEY_TX_FAILED.load(Ordering::Relaxed);
+        if tx_failures != last_tx_failures {
+            hotkey_diag_push(format!("dropped_events={tx_failures}"));
+            last_tx_failures = tx_failures;
+        }
+
+        // ── TRUE KERNEL SLEEP: MsgWaitForMultipleObjects ─────────────
+        // Replaces the old `recv_timeout` as the loop's blocking wait.
+        // This call parks the thread in the Win32 kernel at exactly 0% CPU
+        // and returns the instant ANY of these happen:
+        //   1. A key/mouse event arrives in the thread's Win32 message queue
+        //      (which triggers the LL hook callback on the NEXT PeekMessage
+        //      at the top of the next iteration → pushes into event_rx).
+        //   2. `PostThreadMessageW(WM_QUIT)` from shutdown_global_hotkey_listener
+        //      → GLOBAL_HOTKEY_STOP is already set → outer while exits cleanly.
+        //   3. Timeout expires (for typing-guard confirmation window).
+        //
+        // HOTKEY_IDLE_WAIT_MS (20 ms): fallback cadence when nothing is happening.
+        // HOTKEY_BURST_WAIT_MS (5 ms): keeps typing-guard confirmation responsive.
+        // Both constants are kept for the regression tests in hotpath_silence_tests.
+        let wait_ms = if had_events || scheduler.typing_guard().is_toggle_pending() {
+            HOTKEY_BURST_WAIT_MS as u32
+        } else {
+            HOTKEY_IDLE_WAIT_MS as u32
+        };
+        unsafe {
+            windows::Win32::UI::WindowsAndMessaging::MsgWaitForMultipleObjects(
+                None,
+                FALSE,
+                wait_ms,
+                QS_ALLINPUT,
+            );
+        }
     }
 
     unsafe {
@@ -782,6 +871,13 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
             let _ = UnhookWindowsHookEx(mh);
         }
     }
+    // Drop the hand-over handle together with the hooks: no callback can exist past
+    // this point, and dropping the sender closes the channel so nothing can linger.
+    HOTKEY_TX.with(|cell| *cell.borrow_mut() = None);
+    // Clear thread ID: a subsequent restart will set a fresh one.
+    // A PostThreadMessageW after this point (if shutdown races) is harmless —
+    // the thread no longer exists and PostThreadMessageW will return an error.
+    GLOBAL_HOTKEY_THREAD_ID.store(0, Ordering::Release);
     crate::debug_log_internal("stage-ok", "[Hotkeys] listener stopped and hook released");
 }
 
@@ -789,6 +885,49 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
 struct GlobalKeyEvent {
     vk: u16,
     is_down: bool,
+}
+
+thread_local! {
+    /// Hand-over handle for THIS thread's hook callbacks, set by
+    /// `run_keyboard_hook` before the hooks are installed.
+    ///
+    /// WHY a thread-local and not a global `Mutex<Option<Sender>>` (the previous
+    /// design): `WH_KEYBOARD_LL` / `WH_MOUSE_LL` callbacks run inside the SYSTEM
+    /// input chain, and the old code did `try_lock()` on that global and **dropped
+    /// the event** whenever the lock was momentarily busy. The `GetAsyncKeyState`
+    /// fallback that used to re-detect such a drop is gone (the loop sleeps in
+    /// `MsgWaitForMultipleObjects` now), so one dropped event is unrecoverable: a
+    /// lost key-down means the combo never fires, a lost key-up leaves the key in
+    /// `held` and swallows the next press of it. The OS always calls a low-level
+    /// hook back on the thread that installed it, so a thread-local clone is both
+    /// sufficient and lock-free — the identical pattern the recorder uses
+    /// (`windows_hooks.rs::LOCAL_CONTEXT`).
+    static HOTKEY_TX: RefCell<Option<Sender<GlobalKeyEvent>>> = const { RefCell::new(None) };
+}
+
+/// Hook events the callback could not hand over (the receiver is gone, i.e. the
+/// listener is shutting down). Lock-free on purpose: a callback may neither block
+/// nor log — it runs inside the system input chain — so it only bumps this counter,
+/// and the loop (or `hotkey_diag_dump`) reports the value.
+static HOTKEY_TX_FAILED: AtomicU64 = AtomicU64::new(0);
+
+/// Hand one hook event to the listener without ever blocking the input chain.
+///
+/// No lock is taken: the sender lives in a thread-local owned by the very thread
+/// the OS calls back on, so this cannot drop an event the way the old
+/// `try_lock`-guarded global could (see [`HOTKEY_TX`]). Both failure modes — a
+/// closed channel (shutdown) and a callback that somehow ran without a sender —
+/// are counted in [`HOTKEY_TX_FAILED`] so a lost event is always visible somewhere.
+fn send_hook_event(event: GlobalKeyEvent) {
+    HOTKEY_TX.with(|cell| {
+        let delivered = match cell.borrow().as_ref() {
+            Some(tx) => tx.send(event).is_ok(),
+            None => false,
+        };
+        if !delivered {
+            HOTKEY_TX_FAILED.fetch_add(1, Ordering::Relaxed);
+        }
+    });
 }
 
 /// In-memory diagnostic ring buffer for hotkey events (v4.2 hardening).
@@ -809,16 +948,26 @@ fn hotkey_diag_push(line: String) {
 
 /// Dump and clear the diagnostic buffer. Used by `dump_input_diagnostics`
 /// (the Settings button) and by the tests; the hook thread only ever pushes.
+///
+/// The lifetime count of events the hook callback could not hand over is appended
+/// unconditionally, so it survives the ring buffer's cap — a non-zero value is
+/// evidence that a key event was LOST (see [`HOTKEY_TX_FAILED`]).
 pub fn hotkey_diag_dump() -> Vec<String> {
-    HOTKEY_DIAG
+    let mut out: Vec<String> = HOTKEY_DIAG
         .lock()
         .map(|mut q| q.drain(..).collect())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    out.push(format!(
+        "hook_events_undelivered_total={}",
+        HOTKEY_TX_FAILED.load(Ordering::Relaxed)
+    ));
+    out
 }
 
-static GLOBAL_HOTKEY_TX: OnceLock<StdMutex<Option<Sender<GlobalKeyEvent>>>> = OnceLock::new();
 static GLOBAL_HOTKEY_STOP: AtomicBool = AtomicBool::new(false);
 static GLOBAL_HOTKEY_RUNNING: AtomicBool = AtomicBool::new(false);
+/// Thread ID of the hook thread — needed to wake MsgWaitForMultipleObjects via PostThreadMessageW.
+static GLOBAL_HOTKEY_THREAD_ID: AtomicU32 = AtomicU32::new(0);
 
 /// Classification of a key-down for the hook loop.
 ///
@@ -939,6 +1088,30 @@ struct HotkeyBindings {
 }
 
 impl HotkeyBindings {
+    /// Every trigger AND every required key of every bound combo — layer A of
+    /// `docs/KEY_POLICY.md`.
+    ///
+    /// Allocation-free on purpose: this runs on the hook thread on every
+    /// re-parse, and `all_groups()` builds a `Vec` of slices. Flat iterator
+    /// chains instead. A chord like `Ctrl+J` contributes BOTH keys, because
+    /// holding a modifier must never arm the Typing Guard either.
+    fn policy_keys(&self) -> impl Iterator<Item = u16> + '_ {
+        fn group_keys<'a>(combo: &'a HotkeyCombo) -> impl Iterator<Item = u16> + 'a {
+            std::iter::once(combo.trigger).chain(combo.required.iter().copied())
+        }
+        self.toggle
+            .iter()
+            .chain(self.mode_switch.iter())
+            .chain(self.emergency_stop.iter())
+            .chain(self.speed_up.iter())
+            .chain(self.slow_down.iter())
+            .chain(self.capture_pos.iter())
+            .chain(self.record_toggle.iter())
+            .chain(self.preset_slots.iter().flatten())
+            .chain(self.preset_hotkeys.iter().flat_map(|(_, c)| c.iter()))
+            .flat_map(group_keys)
+    }
+
     fn all_groups(&self) -> Vec<&[HotkeyCombo]> {
         let mut groups = vec![
             self.toggle.as_slice(),
@@ -1811,19 +1984,70 @@ mod physical_integration_tests {
     }
 
     #[test]
-    fn shutdown_flag_is_idempotent_and_resets_channel() {
-        // shutdown_global_hotkey_listener must be safe to call repeatedly
-        // and must clear the capture channel so a stale sender can't fire
-        // actions after shutdown.
+    fn shutdown_flag_is_idempotent_and_the_callback_never_locks() {
+        // shutdown_global_hotkey_listener must be safe to call repeatedly.
         shutdown_global_hotkey_listener();
         shutdown_global_hotkey_listener();
         assert!(GLOBAL_HOTKEY_STOP.load(Ordering::Acquire));
-        let channel_empty = GLOBAL_HOTKEY_TX
-            .get()
-            .and_then(|l| l.lock().ok())
-            .map(|g| g.is_none())
-            .unwrap_or(true);
-        assert!(channel_empty, "channel must be cleared after shutdown");
+
+        // The channel teardown used to be "clear the global sender here". The sender
+        // is now a thread-local of the hook thread (so no other thread can touch it
+        // — and none needs to: the loop exits, then the thread ends and the sender
+        // drops with it). What must hold instead is that the callback path takes NO
+        // lock at all: a lock there could be busy while a real keypress waits inside
+        // the system input chain, and dropping the event is now unrecoverable
+        // (the fallback that re-detected dropped combos was removed).
+        let src = include_str!("mod.rs");
+        assert!(
+            !src.contains("GLOBAL_HOTKEY_TX"),
+            "the fallible global sender is back: its try_lock() dropped hook events \
+             and the fallback that re-detected them no longer exists"
+        );
+        // Scope the lock check to the two CALLBACK bodies: `try_lock` is legitimate
+        // in the test helpers elsewhere in this file, and a lock taken inside a hook
+        // callback is the exact thing that can stall the system input chain.
+        let kb_start = src
+            .find("unsafe extern \"system\" fn keyboard_proc")
+            .expect("keyboard_proc must exist");
+        let kb_end = src[kb_start..]
+            .find("let hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL")
+            .map(|i| i + kb_start)
+            .expect("end of keyboard_proc not found");
+        let ms_start = src
+            .find("unsafe extern \"system\" fn mouse_hotkey_proc")
+            .expect("mouse_hotkey_proc must exist");
+        let ms_end = src[ms_start..]
+            .find("let mouse_hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL")
+            .map(|i| i + ms_start)
+            .expect("end of mouse_hotkey_proc not found");
+        for (name, cb) in [
+            ("keyboard_proc", &src[kb_start..kb_end]),
+            ("mouse_hotkey_proc", &src[ms_start..ms_end]),
+        ] {
+            assert!(
+                cb.contains("send_hook_event("),
+                "{name} must hand its event over through the lock-free helper"
+            );
+            assert!(
+                !cb.contains("try_lock") && !cb.contains(".lock()"),
+                "{name} must take NO lock: a busy lock would drop the event (and now \
+                 nothing re-detects it) while the system waits for this callback"
+            );
+        }
+        assert!(
+            src.contains("fn send_hook_event"),
+            "the lock-free hand-over helper must exist"
+        );
+        // A lost event must be countable: the callback bumps an atomic, the loop
+        // reports it through the diag ring.
+        assert!(
+            src.contains("HOTKEY_TX_FAILED.fetch_add"),
+            "a failed hand-over must be counted, or a lost key event stays invisible"
+        );
+        assert!(
+            src.contains("hook_events_undelivered_total="),
+            "hotkey_diag_dump must expose the lifetime total"
+        );
         // Reset so other tests / the app can start a fresh listener.
         GLOBAL_HOTKEY_STOP.store(false, Ordering::Release);
     }
@@ -1934,6 +2158,83 @@ mod hotpath_silence_tests {
         assert!(
             body.contains("PM_REMOVE"),
             "message drain must use PM_REMOVE so hook callbacks are consumed"
+        );
+    }
+
+    /// The listener must sleep in the kernel and scan NOTHING while idle.
+    ///
+    /// MEASURED 2026-09-27 (the design this test now pins): the loop used to wait
+    /// with `recv_timeout(5 ms)` — a Rust channel, so nothing pumped the Win32 queue
+    /// while it waited — and its timeout branch ran a `GetAsyncKeyState` scan of
+    /// EVERY binding, on this `HIGHEST`-priority thread, ~200×/s.
+    ///
+    /// The required shape, all asserted below:
+    /// * the wait is `MsgWaitForMultipleObjects(…, QS_ALLINPUT)` — a true kernel
+    ///   sleep that returns the instant a key/mouse event lands in the thread's
+    ///   queue (so the LL hook callback, which runs inside the SYSTEM input chain,
+    ///   is never delayed by the timeout — that is what keeps this honest);
+    /// * there is no `recv_timeout` at all;
+    /// * the timeout comes from the two named constants, never a literal;
+    /// * shutdown wakes the sleep via `PostThreadMessageW(WM_QUIT)`;
+    /// * the idle branch does no combo scan — only `held.retain(key_down)`.
+    #[test]
+    fn hotkey_loop_idles_at_20ms_instead_of_spinning_at_200hz() {
+        let src = include_str!("mod.rs");
+        assert!(
+            src.contains("pub const HOTKEY_IDLE_WAIT_MS: u64 = 20;"),
+            "the idle cadence must stay 20 ms — 5 ms was a permanent 200 Hz fallback tick"
+        );
+        assert!(
+            src.contains("pub const HOTKEY_BURST_WAIT_MS: u64 = 5;"),
+            "the burst cadence (right after an event / while a toggle is pending) is 5 ms"
+        );
+
+        let start = src
+            .find("fn run_keyboard_hook")
+            .expect("run_keyboard_hook not found");
+        let end = src[start..]
+            .find("UnhookWindowsHookEx")
+            .map(|i| i + start)
+            .expect("end of listener loop not found");
+        let body = &src[start..end];
+
+        assert!(
+            body.contains("HOTKEY_IDLE_WAIT_MS") && body.contains("HOTKEY_BURST_WAIT_MS"),
+            "the loop must pick its wait from the two named cadences"
+        );
+        assert!(
+            body.contains("MsgWaitForMultipleObjects"),
+            "the loop must park in the Win32 kernel, not in a Rust channel: that is \
+             what makes the idle cost zero AND keeps the hook callbacks (which run \
+             inside the system input chain) off the timeout"
+        );
+        assert!(
+            !body.contains("recv_timeout("),
+            "a channel timeout is the old design: it stops pumping the Win32 queue \
+             while it waits and its fallback branch scanned every binding \
+             (the word may still appear in comments — the CALL must not)"
+        );
+        assert!(
+            body.contains("QS_ALLINPUT"),
+            "the wait must wake on the thread's input queue"
+        );
+        assert!(
+            body.contains("GLOBAL_HOTKEY_THREAD_ID")
+                && src.contains("PostThreadMessageW(tid, WM_QUIT"),
+            "shutdown must wake the sleeping loop instead of waiting out the timeout"
+        );
+        // The idle branch may only clean up stale `held` entries (one
+        // GetAsyncKeyState per *currently tracked* key, zero when idle) — the
+        // per-binding combo scan must not come back. `key_down(combo.trigger)` is
+        // the exact shape of the removed scan; `combo.trigger_matches(..)` (the
+        // event-driven matcher) is legitimate and stays.
+        assert!(
+            !body.contains("key_down(combo.trigger)"),
+            "the idle branch must not scan every binding with GetAsyncKeyState"
+        );
+        assert!(
+            body.contains("held.retain"),
+            "the remaining idle work is the stale-key cleanup"
         );
     }
 }

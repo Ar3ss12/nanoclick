@@ -59,76 +59,37 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// 800ms covers average typing pause between words (~600ms) plus margin.
 pub const TYPING_FREEZE_MS: u32 = 800;
 
-/// Gameplay letter cluster — movement, inventory, drop, reload, use.
-/// `R`/`Q`/`E`/`F` collide with common game actions and `R` is also the
-/// default toggle hotkey, so they must never arm the lockout.
-const GAMEPLAY_LETTERS: [u16; 8] = [
-    0x41, // A
-    0x44, // D
-    0x45, // E
-    0x46, // F
-    0x51, // Q
-    0x52, // R
-    0x53, // S
-    0x57, // W
-];
+/// Gameplay letter cluster — MOVED to [`super::key_policy::GAMEPLAY_LETTERS`].
+///
+/// The seed is owned by the key policy, which is what actually decides whether a
+/// key arms the lockout. Tests that want the letter list import it from
+/// `key_policy` directly; re-exporting it here would only create a second name
+/// for the same data (and an unused-constant warning in test builds).
 
 /// `true` when this virtual-key counts as real text input, i.e. the fingers
 /// are typing rather than driving a game.
 ///
 /// Blocklist semantics: anything the OS reports counts as typing unless it is
-/// a known gameplay / navigation key (see [`is_ignored_key_vk`]). Pure integer
-/// classification — safe to call from the low-level keyboard hook for every
-/// key-down (no allocation, no syscalls, no logging).
+/// a known gameplay / navigation key. Pure integer classification — no
+/// allocation, no syscalls, no logging.
+///
+/// **This is the STATIC classifier and production code must no longer call it:**
+/// it cannot know which keys the user bound to hotkeys, which is what allowed
+/// `J` to stop the clicker and refuse to start it on the same press. The hook
+/// uses [`super::KeyPolicy::is_text_keypress`], which is the same predicate with
+/// the binding shield applied. Kept (and tested) for the pure-function cases.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn is_text_keypress_vk(vk: u16) -> bool {
     vk != 0 && !is_ignored_key_vk(vk)
 }
 
 /// Keys gamers and everyday users press constantly **without** typing text.
 ///
-/// Keeping this list narrow is intentional: the classifier fails safe, so a
-/// missed key only means one extra armed keypress, never a lost keystroke.
+/// Delegates to [`super::key_policy::is_protected_key`] so the seed lives in one
+/// place; the [`KeyPolicy`] bitmap is built from exactly this set.
+#[cfg_attr(not(test), allow(dead_code))]
 fn is_ignored_key_vk(vk: u16) -> bool {
-    // Movement / action letters.
-    if GAMEPLAY_LETTERS.contains(&vk) {
-        return true;
-    }
-    // Hotbar digits (top row) and the numpad digit block.
-    if (0x30..=0x39).contains(&vk) || (0x60..=0x69).contains(&vk) {
-        return true;
-    }
-    // Function keys F1..F24.
-    if (0x70..=0x87).contains(&vk) {
-        return true;
-    }
-    matches!(
-        vk,
-        // Mouse buttons (never text typing keys).
-        0x01..=0x06
-        // Modifiers: generic and left/right variants.
-        | 0x10 | 0x11 | 0x12 | 0x5B | 0x5C | 0xA0..=0xA5
-        // Navigation, locks and system keys.
-        | 0x09  // Tab (scoreboard)
-        | 0x13  // Pause
-        | 0x14  // CapsLock
-        | 0x1B  // Esc (menus)
-        | 0x20  // Space (gameplay jump key - never interrupts gaming/clicking)
-        | 0x21  // PageUp
-        | 0x22  // PageDown
-        | 0x23  // End
-        | 0x24  // Home
-        | 0x25  // ArrowLeft
-        | 0x26  // ArrowUp
-        | 0x27  // ArrowRight
-        | 0x28  // ArrowDown
-        | 0x2C  // PrintScreen
-        | 0x2D  // Insert
-        | 0x5D  // Apps / context menu
-        | 0x90  // NumLock
-        | 0x91  // ScrollLock
-        // Numpad operators.
-        | 0x6A | 0x6B | 0x6D | 0x6E | 0x6F
-    )
+    super::key_policy::is_protected_key(vk)
 }
 
 /// `true` when this key could plausibly be produced **by typing text**.

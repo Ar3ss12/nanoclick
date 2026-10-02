@@ -433,11 +433,20 @@ async function checkForAppUpdates(manual = false) {
   }
 }
 
+// Module scope on purpose (the same reason as the file-toast `tick` further down):
+// a closure built inside startUpdateChecker() would be a fresh function per call,
+// and the literal call text stays greppable for the wiring tests.
+const updateCheckTick = () => checkForAppUpdates(false);
+
 function startUpdateChecker() {
   if (!TAURI) return;
-  console.log("[updater] starting checker; first check in 3s, then every", UPDATE_CHECK_INTERVAL_MS / 1000, "s");
+  console.log("[updater] starting checker; first check in 3s, then every", UPDATE_CHECK_INTERVAL_MS / 1000, "s while the window is visible");
   setTimeout(() => checkForAppUpdates(false), 3_000); // first check shortly after launch
-  setInterval(() => checkForAppUpdates(false), UPDATE_CHECK_INTERVAL_MS);
+  // Visibility-gated like the 1 s stats render and the 3 s toast poll: nobody can
+  // see the update bar while the window is hidden, so a 30-minute GitHub round trip
+  // from a hidden page is pure wake-up cost. (Deep sleep destroys the page
+  // outright, so this only matters with "hidden but alive".)
+  everyVisible(UPDATE_CHECK_INTERVAL_MS, updateCheckTick);
 }
 
 let currentConfig = {
@@ -1862,10 +1871,22 @@ function showFileToast(notice) {
   el.className = "toast toast-file-health toast-" + String(notice.level || "info").toLowerCase();
   const title = resolveNoticeText(notice.title, "File changed");
   const msg = resolveNoticeText(notice.message, "");
-  el.innerHTML = "<strong>" + escapeHtml(title) + "</strong><span>" + escapeHtml(msg) + "</span>";
+  // Title and body are separate lines, and the message sits in its own styled
+  // block. `</strong><span>` with no gap rendered as one run of text — the toast
+  // literally read "outsideconfig" (see docs/FIELD_BUG_REPORT.md §3).
+  el.innerHTML =
+    '<div class="toast-file-health__title">' + escapeHtml(title) + "</div>" +
+    (msg ? '<div class="toast-file-health__body">' + escapeHtml(msg) + "</div>" : "");
   el.style.cssText = "pointer-events:auto;margin-top:8px;padding:10px 14px;border-radius:8px;" +
     "background:rgba(20,24,32,.95);border:1px solid rgba(255,255,255,.12);" +
-    "font-size:13px;line-height:1.4;max-width:340px;box-shadow:0 8px 24px rgba(0,0,0,.45)";
+    "font-size:13px;line-height:1.4;max-width:340px;box-shadow:0 8px 24px rgba(0,0,0,.45);" +
+    // Severity has to be SEEN, not merely named: a warning about your own file
+    // being touched must not look identical to an informational note.
+    (String(notice.level || "info").toLowerCase() === "warn"
+      ? "border-left:3px solid #e0a33e;"
+      : String(notice.level || "info").toLowerCase() === "error"
+        ? "border-left:3px solid #e05561;"
+        : "border-left:3px solid #4a9eff;");
   host.appendChild(el);
   setTimeout(() => { if (el.parentNode) el.parentNode.removeChild(el); }, 6000);
 }
@@ -4223,7 +4244,7 @@ function setupPresetListeners() {
   bindBackdropClose("presetEditModal");
   bindBackdropClose("presetInspectModal");
 
-  bindPresetControl("exportPresetsBtn", "click", () => {
+  bindPresetControl("exportPresetsBtn", "click", async () => {
     try {
       const library = presetLibrary();
       // An empty library exports NOTHING. It must not export the factory list as if it were the
@@ -4232,21 +4253,17 @@ function setupPresetListeners() {
         showToast(getI18nText("presets_export_empty", {}, "No presets to export."), "warn");
         return;
       }
-      const json = JSON.stringify(library, null, 2);
-      const blob = new Blob([json], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = `nanoclick_presets_${Date.now()}.json`;
-      anchor.style.display = "none";
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      // Written from Rust: a `blob:` anchor download is silently dropped by
+      // WebView2, so this button used to do nothing at all.
+      const path = await invoke("export_presets_to_disk");
+      showToast(
+        getI18nText("presets_export_ok", { path }, "Presets saved to " + path),
+        "success"
+      );
       console.log(`[Presets] exported ${library.length} preset(s)`);
     } catch (err) {
       console.error("[Presets] export failed:", err);
-      alert(getI18nText("dialog_alert_export_presets_fail", {}, "Failed to export presets."));
+      showToast(getI18nText("dialog_alert_export_presets_fail", {}, "Failed to export presets."), "error");
     }
   });
 
@@ -5167,10 +5184,12 @@ function setRecordingActionCount(n) {
 }
 // Poll the macro list count to keep the overlay number roughly synced
 // (the backend counts normalized events; this only shows a non-zero visible total).
-setInterval(() => {
+// everyVisible(): no-op while the window is hidden in the tray — same rule as
+// poll_file_toasts and the stats render. Zero DOM/IPC cost when not on screen.
+everyVisible(500, () => {
   if (!isRecording) return;
   setRecordingActionCount(recordActionCount);
-}, 500);
+});
 
 // ── EMPTY MACRO TEMPLATE ──────────────────────────────────────────────
 function emptyMacro(name) {
@@ -6240,21 +6259,23 @@ onDomReady(() => {
   const exportBtn = document.getElementById("exportBackupBtn");
   const importBtn = document.getElementById("importBackupBtn");
   if (exportBtn) exportBtn.addEventListener("click", async () => {
+    // The page used to build a `blob:` URL and click a hidden anchor with a
+    // `download` attribute. WebView2 silently drops that navigation: the IPC
+    // succeeded and nothing arrived, with no exception for the `catch` to see.
+    // The backend writes the file and hands back the path instead.
     try {
-      const json = await invoke("export_full_backup");
-      const blob = new Blob([json], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = `nanoclick_backup_${new Date().toISOString().slice(0, 10)}.json`;
-      anchor.style.display = "none";
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      const path = await invoke("export_full_backup_to_disk");
+      if (typeof showToast === "function") {
+        showToast(
+          getI18nText("backup_exported_ok", { path }, "Backup saved to " + path),
+          "success"
+        );
+      }
     } catch (err) {
       console.error("[Backup] export failed:", err);
-      alert(getI18nText("dialog_alert_export_backup_fail", {}, "Failed to export backup."));
+      if (typeof showToast === "function") {
+        showToast(getI18nText("dialog_alert_export_backup_fail", {}, "Failed to export backup."), "error");
+      }
     }
   });
   if (importBtn) importBtn.addEventListener("click", () => {

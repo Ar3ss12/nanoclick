@@ -239,7 +239,7 @@ pub struct UiSettings {
     /// MEASURED with `scripts/measure-ram.ps1` (private working set = the Task
     /// Manager metric, Windows 10): the tree with the interface alive weighs
     /// ~117–123 MB (host `nanoclick.exe` ~5 MB + six `msedgewebview2.exe` helpers);
-    /// deep sleep leaves **4.98 MB** — the host alone, helpers 6 → 0 (−96 %).
+    /// deep sleep leaves **5.3 MB** (and 0% CPU) — the host alone, helpers 6 → 0 (−96 %).
     /// Hiding the window alone changes nothing (122.8 MB, same processes). The window is
     /// rebuilt on the next tray click and shown only after the fresh page reports
     /// boot success (Zero-Flash). Unsaved macro-editor drafts live only in the
@@ -288,6 +288,13 @@ pub struct UiSettings {
     /// Value = lockout window in ms (0 = disabled). UI checkbox maps to 0/600.
     #[serde(default)]
     pub typing_pause_ms: u32,
+    /// Keys treated as gameplay by the Typing Guard (layer B of
+    /// `docs/KEY_POLICY.md`): they never arm the lockout. Empty = the hardcoded
+    /// seed only. Keys the user bound to a hotkey are ignored automatically
+    /// (layer A) no matter what this list says, and cannot be removed by editing
+    /// it — that ordering is pinned by a unit test.
+    #[serde(default)]
+    pub typing_ignore_keys: Vec<String>,
     /// App-scope filter: "everywhere" (default) | "whitelist" | "blacklist".
     #[serde(default = "default_app_filter_mode")]
     pub app_filter_mode: String,
@@ -340,6 +347,7 @@ impl Default for UiSettings {
             remember_last_window_state: true,
             window_was_visible: true,
             typing_pause_ms: 600,
+            typing_ignore_keys: Vec::new(),
             app_filter_mode: default_app_filter_mode(),
             app_filter_list: Vec::new(),
             always_run_as_admin: false,
@@ -872,7 +880,12 @@ pub struct AppConfig {
     pub ui: UiSettings,
     #[serde(default = "default_presets")]
     pub presets: Vec<PresetItem>,
-    /// Window-title -> preset auto-switch rules (checked every 500 ms).
+    /// Window-title -> preset auto-switch rules. The poller is **mtime-gated**
+    /// (2026-09-27): `config.json` is only read when it actually changed, the
+    /// foreground lookup only runs when the rule set changed, and the loop exits
+    /// once shutdown latches. Before that it called `load()` every 1500 ms no
+    /// matter what — and `load()` used to rewrite `config.last_good.json` on every
+    /// clean parse, i.e. ~40 disk writes a minute while the app sat in the tray.
     #[serde(default)]
     pub app_profiles: Vec<AppProfile>,
     /// Optional pixel-watch trigger that stops the clicker when a screen
@@ -909,6 +922,14 @@ static SESSION_SNAPSHOT_DONE: std::sync::atomic::AtomicBool =
 
 pub struct ConfigManager {
     config_path: PathBuf,
+    /// Set once at boot so `save()` can mark its OWN write before it lands.
+    ///
+    /// The six writers that used to forget `mark_own_write` (onboarding, reset,
+    /// HUD toggle, mode toggle, image trigger, backup import) each produced a
+    /// false "File changed outside NanoClick" toast deterministically. Marking
+    /// inside `save()` makes the class unrepeatable instead of relying on every
+    /// call site remembering.
+    observer: std::sync::OnceLock<std::sync::Arc<crate::watcher::Observer>>,
 }
 
 impl ConfigManager {
@@ -939,7 +960,17 @@ impl ConfigManager {
         }
 
         let config_path = config_dir.join("config.json");
-        ConfigManager { config_path }
+        ConfigManager {
+            config_path,
+            observer: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Attach the boot observer so every `save()` marks its own write.
+    /// Called once from `lib.rs` right after the observer is constructed;
+    /// `OnceLock` keeps it idempotent and makes forgetting it harmless.
+    pub fn attach_observer(&self, observer: std::sync::Arc<crate::watcher::Observer>) {
+        let _ = self.observer.set(observer);
     }
 
     /// True when running in portable mode (--portable flag or nanoclick.ini present).
@@ -1041,6 +1072,15 @@ impl ConfigManager {
             if !parent.exists() {
                 let _ = fs::create_dir_all(parent);
             }
+        }
+
+        // Mark BEFORE the write: the observer can only see our echo on its next
+        // poll, and it must already know the write is ours by then. Doing it here
+        // rather than at each call site is what makes "someone forgot to mark"
+        // unrepeatable — six writers did forget it, and each produced a false
+        // "File changed outside NanoClick" toast on every invocation.
+        if let Some(observer) = self.observer.get() {
+            observer.mark_own_write("config");
         }
 
         let json = serde_json::to_string_pretty(config)
@@ -1183,7 +1223,10 @@ mod tests {
         let temp_dir = std::env::temp_dir().join(format!("nanoclick_test_stats_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         let _ = fs::create_dir_all(&temp_dir);
         let config_file = temp_dir.join("config.json");
-        let cm = ConfigManager { config_path: config_file.clone() };
+        let cm = ConfigManager {
+            config_path: config_file.clone(),
+            observer: std::sync::OnceLock::new(),
+        };
 
         let mut cfg = AppConfig::default();
         cfg.stats.total_clicks = 8888;

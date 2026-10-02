@@ -602,6 +602,19 @@
               </div>
               <div id="guardStatus" class="app-guard-status"></div>
               <div class="settings-row" style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.06);">
+                <span class="settings-label" data-i18n="settings_typing_ignore_label">Ignored keys (never treated as typing)</span>
+              </div>
+              <div class="settings-hint" data-i18n="settings_typing_ignore_hint">Keys you bind to a hotkey are always ignored automatically and cannot be removed.</div>
+              <div id="typingKeyEntryRow" style="display:flex;gap:8px;margin-top:6px;">
+                <button id="typingKeyCaptureBtn" class="preset-modal-btn cancel" style="flex:1;">
+                  <span data-i18n="settings_typing_ignore_capture">Press a key…</span>
+                </button>
+                <input id="typingKeyEntry" class="preset-input" placeholder="C, X, Z, V, B, J…" style="flex:1;" maxlength="64">
+                <button id="typingKeyAddBtn" class="preset-modal-btn save" data-i18n="settings_typing_ignore_add">Add</button>
+              </div>
+              <div id="typingKeyList" class="app-filter-list"></div>
+              <div id="typingKeyReport" class="settings-hint" style="margin-top:6px;"></div>
+              <div class="settings-row" style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.06);">
                 <span class="settings-label" data-i18n="settings_gui_lock_label">GUI Lock Duration (ms)</span>
                 <input type="number" id="guiLockDelayInput" class="num-input-right" min="500" max="5000" step="100" value="1500">
               </div>

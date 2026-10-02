@@ -17,6 +17,11 @@ const SmartGuard = {
   _onChange: null,
   _onChangeThrottled: null,
   _list: [],
+  /// User-configured ignored keys (layer B of docs/KEY_POLICY.md). Keys bound
+  /// to a hotkey are exempt automatically and are NOT stored here — the backend
+  /// owns that layer and the user cannot remove it.
+  _ignoreKeys: [],
+  _ignoreCapturing: false,
   _captureTimer: null,
   _capturing: false,
   /// Picker catalogue: { running: [...], installed: [...] } (lazy, cached).
@@ -145,6 +150,84 @@ const SmartGuard = {
         this.removeEntry(Number(btn.dataset.idx));
       });
     }
+
+    // ── Ignored keys (layer B) ──
+    // Names are deliberately distinct from the app-filter bindings above: a
+    // duplicate `const` in an ES module is a SyntaxError that kills the WHOLE
+    // file — no handler attaches, the UI stays painted and every Rust test
+    // still passes (see AGENTS.md §0).
+    const ignoreAddBtn = this._el("typingKeyAddBtn");
+    if (ignoreAddBtn) {
+      ignoreAddBtn.addEventListener("click", async () => {
+        const input = this._el("typingKeyEntry");
+        const raw = input?.value || "";
+        if (input) input.value = "";
+        // A comma-separated list is accepted for users who know the keys.
+        for (const part of String(raw).split(",")) {
+          if (part.trim()) await this.addIgnoredKey(part);
+        }
+      });
+    }
+    const ignoreEntry = this._el("typingKeyEntry");
+    if (ignoreEntry) {
+      ignoreEntry.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter") return;
+        e.preventDefault();
+        const raw = ignoreEntry.value || "";
+        ignoreEntry.value = "";
+        for (const part of String(raw).split(",")) {
+          if (part.trim()) this.addIgnoredKey(part);
+        }
+      });
+    }
+    const captureKeyBtn = this._el("typingKeyCaptureBtn");
+    if (captureKeyBtn) {
+      captureKeyBtn.addEventListener("click", () => this._startIgnoreCapture());
+    }
+    const ignoreKeyList = this._el("typingKeyList");
+    if (ignoreKeyList) {
+      ignoreKeyList.addEventListener("click", (e) => {
+        const btn = e.target.closest(".typing-key-del");
+        if (!btn) return;
+        this.removeIgnoredKey(btn.dataset.key);
+      });
+    }
+  },
+
+  /**
+   * One-shot key capture. Deliberately NOT a copy of the hotkey recorder: no
+   * modifier collection (a modifier is never a gameplay letter) and no TTL
+   * timer — one key, one add.
+   */
+  _startIgnoreCapture() {
+    if (this._ignoreCapturing) return;
+    const btn = this._el("typingKeyCaptureBtn");
+    this._ignoreCapturing = true;
+    const restore = btn ? btn.innerHTML : "";
+    if (btn) {
+      btn.innerHTML = '<span data-i18n="settings_typing_ignore_capture_waiting">Press any key…</span>';
+    }
+    const finish = () => {
+      document.removeEventListener("keydown", onKey, true);
+      this._ignoreCapturing = false;
+      if (btn) btn.innerHTML = restore;
+    };
+    const onKey = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      // Escape cancels: without this the capture would keep swallowing every
+      // key on the page until one is finally pressed.
+      if (e.key === "Escape") {
+        finish();
+        return;
+      }
+      const label = e.key && e.key.length === 1 ? e.key.toUpperCase() : e.key;
+      finish();
+      if (label && !["Shift", "Control", "Alt", "Meta"].includes(label)) {
+        this.addIgnoredKey(label);
+      }
+    };
+    document.addEventListener("keydown", onKey, true);
   },
 
   _handleTypingCbClick(e) {
@@ -535,7 +618,12 @@ const SmartGuard = {
     this._list = Array.isArray(ui.app_filter_list)
       ? ui.app_filter_list.map((s) => String(s).trim().toLowerCase()).filter(Boolean)
       : [];
+    this._ignoreKeys = Array.isArray(ui.typing_ignore_keys)
+      ? ui.typing_ignore_keys.map((s) => String(s).trim()).filter(Boolean)
+      : [];
     this.render();
+    this._renderIgnoreKeys();
+    this._refreshKeyPolicyReport();
   },
 
   /** UI -> Config. Called from main.js saveConfig(). */
@@ -550,6 +638,117 @@ const SmartGuard = {
 
     config.ui.app_filter_mode = this._mode();
     config.ui.app_filter_list = this._list.slice();
+    config.ui.typing_ignore_keys = this._ignoreKeys.slice();
+  },
+
+  /* ── ignored keys (layer B) ───────────────────────────────────── */
+
+  /** Ask the backend what is in force, so the list can show locked keys. */
+  async _refreshKeyPolicyReport() {
+    const host = this._el("typingKeyReport");
+    if (!host || !window.__TAURI__?.core?.invoke) return;
+    try {
+      const inv = window.__TAURI__.core.invoke;
+      const report = await inv("get_key_policy");
+      const extra = (report?.non_seed_keys || []).length;
+      host.textContent = this._t(
+        "settings_typing_ignore_report",
+        { total: report?.exempt_total ?? 0, extra },
+        `${report?.exempt_total ?? 0} keys ignored (${extra} added by you or bound to hotkeys)`
+      );
+    } catch (_) {
+      // Diagnostics only — the list itself renders without it.
+    }
+  },
+
+  /** Render the ignored-key chips. Bound keys appear locked (no delete). */
+  _renderIgnoreKeys(locked) {
+    const list = this._el("typingKeyList");
+    if (!list) return;
+    const lockedSet = new Set((locked || []).map((k) => String(k)));
+    const all = this._ignoreKeys.concat([...lockedSet].filter((k) => !this._ignoreKeys.includes(k)));
+    if (all.length === 0) {
+      list.innerHTML = `<div style="color:var(--text-dim);font-size:12px;">${this._esc(
+        this._t("settings_typing_ignore_empty", "No extra keys — the built-in set applies.")
+      )}</div>`;
+      return;
+    }
+    list.innerHTML = all.map((key) => {
+      const isLocked = lockedSet.has(key);
+      return `
+        <div style="display:flex;align-items:center;gap:6px;font-size:12px;">
+          <span style="flex:1;background:var(--bg-elev);border:1px solid var(--border);border-radius:5px;padding:4px 8px;font-family:monospace;">${this._esc(key)}</span>
+          ${isLocked
+            ? `<span title="${this._esc(this._t("settings_typing_ignore_locked", "Bound to a hotkey — always ignored"))}">🔒</span>`
+            : `<button class="typing-key-del preset-modal-btn cancel" data-key="${this._esc(key)}" style="flex:0 0 auto;padding:3px 8px;" title="${this._esc(this._t("settings_typing_ignore_remove", "Remove"))}">✕</button>`}
+        </div>`;
+    }).join("");
+  },
+
+  /**
+   * Add one key after asking the backend why it cannot be added.
+   * `validate_ignore_key` is what teaches the two-layer model: it reports
+   * "already ignored" for the seed and "already bound" for a hotkey key.
+   */
+  async addIgnoredKey(raw) {
+    const label = String(raw || "").trim();
+    if (!label) return;
+    const inv = window.__TAURI__?.core?.invoke;
+    let alreadyBound = false;
+    if (inv) {
+      try {
+        const rep = await inv("validate_ignore_key", {
+          label,
+          alreadyInList: this._ignoreKeys.some((k) => k.toLowerCase() === label.toLowerCase()),
+        });
+        if (!rep?.ok) {
+          const status = this._el("typingKeyReport");
+          if (status) {
+            const msg = rep?.already_bound
+              ? this._t("settings_typing_ignore_already_bound", "Already ignored automatically (bound to a hotkey).")
+              : rep?.reason === "already_ignored"
+                ? this._t("settings_typing_ignore_protected", "Already ignored by default.")
+                : rep?.reason === "duplicate"
+                  ? this._t("settings_typing_ignore_duplicate", "Already in your list.")
+                  : this._t("settings_typing_ignore_unknown", "Unknown key.");
+            status.textContent = label + ": " + msg;
+          }
+          if (rep?.already_bound) {
+            await this._refreshKeyPolicyReport();
+            this._renderIgnoreKeys(await this._boundKeyLabels());
+          }
+          return;
+        }
+        alreadyBound = !!rep?.already_bound;
+      } catch (_) {
+        // If validation is unavailable, fall through and let the config round-trip decide.
+      }
+    }
+    const normalized = alreadyBound ? label : label.charAt(0).toUpperCase() + label.slice(1);
+    if (!this._ignoreKeys.some((k) => k.toLowerCase() === normalized.toLowerCase())) {
+      this._ignoreKeys.push(normalized);
+      this._ignoreKeys.sort();
+      this._changed();
+    }
+    this._renderIgnoreKeys(await this._boundKeyLabels());
+  },
+
+  async removeIgnoredKey(key) {
+    this._ignoreKeys = this._ignoreKeys.filter((k) => k !== key);
+    this._changed();
+    this._renderIgnoreKeys(await this._boundKeyLabels());
+  },
+
+  /** Labels currently exempt ONLY because they are bound to a hotkey. */
+  async _boundKeyLabels() {
+    const inv = window.__TAURI__?.core?.invoke;
+    if (!inv) return [];
+    try {
+      const report = await inv("get_key_policy");
+      return report?.non_seed_keys || [];
+    } catch (_) {
+      return [];
+    }
   },
 
   /* ── list editing ──────────────────────────────────────────── */

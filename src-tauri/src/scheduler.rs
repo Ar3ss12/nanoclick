@@ -192,6 +192,16 @@ pub struct ClickScheduler {
     visual_ripple: Arc<AtomicBool>,
     /// Smart Guard: freezes clicks briefly while the user types text.
     typing_guard: Arc<TypingGuard>,
+    /// Which keys count as "typing" — the hardcoded seed, the user's
+    /// `ui.typing_ignore_keys` list, and (from the hook) every key bound to a
+    /// hotkey. Layer A of `docs/KEY_POLICY.md`: a key the user bound can never
+    /// arm the lockout that gates it.
+    key_policy: Arc<crate::guard::KeyPolicy>,
+    /// The user's ignored-key list, kept so `get_config()` can hand it back.
+    /// A `get_config()` -> `set_config()` round-trip IS real (tests, and the
+    /// preset path in `windows/mod.rs`), so returning an empty list would make
+    /// the user's keys silently vanish on the next save.
+    typing_ignore_keys: Arc<Mutex<Vec<String>>>,
     /// Smart Guard: restricts clicking to (or away from) selected apps.
     app_filter: Arc<AppFilter>,
     /// Smart Guard: auto-pause when the foreground app CHANGES mid-run
@@ -308,6 +318,8 @@ impl ClickScheduler {
             image_trigger_should_stop: Arc::new(AtomicBool::new(false)),
             visual_ripple: Arc::new(AtomicBool::new(initial_cfg.visual_ripple)),
             typing_guard: Arc::new(TypingGuard::new(initial_cfg.typing_pause_ms)),
+            key_policy: Arc::new(crate::guard::KeyPolicy::new()),
+            typing_ignore_keys: Arc::new(Mutex::new(Vec::new())),
             app_filter: Arc::new(AppFilter::new(
                 &initial_cfg.app_filter_mode,
                 &initial_cfg.app_filter_list,
@@ -324,6 +336,12 @@ impl ClickScheduler {
     /// never be (re)started while the user is typing.
     pub fn typing_guard(&self) -> &TypingGuard {
         &self.typing_guard
+    }
+
+    /// Key classification policy handle. The hook reads it on every key-down
+    /// (lock-free) and writes it only between event batches.
+    pub fn key_policy(&self) -> &crate::guard::KeyPolicy {
+        &self.key_policy
     }
 
     /// Focus Guard handle (written by config saves, read by the click loop).
@@ -378,6 +396,9 @@ impl ClickScheduler {
             sequence_points: self.sequence_points.lock().unwrap().clone(),
             visual_ripple: self.visual_ripple.load(Ordering::Relaxed),
             typing_pause_ms: self.typing_guard.pause_ms(),
+            // Read back through the scheduler so a `get_config()` ->
+            // `set_config()` round-trip preserves the user's ignored keys.
+            typing_ignore_keys: self.typing_ignore_keys.lock().unwrap().clone(),
             app_filter_mode: self.app_filter.mode().as_config_str().to_string(),
             app_filter_list: self.app_filter.list(),
             pause_on_focus_loss: self.focus_guard.is_enabled(),
@@ -446,6 +467,12 @@ impl ClickScheduler {
         self.gui_lock_ms.store(cfg.gui_lock_ms, Ordering::Relaxed);
         // Smart Guard state (typing freeze window + app/window scope).
         self.typing_guard.set_pause_ms(cfg.typing_pause_ms);
+        // Layer B of the key policy: the user's ignored-key list. Deliberately
+        // does NOT clear layer A — a config save must never un-exempt a bound
+        // hotkey (`a_user_cannot_unexempt_a_bound_hotkey`); the hook re-applies
+        // the binding shield on its next re-parse.
+        self.key_policy.rebuild(&cfg.typing_ignore_keys);
+        *self.typing_ignore_keys.lock().unwrap() = cfg.typing_ignore_keys;
         self.app_filter
             .set(&cfg.app_filter_mode, &cfg.app_filter_list);
         // Focus Guard: sync the enabled flag. Disarm ONLY on a real flag flip:
@@ -1031,6 +1058,20 @@ impl ClickScheduler {
             // Smart Guard: TTL-memoized foreground lookup for the app filter
             // (2 syscalls, so it must never run per click).
             let fg_cache = ForegroundCache::new();
+            // ── STOP-EVENT HANDLE: snapshot once, reuse for the entire worker ──
+            // `stop_event_lock` is a Mutex<Option<Arc<AtomicBool>>>. Acquiring it
+            // on every click (200–600 lock/unlock pairs per second at high CPS on
+            // the HIGHEST-priority thread) causes false-sharing with the signal
+            // writer (set_active → signal_stop_event). The handle is stable: it
+            // is created BEFORE this worker is spawned (set_active: store(false) →
+            // reset → spawn_worker); the preemption path swaps it only after the
+            // old worker's stop event has been signalled. One clone here is safe
+            // and correct for the full lifetime of this worker.
+            let stop_handle: crate::platform::NativeEventHandle = stop_event_lock
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("stop_event must be initialized before spawn_worker");
             // Focus Guard: arm the session baseline + shared watcher state.
             // The watcher thread is spawned ONLY while the guard is enabled
             // (guard OFF = zero threads, zero syscalls). It polls the
@@ -1043,7 +1084,7 @@ impl ClickScheduler {
                 focus_guard_arc.arm(fg_cache.exe());
                 focus_watch_stop.reset();
                 let wake_handle: Option<crate::platform::NativeEventHandle> =
-                    stop_event_lock.lock().unwrap().clone();
+                    Some(stop_handle.clone());
                 if let Ok(mut g) = focus_watch_stop.wake.lock() {
                     *g = wake_handle;
                 }
@@ -1220,12 +1261,13 @@ impl ClickScheduler {
                 });
             }
 
+
+
             // ── START DELAY (configurable) ─────────────────────────────
             let cur_start_delay = start_delay_arc.load(Ordering::Relaxed);
             if cur_start_delay > 0 {
-                let event_handle = stop_event_lock.lock().unwrap().clone().expect("stop_event");
                 let target_start = Instant::now() + Duration::from_millis(cur_start_delay);
-                let wait_ok = timer.wait_until(target_start, event_handle);
+                let wait_ok = timer.wait_until(target_start, stop_handle.clone());
                 if !wait_ok || !active.load(Ordering::Relaxed) {
                     active.store(false, Ordering::Relaxed);
                 }
@@ -1318,9 +1360,7 @@ impl ClickScheduler {
                     // Sleep for repeat_interval before next batch
                     if cur_repeat_interval > 0 {
                         let target = Instant::now() + Duration::from_millis(cur_repeat_interval);
-                        let event_handle =
-                            stop_event_lock.lock().unwrap().clone().expect("stop_event");
-                        let success = timer.wait_until(target, event_handle);
+                        let success = timer.wait_until(target, stop_handle.clone());
                         if !success || !active.load(Ordering::Relaxed) {
                             break;
                         }
@@ -1413,9 +1453,7 @@ impl ClickScheduler {
                             dispatched += 1;
                             if dispatched < 2 {
                                 let target = Instant::now() + Duration::from_millis(50);
-                                let event_handle =
-                                    stop_event_lock.lock().unwrap().clone().expect("stop_event");
-                                if !timer.wait_until(target, event_handle)
+                                if !timer.wait_until(target, stop_handle.clone())
                                     || !active.load(Ordering::Relaxed)
                                 {
                                     break;
@@ -1429,9 +1467,8 @@ impl ClickScheduler {
                     }
 
                     // Hold for hold_duration_ms
-                    let event_handle = stop_event_lock.lock().unwrap().clone().expect("stop_event");
                     let target_down = Instant::now() + Duration::from_millis(cur_hold_duration);
-                    if !timer.wait_until(target_down, event_handle)
+                    if !timer.wait_until(target_down, stop_handle.clone())
                         || !active.load(Ordering::Relaxed)
                     {
                         platform_backend.release_mouse_hold(cur_click_spec.button);
@@ -1443,10 +1480,8 @@ impl ClickScheduler {
 
                     // Pause for hold_interval_ms if > 0
                     if cur_hold_interval > 0 {
-                        let event_handle2 =
-                            stop_event_lock.lock().unwrap().clone().expect("stop_event");
                         let target_up = Instant::now() + Duration::from_millis(cur_hold_interval);
-                        if !timer.wait_until(target_up, event_handle2)
+                        if !timer.wait_until(target_up, stop_handle.clone())
                             || !active.load(Ordering::Relaxed)
                         {
                             break;
@@ -1501,9 +1536,8 @@ impl ClickScheduler {
                     batch_click_count += 1;
                     emit_ripple_if_enabled(&seq_spec);
 
-                    let event_handle = stop_event_lock.lock().unwrap().clone().expect("stop_event");
                     let target_down = Instant::now() + Duration::from_secs_f64(hold_ms / 1000.0);
-                    if !timer.wait_until(target_down, event_handle.clone()) || !active.load(Ordering::Relaxed) {
+                    if !timer.wait_until(target_down, stop_handle.clone()) || !active.load(Ordering::Relaxed) {
                         mouse_guard.release_up();
                         break;
                     }
@@ -1511,7 +1545,7 @@ impl ClickScheduler {
 
                     let seq_delay = if p.delay_ms > 0 { p.delay_ms as f64 } else { release_ms };
                     let target_up = Instant::now() + Duration::from_secs_f64(seq_delay / 1000.0);
-                    if !timer.wait_until(target_up, event_handle) || !active.load(Ordering::Relaxed) {
+                    if !timer.wait_until(target_up, stop_handle.clone()) || !active.load(Ordering::Relaxed) {
                         break;
                     }
                     continue;
@@ -1542,9 +1576,8 @@ impl ClickScheduler {
                 emit_ripple_if_enabled(&cur_click_spec);
 
                 // Hold phase (safe against early break)
-                let event_handle = stop_event_lock.lock().unwrap().clone().expect("stop_event");
                 let target_down = Instant::now() + Duration::from_secs_f64(hold_ms / 1000.0);
-                if !timer.wait_until(target_down, event_handle.clone()) || !active.load(Ordering::Relaxed) {
+                if !timer.wait_until(target_down, stop_handle.clone()) || !active.load(Ordering::Relaxed) {
                     mouse_guard.release_up();
                     break;
                 }
@@ -1560,7 +1593,7 @@ impl ClickScheduler {
                 // Double click support
                 if cur_click_spec.click_type == crate::platform::backend::ClickType::Double {
                     let gap_target = Instant::now() + Duration::from_millis(50);
-                    if !timer.wait_until(gap_target, event_handle.clone()) || !active.load(Ordering::Relaxed) {
+                    if !timer.wait_until(gap_target, stop_handle.clone()) || !active.load(Ordering::Relaxed) {
                         break;
                     }
                     mouse_guard.press_down();
@@ -1568,7 +1601,7 @@ impl ClickScheduler {
                     batch_click_count += 1;
                     emit_ripple_if_enabled(&cur_click_spec);
                     let target_down2 = Instant::now() + Duration::from_secs_f64(hold_ms / 1000.0);
-                    if !timer.wait_until(target_down2, event_handle.clone()) || !active.load(Ordering::Relaxed) {
+                    if !timer.wait_until(target_down2, stop_handle.clone()) || !active.load(Ordering::Relaxed) {
                         mouse_guard.release_up();
                         break;
                     }
@@ -1577,7 +1610,7 @@ impl ClickScheduler {
 
                 // Release duration between clicks
                 let target_up = Instant::now() + Duration::from_secs_f64(release_ms / 1000.0);
-                if !timer.wait_until(target_up, event_handle) || !active.load(Ordering::Relaxed) {
+                if !timer.wait_until(target_up, stop_handle.clone()) || !active.load(Ordering::Relaxed) {
                     break;
                 }
             }

@@ -535,6 +535,17 @@ fn test_background_memory_guard_wiring() {
         main_js.contains("everyVisible(3000, tick)"),
         "the toast polling must be gated by visibility too"
     );
+    // The 30-minute GitHub update check used to run from a hidden page as well:
+    // nobody can see the update bar while the window is hidden, so the round trip
+    // was pure wake-up cost (2026-09-27).
+    assert!(
+        main_js.contains("everyVisible(UPDATE_CHECK_INTERVAL_MS, updateCheckTick)"),
+        "the periodic update check must be gated by visibility"
+    );
+    assert!(
+        !main_js.contains("setInterval(() => checkForAppUpdates(false)"),
+        "an ungated 30-minute update interval keeps a hidden page talking to GitHub"
+    );
 }
 
 /// `main.js` is loaded as an ES module (`<script type="module">`).
@@ -1713,6 +1724,37 @@ fn test_tauri_config_is_valid_json_and_version_matches() {
         cfg["version"].as_str(),
         Some(env!("CARGO_PKG_VERSION")),
         "tauri.conf.json `version` must match Cargo.toml — release.ps1 -Tag reads both"
+    );
+}
+
+/// The bundle identifier must not end with `.app` (tauri-cli `build.rs::setup`,
+/// commit `8ee14a8`, issue #12674).
+///
+/// Why a tripwire and not just a comment: on Windows the CLI only prints
+/// `Warn The bundle identifier "…" ends with .app. This is not recommended…`
+/// and the NSIS build proceeds — but the SAME identifier is a hard
+/// `log::error!` + `std::process::exit(1)` when the target is macOS, and it is
+/// also the path of the WebView2 profile (`%LOCALAPPDATA%\<identifier>\EBWebView`)
+/// and of the single-instance mutex (`{identifier}-sim`). The rename
+/// (`com.nanoclick.app` → `com.nanoclick.desktop`, 2026-09-27) therefore has to
+/// stay renamed; this test is what keeps a future edit from re-introducing the
+/// warning that used to be copy-pasted into every release log.
+#[test]
+fn test_tauri_identifier_avoids_the_bundle_extension_suffix() {
+    let raw = include_str!("../tauri.conf.json");
+    let cfg: serde_json::Value = serde_json::from_str(raw).expect("tauri.conf.json must be valid JSON");
+    let identifier = cfg["identifier"]
+        .as_str()
+        .expect("tauri.conf.json must carry a string `identifier`");
+    assert!(
+        !identifier.ends_with(".app"),
+        "identifier `{identifier}` ends with `.app`: macOS refuses to build it \
+         (tauri-cli exits 1) and every Windows build logs the `.app` warning"
+    );
+    assert_eq!(
+        identifier, "com.nanoclick.desktop",
+        "changing the identifier moves the WebView2 profile dir and the \
+         single-instance mutex — do it deliberately, with a release note"
     );
 }
 
@@ -3330,4 +3372,375 @@ fn test_preset_writes_are_verified_and_cannot_be_silent() {
     }
 }
 
+/// The app-profile poller must not read the config from disk on every tick.
+///
+/// MEASURED 2026-09-27: the thread called `cm.load()` every 1500 ms whether or not
+/// the user had a single app profile (the factory default is an empty list), and
+/// `load()` ends in `ensure_config_file`, which (until the same day) rewrote
+/// `config.last_good.json` on every clean parse. A process "asleep" in the tray
+/// therefore did ~40 JSON parses + disk writes a minute — the idle CPU/disk
+/// sawtooth. The required shape is: a cheap mtime gate that short-circuits before
+/// any config access, the parse only after a real change, the foreground lookup
+/// only when the rule SET changed, and a yield to the shutdown flush.
+#[test]
+fn test_app_profile_poller_is_mtime_gated() {
+    fn section<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
+        let from = src.find(start).unwrap_or_else(|| panic!("`{start}` not found"));
+        match src[from..].find(end) {
+            Some(i) => &src[from..from + i],
+            None => &src[from..],
+        }
+    }
 
+    let lib_src = include_str!("../src/lib.rs");
+    let poller = section(
+        lib_src,
+        "App-profile auto-switch thread",
+        "// v4.2 — start hotkeys",
+    );
+
+    // Code lines only: the section's header comment explains the bug it fixes
+    // ("this loop called `cm.load()` every 1500 ms"), which a naive substring
+    // search matches before the gate.
+    let code_only: String = poller
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        code_only.contains("std::fs::metadata(&config_path)"),
+        "the tick must start with one metadata() call"
+    );
+    let gate_at = code_only
+        .find("mtime == last_seen_mtime")
+        .expect("the unchanged-mtime short-circuit is the whole point of the fix");
+    let load_at = code_only
+        .find("cm.load()")
+        .expect("the expensive parse must still exist, behind the gate");
+    assert!(
+        gate_at < load_at,
+        "`cm.load()` must sit AFTER the mtime gate — an unconditional load is the bug"
+    );
+    assert!(
+        code_only.contains("if current != profiles"),
+        "a changed CPS/theme must not invalidate the cached rule list (and must never \
+         cost a config re-read on the next tick)"
+    );
+    assert!(
+        code_only.contains("SHUTTING_DOWN.load"),
+        "the poller must stop touching the config once shutdown has latched"
+    );
+    assert!(
+        code_only.contains("last_preset = None"),
+        "a re-armed rule has to be able to fire again"
+    );
+}
+
+/// Every production `setInterval` in main.js must be wrapped in `everyVisible()`
+/// so timers are no-ops while the window is hidden in the tray.
+///
+/// ## Why this tripwire exists
+/// A naked `setInterval` keeps the JS engine ticking on every DOM clock cycle even
+/// while the window is minimised to tray (or behind another window with WebView2
+/// occlusion active). `everyVisible()` checks `document.visibilityState !==
+/// "hidden"` on each tick and short-circuits, giving the CPU/GPU process a chance
+/// to go idle. Without this gate a bare 500 ms counter caused a measurable sawtooth
+/// spike in CPU profiler traces at rest (2026-09-28).
+///
+/// ## What is allowed
+/// * `everyVisible(…)` calls — they use setInterval internally but are gated.
+/// * `setInterval` inside debug-only code paths (`_logFlushTimer = setInterval`)
+///   that start ONLY when debug mode is on and are cleared when it is turned off.
+/// * `setInterval` in one-shot helpers (position picker, start-delay countdown,
+///   reset confirmation, onboarding wizard) that are created and cleared within
+///   a single user interaction.
+#[test]
+fn test_all_production_set_intervals_are_gated_by_every_visible() {
+    let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
+    let key = tauri::utils::assets::AssetKey::from("main.js");
+    let bytes = ctx.assets().get(&key).expect("main.js must be embedded");
+    let js = String::from_utf8_lossy(&bytes);
+
+    // Known one-shot / debug-only prefixes that are legitimately NOT everyVisible.
+    let known_prefixes = [
+        "return setInterval(",             // implementation of everyVisible() itself
+        "_logFlushTimer = setInterval(",  // debug-mode only; cleared in setDebugMode(false)
+        "resetTimer = setInterval(",       // one-shot reset confirm; cleared on exit
+        "pickPosInterval = setInterval(",  // position picker; cleared after capture
+        "startDelayTimer = setInterval(",  // start-delay countdown; cleared on stop/start
+        "onboardingTimer = setInterval(",  // onboarding wizard; cleared on close
+    ];
+
+    let mut naked: Vec<(usize, String)> = Vec::new();
+
+    for (lineno, line) in js.lines().enumerate() {
+        let t = line.trim();
+        if t.starts_with("//") || t.starts_with("/*") || t.starts_with("*") { continue; }
+        if t.contains("everyVisible(") { continue; }
+        if !t.contains("setInterval(") { continue; }
+        if known_prefixes.iter().any(|p| t.contains(p)) { continue; }
+        naked.push((lineno + 1, t.to_string()));
+    }
+
+    assert!(
+        naked.is_empty(),
+        "main.js has bare setInterval() call(s) not wrapped in everyVisible().\n\
+         Timers that run unconditionally keep the JS engine and GPU compositor awake \
+         while the window is hidden in the tray. Wrap with everyVisible(ms, fn).\n\n\
+         Offending lines:\n{}",
+        naked
+            .iter()
+            .map(|(n, l)| format!("  line {n}: {l}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+// ── Key policy wiring (docs/KEY_POLICY.md) ─────────────────────────────
+
+/// The hook must classify keys through the policy, never through the static
+/// free function.
+///
+/// This is the wiring half of the `J` bug: `is_text_keypress_vk` cannot know
+/// which keys the user bound, so a toggle bound to `J` both stopped the clicker
+/// (kill-switch) and was refused for starting it (guard veto) on one press.
+/// The behavioural test lives in `key_policy.rs`; this one pins the call sites.
+#[test]
+fn the_hook_uses_the_policy_not_the_free_function() {
+    let src = include_str!("../src/platform/windows/mod.rs");
+
+    for needle in [
+        "scheduler.key_policy().is_text_keypress(event.vk)",
+        "scheduler.key_policy().exempt_all(bindings.policy_keys())",
+    ] {
+        assert!(
+            src.contains(needle),
+            "the hook must call `{needle}` — this is the binding shield"
+        );
+    }
+
+    assert!(
+        !src.contains("guard::is_text_keypress_vk(event.vk)"),
+        "the hook must NOT classify keys with the static `is_text_keypress_vk`; \
+         it cannot see the user's bindings (see docs/KEY_POLICY.md §2)"
+    );
+    assert!(
+        !src.contains("crate::guard::is_typable_vk("),
+        "the toggle-confirmation gate must go through `key_policy().is_typable`"
+    );
+}
+
+/// Layer A must be re-applied after every re-parse, and the ordering is the
+/// contract: a config save may run `rebuild` in between, never after.
+#[test]
+fn the_binding_shield_is_applied_on_every_reparse() {
+    let src = include_str!("../src/platform/windows/mod.rs");
+    let reparse = src
+        .find("bindings = HotkeyBindings::from_snapshot(&snapshot);")
+        .expect("the hook must re-parse bindings on a version change");
+    let shield = src
+        .find("exempt_all(bindings.policy_keys())")
+        .expect("the hook must exempt every bound key");
+    assert!(
+        shield > reparse,
+        "the binding shield must be applied AFTER the re-parse, otherwise a \
+         re-parse would leave stale exemptions"
+    );
+
+    // Every group contributes, including the per-preset ones and modifiers.
+    let start = src
+        .find("fn policy_keys(&self)")
+        .expect("HotkeyBindings must expose policy_keys()");
+    let policy_keys = &src[start..];
+    for group in [
+        "self.toggle",
+        "self.mode_switch",
+        "self.emergency_stop",
+        "self.speed_up",
+        "self.slow_down",
+        "self.capture_pos",
+        "self.record_toggle",
+        "self.preset_slots",
+        "self.preset_hotkeys",
+    ] {
+        assert!(
+            policy_keys.contains(group),
+            "policy_keys() must contribute `{group}` — a bound key must never arm the guard"
+        );
+    }
+    assert!(
+        policy_keys.contains("combo.required.iter().copied()"),
+        "policy_keys() must include required modifiers too (Ctrl+J holds Ctrl)"
+    );
+}
+
+/// The user's ignored-key list must be persisted and rebuilt, and the two
+/// layers must be wired end to end.
+#[test]
+fn ignored_keys_roundtrip_through_config() {
+    let cm = include_str!("../src/config_manager.rs");
+    let cfg = include_str!("../src/config.rs");
+    let sched = include_str!("../src/scheduler.rs");
+    let lib = include_str!("../src/lib.rs");
+
+    assert!(
+        cm.contains("pub typing_ignore_keys: Vec<String>"),
+        "UiSettings must persist the ignored-key list"
+    );
+    assert!(
+        cfg.contains("typing_ignore_keys"),
+        "Config must carry the list to the scheduler"
+    );
+    assert!(
+        sched.contains("self.key_policy.rebuild(&cfg.typing_ignore_keys)"),
+        "set_config must rebuild layer B from the user's list"
+    );
+    // get_config -> set_config is a real round-trip; dropping the list there
+    // would erase the user's keys on the next save.
+    assert!(
+        sched.contains("typing_ignore_keys: self.typing_ignore_keys.lock().unwrap().clone()"),
+        "get_config must hand the list back so a round-trip preserves it"
+    );
+    assert!(
+        lib.contains("commands::get_key_policy")
+            && lib.contains("commands::validate_ignore_key")
+            && lib.contains("commands::get_default_ignored_keys"),
+        "the three key-policy commands must be registered"
+    );
+}
+
+/// The watcher must not toast our own saves: the grace window has to outlive
+/// one poll, and marking now happens inside `save()` for every writer.
+#[test]
+fn our_own_writes_are_never_reported_as_external() {
+    let watcher = include_str!("../src/watcher.rs");
+    let cm = include_str!("../src/config_manager.rs");
+    let lib = include_str!("../src/lib.rs");
+
+    assert!(
+        watcher.contains("OWN_WRITE_GRACE_MS: u64 = POLL_INTERVAL_MS + DEBOUNCE_MS"),
+        "the grace window must be DERIVED from the poll interval, so raising one \
+         can never raise only the other (that mismatch shipped the false toast)"
+    );
+
+    // Centralised marking: `save()` marks, so no call site can forget it.
+    let save = cm
+        .split("pub fn save(&self, config: &AppConfig)")
+        .nth(1)
+        .expect("ConfigManager::save must exist");
+    assert!(
+        save.contains("mark_own_write(\"config\")"),
+        "`save()` must mark its own write before writing"
+    );
+    assert!(
+        lib.contains("config_manager.attach_observer("),
+        "the boot observer must be attached to the config manager"
+    );
+
+    // The two manual marks are gone; only macros/presets (different files,
+    // written outside `save()`) still mark explicitly.
+    assert_eq!(
+        lib.matches("mark_own_write(\"config\")").count(),
+        0,
+        "no call site may mark a config write by hand any more — `save()` does it"
+    );
+}
+
+/// The spec must survive deletion of this documentation set.
+#[test]
+fn test_key_policy_doc_exists_and_names_the_invariant() {
+    for doc in ["docs/KEY_POLICY.md", "docs/IGNORED_KEYS_FEATURE.md"] {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join(doc);
+        assert!(
+            path.exists(),
+            "{doc} must exist — it carries the two-layer model and the ordering rule"
+        );
+    }
+}
+
+/// The UIPI check must sit in the choke point every click passes through, with
+/// the throttle in front of the system calls.
+#[test]
+fn the_uipi_check_covers_every_click_path() {
+    let win = include_str!("../src/platform/windows/mod.rs");
+    let uipi = include_str!("../src/platform/windows/uipi.rs");
+
+    assert!(
+        win.contains("uipi_guard_check(x, y)"),
+        "`mouse_down` must run the UIPI check — it is the one path every click \
+         funnels through (single/double, multi-point, macro executor)"
+    );
+    assert!(
+        !win.contains("is_target_point_elevated(target_x, target_y)"),
+        "the per-click copy inside `click_mouse` must be gone; a second copy is \
+         what left `click_type: single` with no alert at all"
+    );
+
+    // Throttle FIRST: the timestamp check must precede every system call,
+    // otherwise a 150 CPS loop pays WindowFromPoint + OpenProcess per click.
+    let start = uipi
+        .find("pub fn uipi_guard_check")
+        .expect("uipi_guard_check must exist");
+    let body = &uipi[start..];
+    let throttle = body
+        .find("UIPI_ALERT_THROTTLE_MS")
+        .expect("the throttle must be inside the guard");
+    let point_check = body
+        .find("is_target_point_elevated(x, y)")
+        .expect("the point check must still run, behind the throttle");
+    assert!(
+        throttle < point_check,
+        "the throttle MUST come before the system calls (Zero-Jitter)"
+    );
+}
+
+/// Every file the watcher judges must be marked by its own writer.
+#[test]
+fn every_watched_file_is_marked_by_its_writer() {
+    let cmds = include_str!("../src/commands/tauri_commands.rs");
+    // macros and presets are written outside `ConfigManager::save()` (which only
+    // handles the config), so they must still mark explicitly — one mark per
+    // writer, never one per call site.
+    for key in ["macros", "presets"] {
+        assert!(
+            cmds.contains(&format!("mark_own_write(\"{key}\")")),
+            "the `{key}` store is written outside `save()` and must mark its own writes"
+        );
+    }
+    let save = cmds;
+    assert!(
+        !save.contains("mark_own_write(\"config\")"),
+        "the config is marked inside `ConfigManager::save()`, not at call sites"
+    );
+}
+
+/// The policy must stay lock-free: it is read from the `WH_KEYBOARD_LL` path.
+#[test]
+fn the_key_policy_takes_no_lock_on_the_hot_path() {
+    let src = include_str!("../src/guard/key_policy.rs");
+    let struct_body = src
+        .split("pub struct KeyPolicy")
+        .nth(1)
+        .expect("KeyPolicy must exist");
+    let fields: String = struct_body.split('}').next().unwrap_or_default().to_string();
+    for forbidden in ["Mutex", "RwLock", "lock()", "String", "Vec<"] {
+        assert!(
+            !fields.contains(forbidden),
+            "KeyPolicy must hold no `{forbidden}` — it is read on the hook path"
+        );
+    }
+    assert!(
+        fields.contains("AtomicU64"),
+        "KeyPolicy must be a bitmap of atomics"
+    );
+    // Two layers, two bitmaps: that is what makes "a config save cannot
+    // un-exempt a bound hotkey" structural instead of a documented hope.
+    assert!(
+        fields.contains("words_seed") && fields.contains("words_bound"),
+        "layer B (seed + user list) and layer A (binding shield) must be \
+         separate bitmaps — one bitmap would let `rebuild` clear the shield"
+    );
+}
