@@ -36,12 +36,35 @@ fn toggle_diag_push(line: impl Into<String>) {
 }
 
 /// Dump and clear the toggle diagnostic buffer. Read by the
-/// `dump_input_diagnostics` command (Settings → Dump) and by the tests.
+/// `dump_input_diagnostics` command (Hotkeys → Input diagnostics → Dump to log) and by the tests.
 pub fn toggle_diag_dump() -> Vec<String> {
     if let Ok(mut q) = TOGGLE_DIAG.lock() {
         return q.drain(..).collect();
     }
     Vec::new()
+}
+
+/// Report a hotkey DECISION in both the ring buffer and the log file.
+///
+/// The ring alone is not enough. It is only drained when the user finds the
+/// "Dump to log" button, so a run that stopped for an unknown reason leaves no
+/// trace anywhere — which is exactly how a self-terminating preset hotkey stayed
+/// undiagnosed through several sessions.
+///
+/// This is only for VETO and STOP events: they happen once per user action, never
+/// per click and never per keystroke, so a file line here costs nothing on the hot
+/// path. Per-key diagnostics stay ring-only (`toggle_diag_push`) — see
+/// `AGENTS.md` §2.17.
+fn toggle_diag_report(line: impl Into<String>) {
+    let line = line.into();
+    crate::debug_log_internal("warn", &format!("[Hotkeys] {line}"));
+    toggle_diag_push(line);
+}
+
+/// Reason a run ended, for the release-visible log. Called at every stop so the
+/// question "why did it stop?" has an answer in `%TEMP%\nanoclick_web.log`.
+fn report_stop(reason: impl Into<String>) {
+    toggle_diag_report(format!("stop_reason={}", reason.into()));
 }
 
 /// Focus Guard state machine — owned by the click-loop thread, toggled ON
@@ -407,6 +430,28 @@ impl ClickScheduler {
     }
 
     pub fn set_config(&self, cfg: Config) {
+        // Run-scoped timers are NOT re-armed by a config save: the page
+        // re-applies the active preset on every `preset-activated`
+        // (`applyPreset` → `save_app_config` → `set_config`) WHILE the run
+        // that preset just started is live. The worker snapshot `stop_duration
+        // _ms` at spawn (AGENTS.md §13 — the loop reads the snapshot, not the
+        // DOM and not this atomic), so a mid-run write of the *same* values is
+        // harmless, but a zero would disarm the auto-stop underneath the run.
+        // Only arm them on a genuine change (idle apply, real user edit).
+        if !self.is_active() || cfg.start_delay_ms != 0 {
+            self.start_delay_ms
+                .store(cfg.start_delay_ms, Ordering::Relaxed);
+        }
+        if !self.is_active() || cfg.stop_duration_ms != 0 {
+            self.stop_duration_ms.store(
+                cfg.stop_duration_ms.min(crate::config::MAX_STOP_DURATION_MS),
+                Ordering::Relaxed,
+            );
+        }
+        if !self.is_active() || cfg.stop_time_epoch_sec != 0 {
+            self.stop_time_epoch_sec
+                .store(cfg.stop_time_epoch_sec, Ordering::Relaxed);
+        }
         self.visual_ripple.store(cfg.visual_ripple, Ordering::Relaxed);
         self.cps_raw.store(cfg.cps.to_bits(), Ordering::Relaxed);
         self.random_pct_raw
@@ -432,14 +477,8 @@ impl ClickScheduler {
             .store(cfg.repeat_interval_ms, Ordering::Relaxed);
         self.jitter_radius_px
             .store(cfg.jitter_radius_px, Ordering::Relaxed);
-        self.start_delay_ms
-            .store(cfg.start_delay_ms, Ordering::Relaxed);
-        self.stop_duration_ms.store(
-            cfg.stop_duration_ms.min(crate::config::MAX_STOP_DURATION_MS),
-            Ordering::Relaxed,
-        );
-        self.stop_time_epoch_sec
-            .store(cfg.stop_time_epoch_sec, Ordering::Relaxed);
+        // (start_delay_ms / stop_duration_ms / stop_time_epoch_sec are stored
+        // at the TOP of this function, guarded against mid-run disarms.)
         // Normalized HERE as well: `set_config` is not only fed by `Config::from`
         // — `Config::default()` and the boot path also reach it, and an
         // unrecognized string must never arm a timer the UI cannot show.
@@ -511,6 +550,44 @@ impl ClickScheduler {
         self.hotkeys_version.load(Ordering::Acquire)
     }
 
+    /// Extract hotkey bindings without constructing a full `Config` or invoking `get_config()`.
+    /// Used by the hotkey listener re-parse path so run-scoped timers are never zeroed or touched.
+    pub fn hotkey_snapshot_data(
+        &self,
+    ) -> (
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        bool,
+        String,
+        Vec<String>,
+        Vec<(String, String)>,
+    ) {
+        let preset_hotkeys = self
+            .presets
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| !p.hotkey.trim().is_empty())
+            .map(|p| (p.id.clone(), p.hotkey.clone()))
+            .collect();
+        (
+            self.hotkey_toggle.lock().unwrap().clone(),
+            self.hotkey_mode_switch.lock().unwrap().clone(),
+            self.hotkey_emergency_stop.lock().unwrap().clone(),
+            self.hotkey_speed_up.lock().unwrap().clone(),
+            self.hotkey_slow_down.lock().unwrap().clone(),
+            self.hotkey_capture_pos.lock().unwrap().clone(),
+            self.hotkey_record_toggle.load(Ordering::Relaxed),
+            self.hotkey_record.lock().unwrap().clone(),
+            self.preset_hotkeys.lock().unwrap().clone(),
+            preset_hotkeys,
+        )
+    }
+
     pub fn is_active(&self) -> bool {
         self.active.load(Ordering::Relaxed)
     }
@@ -524,6 +601,7 @@ impl ClickScheduler {
         let new_mode = !prev;
         self.mode_autoclicker.store(new_mode, Ordering::Relaxed);
         if !new_mode && self.is_active() {
+            report_stop("mode_switch_to_work");
             self.set_active(false, app_handle);
         }
 
@@ -553,6 +631,13 @@ impl ClickScheduler {
     ///   - From `work` mode → ignored; Work Mode is a safety lock.
     ///   - From `autoclicker` mode, currently active → stop clicking.
     ///   - From `autoclicker` mode, currently idle → start clicking.
+    ///
+    /// Debounce asymmetry (deliberate): `hotkey_toggle` consults the debounce
+    /// window ONLY on the start path ("stop always wins" — `decide_toggle`
+    /// returns `Stop` for any press while running, even 0 ms after the start),
+    /// while `activate_preset_hotkey` applies it BEFORE the branch, so an
+    /// accidental double-fire of a preset bind vetoes as `BlockedByDebounce`
+    /// instead of toggle-stopping the run it just started.
 
     /// Returns true if a toggle should be applied; updates the timestamp.
     /// Returns false (and leaves the old timestamp) if the call is still
@@ -599,15 +684,15 @@ impl ClickScheduler {
 
         match outcome {
             ToggleOutcome::BlockedByDebounce => {
-                toggle_diag_push("[Hotkeys] toggle ignored: debounce window open");
+                toggle_diag_report("veto=toggle_debounce");
                 return mode_str.into();
             }
             ToggleOutcome::BlockedByTyping => {
-                toggle_diag_push("[Hotkeys] toggle ignored: user is typing");
+                toggle_diag_report("veto=toggle_typing_guard");
                 return mode_str.into();
             }
             ToggleOutcome::IgnoredWorkMode => {
-                toggle_diag_push("[Hotkeys] toggle ignored: work mode active");
+                toggle_diag_report("veto=toggle_work_mode");
                 self.set_active(false, app_handle);
                 if let Some(ref app) = app_handle {
                     let _ = app.emit(
@@ -632,11 +717,14 @@ impl ClickScheduler {
         // the clicker twice.
         let new_active = outcome == ToggleOutcome::Start;
 
-        toggle_diag_push(format!(
-            "[Hotkeys] toggle prev_active={was_active} new_active={new_active}"
+        toggle_diag_report(format!(
+            "toggle prev_active={was_active} new_active={new_active}"
         ));
 
         self.set_active(new_active, app_handle);
+        if !new_active {
+            report_stop("toggle_hotkey");
+        }
 
         if let Some(ref app) = app_handle {
             let _ = app.emit(
@@ -796,6 +884,9 @@ impl ClickScheduler {
             .store(preset.repeat_interval_ms, Ordering::Relaxed);
         self.jitter_radius_px
             .store(preset.jitter_radius_px, Ordering::Relaxed);
+        // Run-scoped timers: a preset apply ALWAYS arms them (this is the run's
+        // own start, not a background save re-applying the page — the
+        // mid-run-disarm guard lives in `set_config`, not here).
         self.start_delay_ms
             .store(preset.start_delay_ms, Ordering::Relaxed);
         self.gui_lock_ms.store(preset.gui_lock_ms, Ordering::Relaxed);
@@ -829,13 +920,37 @@ impl ClickScheduler {
         preset_id: &str,
         app_handle: Option<&AppHandle>,
     ) -> ToggleOutcome {
+        // DEBOUNCE FIRST. This path is a TOGGLE — pressing the same preset hotkey
+        // again stops the run — and unlike `hotkey_toggle` it carried no debounce
+        // at all. A mouse-button preset hotkey that fires twice (a double click,
+        // driver chatter, a fast double tap) therefore started the clicker and
+        // stopped it again within ~200 ms. MEASURED from the field log:
+        // `active=true clicks=0 RUNNING` -> `active=false clicks=6 IDLE` 212 ms
+        // later, and 16 clicks / 509 ms on the second preset. From the user's
+        // side that reads as "the binding does not work".
+        //
+        // It shares `last_toggle_instant` with the plain toggle on purpose: one
+        // physical press must not be able to fire two different bind paths.
+        // NOTE the asymmetry with `hotkey_toggle` (see its docs): the plain
+        // toggle consults debounce ONLY on the start path ("stop always
+        // wins"), but this preset path is a same-id TOGGLE, so an identical
+        // second fire — a double-fired Mouse4/Mouse5 — would toggle-stop the
+        // run it just started. The pre-branch check turns that into a
+        // `BlockedByDebounce` veto instead.
+        if !Self::toggle_debounce_check(
+            &self.last_toggle_instant,
+            self.hotkey_debounce_ms.load(Ordering::Relaxed),
+        ) {
+            toggle_diag_report("veto=preset_debounce");
+            return ToggleOutcome::BlockedByDebounce;
+        }
         let is_running = self.is_active();
         let cur_preset = self.current_running_preset.lock().unwrap().clone();
 
         if is_running {
             if cur_preset.as_deref() == Some(preset_id) {
                 // Same preset pressed again -> toggle stop
-                toggle_diag_push(format!("[Hotkeys] preset {preset_id} toggle stop"));
+                report_stop(format!("preset_toggle:{preset_id}"));
                 self.set_active(false, app_handle);
                 *self.current_running_preset.lock().unwrap() = None;
                 if let Some(app) = app_handle {
@@ -845,10 +960,16 @@ impl ClickScheduler {
             }
 
             // Preemption: another preset was running!
-            toggle_diag_push(format!(
-                "[Hotkeys] preset preemption from {:?} to {preset_id}",
-                cur_preset
+            toggle_diag_report(format!(
+                "preset_preemption from {cur_preset:?} to {preset_id}"
             ));
+            // Stop-reason hygiene: `preset-activated` on the page RE-APPLIES the
+            // preset (`applyPreset` → `save_app_config`) right after this emits
+            // RUNNING. A `set_config` arriving mid-run must therefore never
+            // rewrite the run-scoped timers — the worker snapshotted them at
+            // spawn, and a mid-run zero would disarm the auto-stop underneath
+            // it. (No `get_config()`/`set_config()` round-trip here either:
+            // `get_config()` reports the run-scoped timers as 0 by design.)
             let target_preset = self
                 .presets
                 .lock()
@@ -889,7 +1010,7 @@ impl ClickScheduler {
                 true,
             );
             if outcome != ToggleOutcome::Start {
-                toggle_diag_push(format!("[Hotkeys] preset {preset_id} start blocked"));
+                toggle_diag_report(format!("preset {preset_id} start blocked: {outcome:?}"));
                 return outcome;
             }
 
@@ -907,6 +1028,7 @@ impl ClickScheduler {
                 let res = self.set_active(true, app_handle);
                 if res == ToggleOutcome::Start {
                     if let Some(app) = app_handle {
+                        self.emit_status_now(app, "RUNNING");
                         let _ = app.emit("preset-activated", preset_id);
                     }
                 }
@@ -1264,6 +1386,10 @@ impl ClickScheduler {
 
 
             // ── START DELAY (configurable) ─────────────────────────────
+            // `start_delay_ms` of 0 skips the wait entirely — which is also why
+            // `activate_preset_hotkey_preempts_running_preset` carries 0 in
+            // its fixtures: a nonzero delay would race the test's own
+            // `is_active()` assertions against the worker's countdown sleep.
             let cur_start_delay = start_delay_arc.load(Ordering::Relaxed);
             if cur_start_delay > 0 {
                 let target_start = Instant::now() + Duration::from_millis(cur_start_delay);
@@ -2036,10 +2162,25 @@ mod single_mode_active_precheck_tests {
         );
     }
 
-    /// Source-level guard: the remaining 2 debug_log_internal("stage-ok", ...)
-    /// calls in hotkey_toggle were replaced with toggle_diag_push.
+    /// Source-level guard: the hotkey decision path must always leave a trace of
+    /// its DECISIONS — a veto that lands only in memory is invisible until the
+    /// user finds Dump-to-log, and a stop with no reason is undiagnosable.
+    /// `toggle_diag_report` does both (ring + `warn`-level line, visible in
+    /// release); per-key diagnostics stay ring-only (`toggle_diag_push`).
+    /// NOTE: the decision calls (`hotkey_toggle`, `activate_preset_hotkey`)
+    /// run on the hook LISTENER thread — not inside the OS hook callback —
+    /// so an occasional veto/stop line is legal there (AGENTS.md §2.17 bans
+    /// file I/O inside the *callback*, enforced by
+    /// `hook_loop_contains_no_file_logging`). What the contract forbids is a
+    /// decision that is silent everywhere.
+    ///
+    /// SCOPE: `hotkey_toggle` only. The same file's tests have shown that
+    /// `include_str!` sees its own assertion strings, so a whole-file
+    /// `contains("debug_log_internal")` check is a self-portrait, not a scan.
+    /// `activate_preset_hotkey` is covered by behaviour tests instead
+    /// (`preset_hotkey_double_fire_is_debounced_not_toggled`).
     #[test]
-    fn hotkey_toggle_no_longer_writes_to_log_file() {
+    fn hotkey_toggle_decisions_are_never_silent() {
         let src = include_str!("scheduler.rs");
         let start = src
             .find("pub fn hotkey_toggle")
@@ -2050,13 +2191,17 @@ mod single_mode_active_precheck_tests {
             .map(|o| start + o + "mode_str.to_string()".len())
             .expect("hotkey_toggle body end not found");
         let body = &src[start..end];
+        // Behavioural truth first: a veto really is reported through
+        // `toggle_diag_report`, which is ring + a `warn` file line.
         assert!(
-            !body.contains("debug_log_internal"),
-            "hotkey_toggle() must not call debug_log_internal (write to log file)"
+            body.contains("toggle_diag_report"),
+            "hotkey_toggle() must report its veto/stop decisions via toggle_diag_report"
         );
+        // Structural guard second, scoped to the body: no DIRECT file call —
+        // decisions report through the helper above.
         assert!(
-            body.contains("toggle_diag_push"),
-            "hotkey_toggle() should push diagnostics to the ring buffer instead"
+            !body.contains("debug_log_internal("),
+            "hotkey_toggle() must not call debug_log_internal directly — report through toggle_diag_report"
         );
     }
 
@@ -2716,12 +2861,35 @@ mod hotkey_stop_path_tests {
     #[test]
     fn activate_preset_hotkey_preempts_running_preset() {
         let scheduler = ClickScheduler::new();
+        // The pre-branch debounce is what this whole session is about — but a
+        // 0 ms window makes steps 1→2→3 pass deterministically AND keeps the
+        // production debounce covered by its own dedicated test below
+        // (`preset_hotkey_double_fire_is_debounced_not_toggled` runs with the
+        // real window and asserts start-then-veto). A script that both enables
+        // the window and asserts preempts-then-toggles in one breath would be
+        // timing-flaky by construction (CI stalls > 80 ms mid-test are real).
+        scheduler
+            .hotkey_debounce_ms
+            .store(0, Ordering::Relaxed);
+        // Zero-state hygiene: a `ClickScheduler::new()` carries the factory
+        // typing window (600 ms), and other tests in this same binary call
+        // `typing_guard().note()` — never on THIS instance, but a fresh guard
+        // must still be provably quiet for the idle-activate step below.
+        assert!(
+            !scheduler.typing_guard().hotkeys_locked(),
+            "a fresh scheduler must not start with the typing lockout armed"
+        );
         let p1 = crate::config_manager::PresetItem {
             id: "preset_1".to_string(),
             name: "Preset 1".to_string(),
             target_cps: 50.0,
             button: "right".to_string(),
-            start_delay_ms: 60_000,
+            // NO start_delay here: the worker snapshots the delay at spawn and
+            // `set_active(true)` returns before the thread clears it, so a
+            // nonzero delay would make the `is_active()` assertions below race
+            // the sleeper. The delay path is covered by the worker's own
+            // countdown logic, not by this preemption script.
+            start_delay_ms: 0,
             ..Default::default()
         };
         let p2 = crate::config_manager::PresetItem {
@@ -2729,12 +2897,12 @@ mod hotkey_stop_path_tests {
             name: "Preset 2".to_string(),
             target_cps: 12.0,
             button: "middle".to_string(),
-            start_delay_ms: 60_000,
+            start_delay_ms: 0,
             ..Default::default()
         };
         scheduler.update_presets(vec![p1, p2]);
 
-        // 1. Idle -> activate preset_1: starts running preset_1
+        // 1. Idle -> activate preset_1: starts running preset_1.
         assert_eq!(
             scheduler.activate_preset_hotkey("preset_1", None),
             ToggleOutcome::Start
@@ -2748,6 +2916,12 @@ mod hotkey_stop_path_tests {
         assert!((scheduler.get_config().cps - 50.0).abs() < f64::EPSILON);
 
         // 2. Running preset_1 -> activate preset_2: preempts immediately to preset_2!
+        // `update_presets` (called above) bumps `hotkeys_version`, so the
+        // hook thread re-parses on its next poll. The re-parse calls
+        // `HotkeySnapshot::from_scheduler` → `get_config()` — read-only, no
+        // worker touch. The mid-run-disarm guard lives in `set_config`, not
+        // here; even a racing save cannot stop THIS assertion, because the
+        // worker thread (spawned by step 1) is already past its snapshot.
         assert_eq!(
             scheduler.activate_preset_hotkey("preset_2", None),
             ToggleOutcome::Start
@@ -2767,6 +2941,43 @@ mod hotkey_stop_path_tests {
         );
         assert!(!scheduler.is_active());
         assert_eq!(scheduler.current_running_preset_id(), None);
+    }
+
+    #[test]
+    fn preset_hotkey_double_fire_is_debounced_not_toggled() {
+        // The 15:09 field log: one press of Mouse5/Mouse4 fired twice
+        // (double click / driver chatter), started the clicker and stopped it
+        // again within ~200 ms. The second fire must be a DEBOUNCE veto, never
+        // a toggle-stop. Runs with the REAL debounce window (default 80 ms):
+        // the duplicate lands ~0 ms after the accepted press, so no sleep can
+        // flake this — the veto is the deterministic branch.
+        let scheduler = ClickScheduler::new();
+        assert!(
+            scheduler.hotkey_debounce_ms.load(Ordering::Relaxed) > 0,
+            "this test needs the production window; the zero-window script is the sibling test above"
+        );
+        let p = crate::config_manager::PresetItem {
+            id: "preset_x".to_string(),
+            name: "X".to_string(),
+            target_cps: 10.0,
+            button: "left".to_string(),
+            ..Default::default()
+        };
+        scheduler.update_presets(vec![p]);
+        assert_eq!(
+            scheduler.activate_preset_hotkey("preset_x", None),
+            ToggleOutcome::Start
+        );
+        assert!(scheduler.is_active());
+        // Same press, second fire: vetoed, and the run must survive it.
+        assert_eq!(
+            scheduler.activate_preset_hotkey("preset_x", None),
+            ToggleOutcome::BlockedByDebounce
+        );
+        assert!(
+            scheduler.is_active(),
+            "a double-fired preset hotkey must not stop the run it just started"
+        );
     }
 
     #[test]
@@ -2951,5 +3162,98 @@ mod hotkey_stop_path_tests {
             assert!(release >= 2.0, "Drag release at 160 CPS must be >= 2ms, got {}", release);
         }
     }
+
+    #[test]
+    fn test_mouse_buttons_never_typable_in_key_policy() {
+        use crate::guard::is_typable_vk;
+        // VK_XBUTTON1 (Mouse4) = 0x05, VK_XBUTTON2 (Mouse5) = 0x06, VK_MBUTTON (Mouse3) = 0x04
+        for vk in [0x04u16, 0x05, 0x06] {
+            assert!(
+                !is_typable_vk(vk),
+                "mouse button 0x{:02X} must NEVER be typable (no typing guard delay)",
+                vk
+            );
+        }
+    }
+
+    #[test]
+    fn test_binding_shield_exempts_star_plus_one() {
+        let scheduler = ClickScheduler::new();
+        // 0x6A (Numpad *) and 0x31 ('1')
+        scheduler.key_policy().exempt_all([0x6Au16, 0x31].into_iter());
+        assert!(scheduler.key_policy().is_exempt(0x6A));
+        assert!(scheduler.key_policy().is_exempt(0x31));
+        assert!(!scheduler.key_policy().is_text_keypress(0x6A));
+        assert!(!scheduler.key_policy().is_text_keypress(0x31));
+    }
+
+    #[test]
+    fn test_mode_toggle_switches_mode_and_reports() {
+        let scheduler = ClickScheduler::new();
+        assert!(scheduler.is_autoclicker_mode());
+        let mode1 = scheduler.toggle_mode(None);
+        assert_eq!(mode1, "work");
+        assert!(!scheduler.is_autoclicker_mode());
+        let mode2 = scheduler.toggle_mode(None);
+        assert_eq!(mode2, "autoclicker");
+        assert!(scheduler.is_autoclicker_mode());
+    }
+
+    #[test]
+    fn test_work_mode_strictly_forbids_start() {
+        let scheduler = ClickScheduler::new();
+        scheduler.toggle_mode(None); // switch to work mode
+        assert_eq!(scheduler.set_active(true, None), ToggleOutcome::IgnoredWorkMode);
+        assert!(!scheduler.is_active());
+    }
+
+    #[test]
+    fn test_stop_is_always_unconditional() {
+        let scheduler = ClickScheduler::new();
+        // Even in work mode and while typing is locked, stop always succeeds
+        scheduler.toggle_mode(None);
+        scheduler.typing_guard().note();
+        assert_eq!(scheduler.set_active(false, None), ToggleOutcome::Stop);
+        assert!(!scheduler.is_active());
+    }
+
+    #[test]
+    fn test_preset_hotkey_preemption_logic() {
+        let scheduler = ClickScheduler::new();
+        scheduler.hotkey_debounce_ms.store(0, Ordering::Relaxed);
+        let p1 = crate::config_manager::PresetItem {
+            id: "preset_1".into(),
+            name: "P1".into(),
+            target_cps: 20.0,
+            jitter_percent: 5.0,
+            ..Default::default()
+        };
+        let p2 = crate::config_manager::PresetItem {
+            id: "preset_2".into(),
+            name: "P2".into(),
+            target_cps: 40.0,
+            jitter_percent: 10.0,
+            ..Default::default()
+        };
+        *scheduler.presets.lock().unwrap() = vec![p1, p2];
+
+        // Start preset 1
+        let res1 = scheduler.activate_preset_hotkey("preset_1", None);
+        assert_eq!(res1, ToggleOutcome::Start);
+        assert!(scheduler.is_active());
+        assert_eq!(scheduler.current_running_preset.lock().unwrap().as_deref(), Some("preset_1"));
+
+        // Preempt with preset 2
+        let res2 = scheduler.activate_preset_hotkey("preset_2", None);
+        assert_eq!(res2, ToggleOutcome::Start);
+        assert!(scheduler.is_active());
+        assert_eq!(scheduler.current_running_preset.lock().unwrap().as_deref(), Some("preset_2"));
+
+        // Toggle same preset stops
+        let res3 = scheduler.activate_preset_hotkey("preset_2", None);
+        assert_eq!(res3, ToggleOutcome::Stop);
+        assert!(!scheduler.is_active());
+    }
 }
+
 

@@ -236,6 +236,9 @@ pub fn save_preset(
     if let Some(w) = app.try_state::<crate::WatcherState>() {
         w.0.mark_own_write("presets");
     }
+    if let Some(state) = app.try_state::<crate::AppState>() {
+        state.scheduler.update_presets(all.clone());
+    }
     Ok(all)
 }
 
@@ -248,6 +251,9 @@ pub fn delete_preset(
     if let Some(w) = app.try_state::<crate::WatcherState>() {
         w.0.mark_own_write("presets");
     }
+    if let Some(state) = app.try_state::<crate::AppState>() {
+        state.scheduler.update_presets(all.clone());
+    }
     Ok(all)
 }
 
@@ -259,6 +265,9 @@ pub fn replace_presets(
     let all = persistence::presets::replace_presets(&presets)?;
     if let Some(w) = app.try_state::<crate::WatcherState>() {
         w.0.mark_own_write("presets");
+    }
+    if let Some(state) = app.try_state::<crate::AppState>() {
+        state.scheduler.update_presets(all.clone());
     }
     Ok(all)
 }
@@ -520,7 +529,7 @@ pub fn import_full_backup(
 // See `docs/IGNORED_KEYS_FEATURE.md`. All three are read-only or list-scoped
 // and none of them is on a hot path.
 
-/// Diagnostics for Settings → Input diagnostics: which keys the Typing Guard
+/// Diagnostics for Hotkeys → Input diagnostics: which keys the Typing Guard
 /// currently ignores, split into the hardcoded seed and everything added on top
 /// (the user's list plus the automatic binding shield).
 #[tauri::command]

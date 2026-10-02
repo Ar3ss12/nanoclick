@@ -1,4 +1,4 @@
-﻿// nanoclick floating HUD — displays session click count.
+// nanoclick floating HUD — displays session click count.
 // Renders immediately on DOM ready (no opacity gate).
 // Updates in real-time via targeted hud-clicks IPC events from scheduler.rs.
 function initHud() {
@@ -23,6 +23,9 @@ function initHud() {
       if (typeof invoke === "function") {
         invoke("hud_ready").catch((err) => {
           console.warn("[HUD] hud_ready invoke failed:", err);
+          if (typeof window.__nanoclickBootReport === "function") {
+            window.__nanoclickBootReport("warn", "[HUD] hud_ready invoke failed: " + err);
+          }
         });
       }
       return;
@@ -33,10 +36,13 @@ function initHud() {
     } else {
       console.warn("[HUD] Tauri event API not available after retries.");
       if (el) el.textContent = "—";
+      if (typeof window.__nanoclickBootReport === "function") {
+        window.__nanoclickBootReport("error", "[HUD] Tauri event API not available after retries");
+      }
     }
   }
 
-  attachListener(30);
+  attachListener(60);
 }
 
 if (document.readyState === "loading") {

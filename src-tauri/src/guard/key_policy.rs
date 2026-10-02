@@ -1,4 +1,4 @@
-﻿//! Key classification policy — which keys count as "typing".
+//! Key classification policy — which keys count as "typing".
 //!
 //! # The bug this type exists to kill
 //!
@@ -220,7 +220,7 @@ impl KeyPolicy {
         }
     }
 
-    /// Diagnostics for Settings → Input diagnostics. Not on any hot path.
+    /// Diagnostics for Hotkeys → Input diagnostics. Not on any hot path.
     pub fn report(&self) -> KeyPolicyReport {
         let mut exempt_total = 0u32;
         let mut gameplay_total = 0u32;
@@ -245,7 +245,7 @@ impl KeyPolicy {
     }
 }
 
-/// Diagnostics payload for Settings → Input diagnostics.
+/// Diagnostics payload for Hotkeys → Input diagnostics.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct KeyPolicyReport {
     /// Total keys in force (seed ∪ user list ∪ bound hotkeys).

@@ -2440,6 +2440,18 @@ const mouseButtonToKey = (btnNum) => {
   return null;
 };
 
+// Last token of a hotkey binding, lowercased: the physical key whose press
+// fires the action. Module scope (not inside the recorder): it captures
+// nothing, and oxlint's consistent-function-scoping fails the build on a
+// closure that can live outside.
+function hotkeyTriggerOf(binding) {
+  const parts = String(binding || "")
+    .split("+")
+    .map((s) => String(s || "").trim().toLowerCase())
+    .filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : "";
+}
+
 function setupHotkeyRecorder(btn, targetKey) {
   if (!btn) return;
   btn.addEventListener("click", () => {
@@ -2447,6 +2459,24 @@ function setupHotkeyRecorder(btn, targetKey) {
     dbg("Hotkey recorder STARTED for targetKey:", typeof targetKey === "string" ? targetKey : "custom");
     activeRecordingBtn = btn;
     btn.classList.add("recording");
+    // Conflict preview: what the OTHER binds currently hold, so a trigger
+    // the recorder is about to glue can be recognised as "already taken".
+    // (tgl/mode share the `1` digit in the field config: toggle="1",
+    // mode_switch="*+1" — a bare `1` press then fires BOTH the toggle and
+    // the mode switch on the same key-down.)
+    const otherBinds = () => {
+      const h = currentConfig.hotkeys || {};
+      const out = [];
+      const push = (name, v) => { if (v) out.push([name, String(v)]); };
+      push("toggle", h.toggle);
+      push("mode_switch", h.mode_switch);
+      push("emergency_stop", h.emergency_stop);
+      push("speed_up", h.speed_up);
+      push("slow_down", h.slow_down);
+      push("capture_pos", h.capture_pos);
+      if (h.record_toggle) push("record", h.record_hotkey);
+      return out;
+    };
     const labelEl = btn.querySelector("span:last-child") || btn;
     labelEl.textContent = getI18nText("preset_hotkey_press", {}, "Press key or Mouse 4 / 5...");
 
@@ -2602,6 +2632,21 @@ function setupHotkeyRecorder(btn, targetKey) {
         labelEl.textContent = bindingStr;
         cleanupListeners();
         return;
+      }
+      // Shared-trigger warning: when the freshly recorded binding's trigger
+      // is already claimed by ANOTHER action, one press fires both. (The field
+      // config hit exactly this: toggle="1" + mode_switch="*+1" — every bare
+      // `1` toggled the clicker AND flipped Work Mode.) Paint, don't block:
+      // the chord may be intentional.
+      const myName = typeof targetKey === "string" ? targetKey : "preset";
+      const myTrigger = hotkeyTriggerOf(bindingStr);
+      const clash = otherBinds().find(([name, b]) =>
+        name !== myName && hotkeyTriggerOf(b) && hotkeyTriggerOf(b) === myTrigger);
+      if (clash && typeof showToast === "function") {
+        showToast(
+          `⚠️ "${bindingStr}" shares its trigger with ${clash[0]} ("${clash[1]}") — one press will fire both`,
+          "warn"
+        );
       }
       if (targetKey === "toggle") {
         currentConfig.hotkeys.toggle = bindingStr;
@@ -5094,6 +5139,136 @@ function applyStatusUpdate(payload) {
 }
 
 listenSilent("status-update", (event) => applyStatusUpdate(event?.payload || {}));
+
+// ── WINDOW FOCUS / VISIBILITY STATUS RESYNC ──────────────────────────
+// When the window is backgrounded or minimized, WebView2 background throttling
+// may delay or pause IPC events. Querying live backend status on focus/restore
+// guarantees the UI immediately reflects reality (zero desync).
+async function resyncStatusOnFocus() {
+  if (!configHydrated || typeof invoke !== "function") return;
+  try {
+    const s = await invoke("get_status");
+    if (s && typeof s === "object") {
+      applyStatusUpdate(s);
+    }
+  } catch (_) {}
+}
+
+window.addEventListener("focus", () => {
+  resyncStatusOnFocus();
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") {
+    resyncStatusOnFocus();
+  }
+});
+
+// ── IN-WINDOW HOTKEY DISPATCHER ─────────────────────────────────
+// When the NanoClick window has foreground focus, the Win32 WH_KEYBOARD_LL hook
+// may be affected by Chromium message loop isolation, text typing heuristics,
+// or input focus. This listener guarantees that shortcuts (mode switch, toggle,
+// emergency stop, preset slots) respond instantly when pressed directly in the UI,
+// while safely ignoring presses when the user is actively typing in a text field
+// or recording a new hotkey.
+const _heldWindowKeys = new Set();
+
+function _matchesInWindowHotkey(bindingStr, currentKey, heldKeys) {
+  if (!bindingStr || typeof bindingStr !== "string") return false;
+  const groups = bindingStr.split(/[/|]/).map(s => s.trim()).filter(Boolean);
+  for (const group of groups) {
+    const parts = group.split("+").map(s => s.trim()).filter(Boolean);
+    if (!parts.length) continue;
+    const trigger = parts[parts.length - 1];
+    const required = parts.slice(0, parts.length - 1);
+
+    if (trigger.toUpperCase() !== currentKey.toUpperCase()) {
+      continue;
+    }
+    const allHeld = required.every(req => {
+      const upperReq = req.toUpperCase();
+      for (const held of heldKeys) {
+        const upperHeld = held.toUpperCase();
+        if (upperHeld === upperReq) return true;
+        if (upperReq === "CTRL" && (upperHeld === "CONTROLLEFT" || upperHeld === "CONTROLRIGHT" || upperHeld === "CTRL")) return true;
+        if (upperReq === "ALT" && (upperHeld === "ALTLEFT" || upperHeld === "ALTRIGHT" || upperHeld === "ALT")) return true;
+        if (upperReq === "SHIFT" && (upperHeld === "SHIFTLEFT" || upperHeld === "SHIFTRIGHT" || upperHeld === "SHIFT")) return true;
+      }
+      return false;
+    });
+    if (allHeld) return true;
+  }
+  return false;
+}
+
+window.addEventListener("keydown", (e) => {
+  if (activeRecordingBtn) return;
+
+  const target = e.target;
+  const isInput = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
+  if (isInput) return;
+
+  const physicalKey = codeToPhysicalKey(e.code, e.key);
+  _heldWindowKeys.add(physicalKey);
+
+  const hotkeys = currentConfig?.hotkeys;
+  if (!hotkeys) return;
+
+  // 1. Emergency stop (always allowed, e.g. Escape)
+  if (_matchesInWindowHotkey(hotkeys.emergency_stop, physicalKey, _heldWindowKeys)) {
+    if (isRunning) {
+      e.preventDefault();
+      if (toggleBtn) toggleBtn.click();
+      return;
+    }
+  }
+
+  // 2. Mode switch (e.g. *+1 or Ctrl+Alt+M)
+  if (_matchesInWindowHotkey(hotkeys.mode_switch, physicalKey, _heldWindowKeys)) {
+    e.preventDefault();
+    if (modeToggleBtn) {
+      modeToggleBtn.click();
+    }
+    return;
+  }
+
+  // 3. Toggle clicking (e.g. R or K)
+  if (_matchesInWindowHotkey(hotkeys.toggle, physicalKey, _heldWindowKeys)) {
+    e.preventDefault();
+    if (currentConfig.active_mode === "work") {
+      showToast(getI18nText("tray_blocked_work_mode", {}, "Blocked: Work Mode is active"), "warn");
+      return;
+    }
+    if (toggleBtn) {
+      toggleBtn.click();
+    }
+    return;
+  }
+
+  // 4. Preset slots (1..9)
+  if (Array.isArray(hotkeys.preset_hotkeys)) {
+    for (let slotIdx = 0; slotIdx < hotkeys.preset_hotkeys.length; slotIdx++) {
+      const slotBinding = hotkeys.preset_hotkeys[slotIdx];
+      if (slotBinding && _matchesInWindowHotkey(slotBinding, physicalKey, _heldWindowKeys)) {
+        e.preventDefault();
+        const p = presetLibrary()[slotIdx];
+        if (p) {
+          applyPreset(p.id);
+        }
+        return;
+      }
+    }
+  }
+});
+
+window.addEventListener("keyup", (e) => {
+  const physicalKey = codeToPhysicalKey(e.code, e.key);
+  _heldWindowKeys.delete(physicalKey);
+});
+
+window.addEventListener("blur", () => {
+  _heldWindowKeys.clear();
+});
 
 // ── FOCUS LOSS AUTO-PAUSE (Smart Guard) ──────────────────────────
 // The Rust click loop stopped the run because the foreground app changed

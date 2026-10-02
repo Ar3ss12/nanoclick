@@ -4,7 +4,7 @@
 
 Built with **Tauri 2 + Rust + vanilla JS**. No Electron, no bundler, no bloat: the production installer is **~3.5 MB**.
 
-![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue) ![Version](https://img.shields.io/badge/version-1.2.0-brightgreen) ![Tests](https://img.shields.io/badge/tests-255%2F255-brightgreen) ![i18n](https://img.shields.io/badge/i18n-UA%20%7C%20RU%20%7C%20EN-blue) ![Tauri](https://img.shields.io/badge/Tauri-2.x-FFC131) ![Rust](https://img.shields.io/badge/rust-stable--msvc-DEA584)
+![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue) ![Version](https://img.shields.io/badge/version-1.2.0-brightgreen) ![Tests](https://img.shields.io/badge/tests-279%2F279-brightgreen) ![i18n](https://img.shields.io/badge/i18n-UA%20%7C%20RU%20%7C%20EN-blue) ![Tauri](https://img.shields.io/badge/Tauri-2.x-FFC131) ![Rust](https://img.shields.io/badge/rust-stable--msvc-DEA584)
 
 ---
 
@@ -69,7 +69,7 @@ Built with **Tauri 2 + Rust + vanilla JS**. No Electron, no bundler, no bloat: t
 - **Work Mode** — suspends global hotkeys while you're using other applications
 - **Auto-pause on navigation**, emergency stop (<kbd>Escape</kbd>), start-delay & auto-stop timers
 - **Floating HUD** overlay for real-time click tracking
-- **Windows autostart & native system tray** — a hand-rolled Win32 tray icon (`Shell_NotifyIconW`, no `tray-icon`/`muda` dependency, so the comctl32-v6 import can never come back). Closing the window hides to the tray and the backend keeps clicking; the tray menu offers Open / Start-Stop clicking / Show-Hide HUD / Quit; the icon re-registers itself after an `explorer.exe` restart. Optional **deep sleep** releases the whole interface while the app sits in the tray and rebuilds it on the next click (opt-in, skipped while clicking, a macro or a recording runs). Measured with the fixed `scripts/measure-ram.ps1` (private working set, the Task Manager number): **117–123 MB alive → 4.98 MB in deep sleep (−96 %)**, six `msedgewebview2.exe` helpers going to zero while hooks, scheduler and tray stay alive — hiding the window alone changes nothing (122.8 MB)
+- **Windows autostart & native system tray** — a hand-rolled Win32 tray icon (`Shell_NotifyIconW`, no `tray-icon`/`muda` dependency, so the comctl32-v6 import can never come back). Closing the window hides to the tray and the backend keeps clicking; the tray menu offers Open / Start-Stop clicking / Show-Hide HUD / Quit; the icon re-registers itself after an `explorer.exe` restart. Optional **deep sleep** releases the whole interface while the app sits in the tray and rebuilds it on the next click (opt-in, skipped while clicking, a macro or a recording runs). Measured with the fixed `scripts/measure-ram.ps1` (private working set, the Task Manager number): **117–123 MB alive → 5.3 MB in deep sleep (−96 % and 0% CPU at rest)**, six `msedgewebview2.exe` helpers going to zero while hooks, scheduler and tray stay alive — hiding the window alone changes nothing (122.8 MB)
 - **Interface failure containment** — the backend never depends on the page: every `emit` is fire-and-forget on a targeted window, zero windows is a legal state (`ExitRequested` is prevented while not shutting down), and a page that never reports `frontend_ready` is logged at error level, reloaded once and then ignored — hooks, scheduler and tray keep running behind a dead UI
 - 🎨 **6 Themes**: Dark Cyberpunk, Neon Grass, Dark Slate, Midnight Blue, Dracula Crimson, Amethyst Purple
 
@@ -144,7 +144,7 @@ left alone. The new JSON is parsed *before* it is written, because a malformed
 ```bash
 cd src-tauri
 cargo test --release -j 1 -- --skip physical_
-# → 232 passed; 0 failed (207 unit + 25 integration; 7 `physical_` tests filtered out)
+# → 279 passed; 0 failed (231 unit + 48 integration; 7 `physical_` tests filtered out)
 ```
 
 The test suite covers:

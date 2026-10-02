@@ -471,8 +471,14 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
         HotkeyBindings::from_snapshot(&snapshot)
     };
     log_bindings(&bindings);
+    // Layer A of the key policy. This MUST run for the initial bindings too:
+    // `seen_version` is seeded with the CURRENT version, so the re-parse block
+    // below never runs on startup and layer A would stay EMPTY until the first
+    // config save — a bare-letter toggle (`R`, `J`) would then be classified as
+    // typing, the kill-switch would stop the clicker and the guard would veto
+    // the start, on the same press. That is the original bug.
+    apply_binding_shield(&scheduler, &bindings);
     let mut held = HashSet::<u16>::new();
-    let mut poll_iter = 0u64;
     // v4.3: true while the pending toggle confirmation was opened by a key
     // that ALSO stopped the clicker through the typing kill-switch (see the
     // reset + assignment comments inside the loop). Lives here so the state
@@ -483,7 +489,6 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
     let mut last_tx_failures: u64 = 0;
 
     while !GLOBAL_HOTKEY_STOP.load(Ordering::Acquire) {
-        poll_iter += 1;
 
         // ── v4.3 FIX: WINDOWS MESSAGE PUMP (REQUIRED for LL hooks) ──────
         // WH_KEYBOARD_LL delivers its callback through the message queue of
@@ -535,15 +540,9 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
             let snapshot = HotkeySnapshot::from_scheduler(&scheduler);
             bindings = HotkeyBindings::from_snapshot(&snapshot);
             log_bindings(&bindings);
-            // Layer A of the key policy: every key the user bound to a hotkey is
-            // exempt from the Typing Guard. This is what stops a toggle bound to
-            // `J` from stopping the clicker (kill-switch) and refusing to start
-            // it (guard veto) on the same press — see docs/KEY_POLICY.md §1.
-            //
-            // ORDERING IS THE CONTRACT: layer B (`rebuild`, driven by
-            // `set_config`) may run in between, but this call always comes last,
-            // so no config save can ever un-exempt a bound hotkey.
-            scheduler.key_policy().exempt_all(bindings.policy_keys());
+            // Layer A of the key policy, refreshed on every re-parse. The
+            // startup path calls it too — see `apply_binding_shield`.
+            apply_binding_shield(&scheduler, &bindings);
             hotkey_diag_push(format!("bindings re-parsed on version {current_version}"));
         }
         // v4.3 typing kill-switch integration: set while the current pending
@@ -723,6 +722,7 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
                     fire_hotkey_group(&bindings.emergency_stop, event.vk, &held, || {
                         hotkey_diag_push("fired_action=emergency_stop".into());
                         scheduler.set_active(false, Some(&app_handle));
+                        scheduler.emit_status_now(&app_handle, "IDLE");
                         if let Some(exec) = crate::core::global() {
                             exec.stop();
                         }
@@ -817,10 +817,6 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
             } else {
                 hotkey_diag_push("cancelled_action=toggle_typing_guard".into());
             }
-        }
-
-        if poll_iter % 100 == 0 {
-            hotkey_diag_push("heartbeat".into());
         }
 
         // Hook-event hand-over failures (the channel is closed, i.e. shutdown).
@@ -1038,23 +1034,28 @@ struct HotkeySnapshot {
 
 impl HotkeySnapshot {
     fn from_scheduler(scheduler: &ClickScheduler) -> Self {
-        let cfg = scheduler.get_config();
-        let preset_hotkeys = cfg
-            .presets
-            .iter()
-            .filter(|p| !p.hotkey.trim().is_empty())
-            .map(|p| (p.id.clone(), p.hotkey.clone()))
-            .collect();
+        let (
+            toggle,
+            mode_switch,
+            emergency_stop,
+            speed_up,
+            slow_down,
+            capture_pos,
+            record_toggle,
+            record_hotkey,
+            preset_slots,
+            preset_hotkeys,
+        ) = scheduler.hotkey_snapshot_data();
         HotkeySnapshot {
-            toggle: cfg.hotkey_toggle,
-            mode_switch: cfg.hotkey_mode_switch,
-            emergency_stop: cfg.hotkey_emergency_stop,
-            speed_up: cfg.hotkey_speed_up,
-            slow_down: cfg.hotkey_slow_down,
-            capture_pos: cfg.hotkey_capture_pos,
-            record_toggle: cfg.hotkey_record_toggle,
-            record_hotkey: cfg.hotkey_record,
-            preset_slots: cfg.hotkey_preset_slots,
+            toggle,
+            mode_switch,
+            emergency_stop,
+            speed_up,
+            slow_down,
+            capture_pos,
+            record_toggle,
+            record_hotkey,
+            preset_slots,
             preset_hotkeys,
         }
     }
@@ -1085,6 +1086,18 @@ struct HotkeyBindings {
     /// Direct preset hotkeys: (preset_id, combos).
     preset_hotkeys: Vec<(String, Vec<HotkeyCombo>)>,
     invalid_bindings: usize,
+}
+
+/// Layer A of the key policy: every key the user bound to a hotkey is exempt
+/// from the Typing Guard.
+///
+/// **Must be called for the INITIAL bindings as well as after every re-parse.**
+/// The re-parse block is guarded by `current_version != seen_version`, and
+/// `seen_version` is seeded with the current version, so on startup that block
+/// never runs — calling this only from there left the shield empty until the
+/// first config save, which is exactly when a bare-letter toggle is broken.
+fn apply_binding_shield(scheduler: &ClickScheduler, bindings: &HotkeyBindings) {
+    scheduler.key_policy().exempt_all(bindings.policy_keys());
 }
 
 impl HotkeyBindings {
@@ -1201,10 +1214,13 @@ fn combos_from_label(label: &str) -> (Vec<HotkeyCombo>, usize) {
             Some(combo) => Some(combo),
             None => {
                 invalid += 1;
-                crate::debug_log_internal(
-                    "warn",
-                    &format!("[Hotkeys][diag] reject_reason=invalid_binding value={group:?}"),
-                );
+                // Ring buffer, NOT the log file: this runs on the hook thread
+                // during a re-parse, and file logging there is forbidden
+                // (AGENTS.md §2.17). It also kept unit tests (which parse
+                // deliberately invalid labels) writing ~2000 lines into the
+                // user's real `%TEMP%\nanoclick_web.log`, drowning the real
+                // diagnostics. `hotkey_diag_dump` surfaces this on demand.
+                hotkey_diag_push(format!("reject_reason=invalid_binding value={group:?}"));
                 None
             }
         })
@@ -1213,38 +1229,35 @@ fn combos_from_label(label: &str) -> (Vec<HotkeyCombo>, usize) {
 }
 
 fn log_bindings(bindings: &HotkeyBindings) {
-    crate::debug_log_internal(
-        "stage-ok",
-        &format!(
-            "[Hotkeys] resolved: toggle={} mode={} emergency={} speed_up={} slow_down={} capture={} record={}",
-            bindings.toggle.len(),
-            bindings.mode_switch.len(),
-            bindings.emergency_stop.len(),
-            bindings.speed_up.len(),
-            bindings.slow_down.len(),
-            bindings.capture_pos.len(),
-            bindings.record_toggle.len(),
-        ),
-    );
-    crate::debug_log_internal(
-        "stage-ok",
-        &format!(
-            "[Hotkeys][diag] binding_parsed total={}",
-            bindings
-                .all_groups()
-                .iter()
-                .map(|group| group.len())
-                .sum::<usize>()
-        ),
-    );
+    // Ring buffer, NOT the log file: both call sites live on the hook thread
+    // (startup + every re-parse), where file logging is forbidden
+    // (AGENTS.md §2.17). The old file-writing version wrote 2-3 lines
+    // per re-parse — thousands of lines per session — drowning the real hotkey
+    // diagnostics in `%TEMP%\nanoclick_web.log`. `hotkey_diag_dump` (Dump to
+    // log) surfaces these on demand instead.
+    hotkey_diag_push(format!(
+        "resolved: toggle={} mode={} emergency={} speed_up={} slow_down={} capture={} record={}",
+        bindings.toggle.len(),
+        bindings.mode_switch.len(),
+        bindings.emergency_stop.len(),
+        bindings.speed_up.len(),
+        bindings.slow_down.len(),
+        bindings.capture_pos.len(),
+        bindings.record_toggle.len(),
+    ));
+    hotkey_diag_push(format!(
+        "binding_parsed total={}",
+        bindings
+            .all_groups()
+            .iter()
+            .map(|group| group.len())
+            .sum::<usize>()
+    ));
     if bindings.invalid_bindings > 0 {
-        crate::debug_log_internal(
-            "warn",
-            &format!(
-                "[Hotkeys][diag] invalid_binding_count={}",
-                bindings.invalid_bindings
-            ),
-        );
+        hotkey_diag_push(format!(
+            "invalid_binding_count={}",
+            bindings.invalid_bindings
+        ));
     }
 }
 
@@ -1998,8 +2011,17 @@ mod physical_integration_tests {
         // the system input chain, and dropping the event is now unrecoverable
         // (the fallback that re-detected dropped combos was removed).
         let src = include_str!("mod.rs");
+        // Assert on the MECHANISM, in the exact vocabulary the ban is about:
+        // a global sender whose delivery can fail under contention is what
+        // dropped events. The live design hands over through a thread-local
+        // sender with no lock that can contend at all (`send_hook_event` —
+        // thread-local `HOTKEY_TX`, `.send()`, failed hand-overs counted in
+        // `HOTKEY_TX_FAILED`). Any `try_lock()` on a sender path, or a
+        // `OnceLock`-held Sender behind a Mutex, is the banned shape coming
+        // back.
         assert!(
-            !src.contains("GLOBAL_HOTKEY_TX"),
+            !src.contains("OnceLock<Mutex<Option<Sender<GlobalKeyEvent>>>")
+                && !src.contains("OnceLock<StdMutex<Option<Sender<GlobalKeyEvent>>>"),
             "the fallible global sender is back: its try_lock() dropped hook events \
              and the fallback that re-detected them no longer exists"
         );

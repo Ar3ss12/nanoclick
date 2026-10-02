@@ -8,6 +8,8 @@ html, body {
   overflow: hidden;
   pointer-events: none;
   user-select: none;
+  /* Off-screen compositing hint — same as main window (see style.css). */
+  content-visibility: auto;
 }
 
 #rippleCanvas {

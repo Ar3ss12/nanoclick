@@ -528,10 +528,17 @@ fn exit_app(app: AppHandle) {
     // unload is deliberate (deep sleep), so the call must not kill the backend
     // we just decided to keep alive.
     //
-    // `MAIN_IN_TRAY` covers the same unload one step later: the suspension clears
-    // `TRAY_SUSPEND_ARMED` as soon as the destroy loop returns, while WebView2 fires
-    // `beforeunload` asynchronously — the call then landed after the guard was gone
-    // and took the whole app down ("it quits right after I close it to the tray").
+    // Two guards cover the window between "WebViews destroyed" and "new page booted":
+    //
+    // `TRAY_SUSPEND_ARMED` is set at the start of `suspend_main_webview_to_tray`
+    // and is NOT cleared until `frontend_ready()` fires on the *new* page. This
+    // closes the race where WebView2 delivers `beforeunload` asynchronously, after
+    // `destroy()` returned but before `frontend_ready` — that window used to be
+    // unguarded once `restore_main_window` had cleared `MAIN_IN_TRAY`.
+    //
+    // `MAIN_IN_TRAY` covers the plain minimize-to-tray path (no deep sleep) where
+    // the page is never destroyed and `TRAY_SUSPEND_ARMED` is never set.
+    //
     // A page-driven exit is never legitimate while the interface lives in the tray;
     // the tray's own Quit calls `shutdown_application` directly.
     if TRAY_SUSPEND_ARMED.load(Ordering::Acquire) || MAIN_IN_TRAY.load(Ordering::Acquire) {
@@ -603,6 +610,16 @@ pub(crate) fn restore_main_window(app: &AppHandle) {
         // skipped them because the app went to the tray first).
         persist_window_visibility(app, true);
         show_secondary_windows(app);
+        if let Some(state) = app.try_state::<AppState>() {
+            state.scheduler.emit_status_now(
+                app,
+                if state.scheduler.is_active() {
+                    "RUNNING"
+                } else {
+                    "IDLE"
+                },
+            );
+        }
         debug_log_internal("info", "[Tray] main window restored");
         return;
     }
@@ -1120,6 +1137,21 @@ fn watchdog_verdict(ready: bool, reloads_done: u8) -> WatchdogVerdict {
 #[tauri::command]
 fn frontend_ready(app: AppHandle) {
     FRONTEND_READY_AT.store(now_ms(), Ordering::Release);
+    // The new page has fully booted. Clear the deep-sleep guard that was
+    // keeping `exit_app` blocked since `suspend_main_webview_to_tray`.
+    //
+    // Why here and not right after `w.destroy()`:
+    // WebView2 fires `beforeunload` asynchronously. A late event from the
+    // destroyed WebView arrives after `destroy()` returns, but before the
+    // rebuilt window has booted. If the flag were cleared at destroy-time,
+    // that `beforeunload` → `exit_app` would find both guards false and
+    // execute a real shutdown (measured: "press hotkey, app exits completely").
+    // Clearing here is safe — the new page is live and any `exit_app` from
+    // this point forward is a genuine user request.
+    //
+    // On a normal (non-deep-sleep) boot `TRAY_SUSPEND_ARMED` is already
+    // false, so this store is a no-op.
+    TRAY_SUSPEND_ARMED.store(false, Ordering::Release);
     // A window rebuilt after deep sleep waits for this moment to become visible:
     // showing a fresh WebView earlier would paint the DWM white rectangle.
     if SHOW_ON_READY.swap(false, Ordering::AcqRel) {
@@ -1331,7 +1363,18 @@ pub(crate) fn suspend_main_webview_to_tray(app: &AppHandle) {
             if let Some(w) = app_main.get_webview_window("main") {
                 let _ = w.destroy();
             }
-            TRAY_SUSPEND_ARMED.store(false, Ordering::Release);
+            // NOTE: TRAY_SUSPEND_ARMED is NOT cleared here.
+            //
+            // WebView2 fires `beforeunload` asynchronously — the event can arrive
+            // on the Tauri dispatch thread *after* `destroy()` returns. If we clear
+            // the flag here, a late `beforeunload` → `exit_app` call finds both
+            // `TRAY_SUSPEND_ARMED = false` and `MAIN_IN_TRAY = false` (the window
+            // was already restored by `restore_main_window`) and executes a real
+            // shutdown — exactly the "presses 5, app closes" symptom.
+            //
+            // The flag is cleared in `frontend_ready()` instead, once the new page
+            // has fully booted. Any `exit_app` that arrives in the gap is correctly
+            // treated as "the interface lives in the tray" and ignored.
             debug_log_internal(
                 "info",
                 &format!("[Tray] deep sleep: WebViews destroyed (flush acked: {acked})"),
@@ -1606,6 +1649,7 @@ pub fn run() {
 
     let scheduler = Arc::new(ClickScheduler::new());
     scheduler.set_config(config::Config::from(initial_app_cfg.clone()));
+    scheduler.update_presets(crate::persistence::presets::load_presets());
 
     let scheduler_for_setup = Arc::clone(&scheduler);
     let config_manager_arc = Arc::clone(&config_manager);

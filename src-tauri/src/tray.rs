@@ -19,6 +19,12 @@
 //! * Own thread with a blocking `GetMessageW` pump: zero CPU when idle, and
 //!   nothing here sits on the click/hook hot path. Window work is handed to the
 //!   Tauri event loop through `AppHandle::run_on_main_thread`.
+//!   Scope of that claim: the *pump* never polls. The process-wide idle load is
+//!   owned elsewhere and was audited on 2026-09-27 — the app-profile poller is
+//!   mtime-gated (`lib.rs`), the observer watches at 2 s, and the LL-hook loop
+//!   parks in `MsgWaitForMultipleObjects` (a real kernel sleep, woken by the key
+//!   event itself; the old per-binding `GetAsyncKeyState` scan is gone). Do not
+//!   read "zero CPU" as "the process does nothing while it sits in the tray".
 //! * No file logging inside the message pump (same rule as the LL-hook loop)
 //!   and no `unwrap()`: a missing icon must never take the backend down.
 //! * The icon comes from the resource this binary embeds (`build.rs` → `winres`

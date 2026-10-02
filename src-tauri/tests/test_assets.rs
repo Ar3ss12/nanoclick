@@ -1609,6 +1609,14 @@ fn test_tray_hardening_and_input_diagnostics_wiring() {
         main_js.contains("dumpInputDiagBtn") && main_js.contains("invoke(\"dump_input_diagnostics\")"),
         "main.js must offer the diagnostics dump"
     );
+    // A freshly recorded binding that shares its firing trigger with another
+    // action must say so: the field config proved one press can silently fire
+    // two actions (toggle="1" + mode_switch="*+1").
+    assert!(
+        main_js.contains("hotkeyTriggerOf")
+            && main_js.contains("shares its trigger with"),
+        "the recorder must warn when a new binding shares its trigger with another action"
+    );
     assert!(
         main_js.contains("trayLifeCheckbox")
             && main_js.contains("currentConfig.ui.deep_sleep_to_tray = trayLifeCheckbox.checked"),
@@ -2920,6 +2928,33 @@ fn test_nothing_resurrects_a_window_the_user_put_in_the_tray() {
             < exit_app.find("shutdown_application").unwrap_or(usize::MAX),
         "the guard must come BEFORE the shutdown call"
     );
+
+    // TRAY_SUSPEND_ARMED must stay true until `frontend_ready()`, NOT be cleared
+    // right after `w.destroy()`. WebView2 fires `beforeunload` asynchronously —
+    // the event can arrive after `destroy()` returned but before the new page
+    // booted. In that gap `restore_main_window` has already set MAIN_IN_TRAY=false,
+    // so an early clear of TRAY_SUSPEND_ARMED lets `exit_app` through and the whole
+    // app shuts down (measured: "press hotkey, app closes completely").
+    let suspend = section(
+        lib_src,
+        "fn suspend_main_webview_to_tray",
+        "pub(crate) fn shutdown_application",
+    );
+    assert!(
+        !suspend.contains("TRAY_SUSPEND_ARMED.store(false"),
+        "TRAY_SUSPEND_ARMED must NOT be cleared inside suspend_main_webview_to_tray — \
+         clear it in frontend_ready() instead, after the new page has fully booted"
+    );
+    let ready_fn = section(lib_src, "fn frontend_ready", "fn spawn_frontend_watchdog");
+    assert!(
+        ready_fn.contains("TRAY_SUSPEND_ARMED.store(false"),
+        "TRAY_SUSPEND_ARMED must be cleared in frontend_ready() once the new page is live"
+    );
+    assert!(
+        ready_fn.find("TRAY_SUSPEND_ARMED.store(false").unwrap_or(usize::MAX)
+            < ready_fn.find("SHOW_ON_READY").unwrap_or(usize::MAX),
+        "the armed flag must be cleared before any window show in frontend_ready"
+    );
 }
 
 /// Starting the clicker must never spin up a WebView for an interface that is not
@@ -3530,22 +3565,44 @@ fn the_hook_uses_the_policy_not_the_free_function() {
     );
 }
 
-/// Layer A must be re-applied after every re-parse, and the ordering is the
-/// contract: a config save may run `rebuild` in between, never after.
+/// Layer A must be applied BOTH on startup and on every re-parse.
+///
+/// The previous version compared two `find()` positions and passed while the
+/// shield was applied ONLY on re-parse: `find()` returned the FIRST
+/// `from_snapshot` (the startup one) and the single `exempt_all` sat later in the
+/// file, so the ordering assertion was satisfied by the wrong call. That is how
+/// "all tests green, hotkey still dead" shipped. This version counts the call
+/// sites and requires one on each path.
 #[test]
 fn the_binding_shield_is_applied_on_every_reparse() {
     let src = include_str!("../src/platform/windows/mod.rs");
-    let reparse = src
-        .find("bindings = HotkeyBindings::from_snapshot(&snapshot);")
-        .expect("the hook must re-parse bindings on a version change");
-    let shield = src
-        .find("exempt_all(bindings.policy_keys())")
-        .expect("the hook must exempt every bound key");
-    assert!(
-        shield > reparse,
-        "the binding shield must be applied AFTER the re-parse, otherwise a \
-         re-parse would leave stale exemptions"
+    let helper = "apply_binding_shield(&scheduler, &bindings);";
+    let calls = src.matches(helper).count();
+    assert_eq!(
+        calls,
+        2,
+        "the binding shield must be applied on startup AND after a re-parse \
+         (found {calls} call sites). `seen_version` is seeded with the current \
+         version, so the re-parse block never runs at boot — a startup-only \
+         omission leaves every bare-letter toggle dead until the first save."
     );
+
+    // Each call site must sit on its own path.
+    let start = src
+        .find("let mut bindings = {")
+        .expect("the hook must build initial bindings at startup");
+    let first = src[start..].find(helper).expect("startup shield call") + start;
+    assert!(first > start, "the startup call must follow the initial bindings");
+
+    let reparse = src
+        .find("if current_version != seen_version {")
+        .expect("the re-parse block must exist");
+    let second = src[reparse..].find(helper).expect("re-parse shield call") + reparse;
+    assert!(
+        second > reparse,
+        "the re-parse call must live inside the version-change block"
+    );
+    assert_ne!(first, second, "the two call sites must be distinct");
 
     // Every group contributes, including the per-preset ones and modifiers.
     let start = src
@@ -3661,6 +3718,58 @@ fn test_key_policy_doc_exists_and_names_the_invariant() {
     }
 }
 
+/// `log_bindings` and the whole re-parse path must never write to the log file.
+///
+/// Both `log_bindings` call sites live on the hook thread (startup + every
+/// config save), where file logging is forbidden (`AGENTS.md` §2.17). The old
+/// version wrote 2-3 lines per re-parse (thousands per session — 3180 measured
+/// `resolved:` lines in one field log), drowning the real hotkey diagnostics.
+#[test]
+fn the_hook_never_file_logs_binding_diagnostics() {
+    let src = include_str!("../src/platform/windows/mod.rs");
+    // `log_bindings` runs on the hook thread (startup + every re-parse), where
+    // file logging is forbidden — so its body must contain no file call at all.
+    // (Slice the function instead of matching one-liners: `format!(` and the
+    // string sit on different lines, which a naive adjacent-match misses.)
+    let start = src
+        .find("fn log_bindings(")
+        .expect("log_bindings must exist");
+    // Anchor on the function's own closing brace: the doc comment of the NEXT
+    // function follows it, and both endings below cover the LF/CRLF history
+    // (the tree has carried both; `str::find` must not depend on which one
+    // this checkout uses).
+    let tail = &src[start..];
+    let end = tail
+        .find("}\n\n/// Parse a single key label")
+        .or_else(|| tail.find("}\r\n\r\n/// Parse a single key label"))
+        .map(|i| start + i)
+        .expect("end of log_bindings not found");
+    let body = &src[start..end];
+    // No CALL may write to the file here — scan for invocations, not for the
+    // helper's name in prose (comments name it when they explain the ban).
+    assert!(
+        !body.contains("debug_log_internal("),
+        "log_bindings() runs on the hook thread — it must push to the ring, not the file"
+    );
+    for needle in [
+        "resolved: toggle=",
+        "binding_parsed total=",
+        "invalid_binding_count=",
+    ] {
+        assert!(
+            body.contains(needle),
+            "log_bindings() must still report `{needle}` — through the ring"
+        );
+    }
+    // The invalid-binding diagnostic must also be ring-only, exactly once.
+    assert_eq!(
+        src.matches("hotkey_diag_push(format!(\"reject_reason=invalid_binding")
+            .count(),
+        1,
+        "an invalid binding must still be reported through the diag ring"
+    );
+}
+
 /// The UIPI check must sit in the choke point every click passes through, with
 /// the throttle in front of the system calls.
 #[test]
@@ -3744,3 +3853,302 @@ fn the_key_policy_takes_no_lock_on_the_hot_path() {
          separate bitmaps — one bitmap would let `rebuild` clear the shield"
     );
 }
+
+/// The floating HUD must be resilient against slow WebView2 initialization:
+/// 1. `hud.js` must retry at least 60 times (3 seconds) before giving up;
+/// 2. `hud.js` must report timeouts and invoke errors to `__nanoclickBootReport`;
+/// 3. `hud.js` must raise `__nanoclick_hud_boot_ok__ = true` so boot_guard can verify it;
+/// 4. `hud.html` must wire the guard and page script correctly.
+#[test]
+fn test_hud_resilience_and_boot_report_wiring() {
+    let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
+    let read_asset = |name: &str| -> Option<String> {
+        let key = tauri::utils::assets::AssetKey::from(name);
+        ctx.assets()
+            .get(&key)
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+    };
+
+    let hud_js = read_asset("hud.js").expect("hud.js must be embedded");
+    assert!(
+        hud_js.contains("attachListener(60)"),
+        "hud.js must allow at least 60 retries (3000ms window) for Tauri API binding under CPU load"
+    );
+    assert!(
+        hud_js.contains("window.__nanoclickBootReport"),
+        "hud.js must report failures to window.__nanoclickBootReport for release diagnostics"
+    );
+    assert!(
+        hud_js.contains("listen(\"hud-clicks\""),
+        "hud.js must listen for hud-clicks IPC events"
+    );
+    assert!(
+        hud_js.contains("invoke(\"hud_ready\")"),
+        "hud.js must signal hud_ready once attached"
+    );
+    assert!(
+        hud_js.contains("__nanoclick_hud_boot_ok__ = true"),
+        "hud.js must raise __nanoclick_hud_boot_ok__ boot canary"
+    );
+
+    let hud_html = read_asset("hud.html").expect("hud.html must be embedded");
+    assert!(
+        hud_html.contains("data-boot-flag=\"__nanoclick_hud_boot_ok__\""),
+        "hud.html must wire boot_guard to watch __nanoclick_hud_boot_ok__"
+    );
+}
+
+/// The click scheduler must emit `hud-clicks` only to the "hud" window (never broadcast)
+/// and must never unwrap on IPC emit or window retrieval.
+#[test]
+fn test_hud_targeted_emit_and_no_unwrap() {
+    let scheduler_src = include_str!("../src/scheduler.rs");
+    let status_and_hud = scheduler_src
+        .split("fn status_and_hud_emit")
+        .nth(1)
+        .expect("status_and_hud_emit must exist in scheduler.rs");
+    let body = status_and_hud
+        .split("fn emit_status_now")
+        .next()
+        .unwrap_or(status_and_hud);
+
+    assert!(
+        body.contains("get_webview_window(\"hud\")"),
+        "scheduler must look up the targeted 'hud' window"
+    );
+    assert!(
+        body.contains("hud.emit(\"hud-clicks\", total)"),
+        "scheduler must emit hud-clicks directly to the hud window handle"
+    );
+    assert!(
+        !body.contains("unwrap()"),
+        "status_and_hud_emit must never unwrap on window lookups or event emissions"
+    );
+    assert!(
+        !body.contains("expect("),
+        "status_and_hud_emit must never expect on window lookups or event emissions"
+    );
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// IN-WINDOW HOTKEY & FOCUS RESYNC TESTS (Suite 1..14)
+// ══════════════════════════════════════════════════════════════════════
+
+/// Pure matcher simulation in Rust that mirrors `_matchesInWindowHotkey` from main.js
+fn matches_in_window_hotkey(binding_str: &str, current_key: &str, held_keys: &[&str]) -> bool {
+    if binding_str.trim().is_empty() {
+        return false;
+    }
+    let groups: Vec<&str> = binding_str
+        .split(|c| c == '/' || c == '|')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    for group in groups {
+        let parts: Vec<&str> = group.split('+').map(str::trim).filter(|s| !s.is_empty()).collect();
+        if parts.is_empty() {
+            continue;
+        }
+        let trigger = parts[parts.len() - 1];
+        let required = &parts[..parts.len() - 1];
+
+        if !trigger.eq_ignore_ascii_case(current_key) {
+            continue;
+        }
+
+        let all_held = required.iter().all(|&req| {
+            held_keys.iter().any(|&held| {
+                if held.eq_ignore_ascii_case(req) {
+                    return true;
+                }
+                if req.eq_ignore_ascii_case("ctrl")
+                    && (held.eq_ignore_ascii_case("controlleft")
+                        || held.eq_ignore_ascii_case("controlright")
+                        || held.eq_ignore_ascii_case("ctrl"))
+                {
+                    return true;
+                }
+                if req.eq_ignore_ascii_case("alt")
+                    && (held.eq_ignore_ascii_case("altleft")
+                        || held.eq_ignore_ascii_case("altright")
+                        || held.eq_ignore_ascii_case("alt"))
+                {
+                    return true;
+                }
+                if req.eq_ignore_ascii_case("shift")
+                    && (held.eq_ignore_ascii_case("shiftleft")
+                        || held.eq_ignore_ascii_case("shiftright")
+                        || held.eq_ignore_ascii_case("shift"))
+                {
+                    return true;
+                }
+                false
+            })
+        });
+
+        if all_held {
+            return true;
+        }
+    }
+    false
+}
+
+#[test]
+fn test_in_window_hotkey_single_letter_matches() {
+    assert!(matches_in_window_hotkey("R", "R", &["R"]));
+    assert!(matches_in_window_hotkey("K", "K", &["K"]));
+    assert!(!matches_in_window_hotkey("R", "T", &["T"]));
+}
+
+#[test]
+fn test_in_window_hotkey_case_insensitivity() {
+    assert!(matches_in_window_hotkey("r", "R", &["R"]));
+    assert!(matches_in_window_hotkey("R", "r", &["r"]));
+    assert!(matches_in_window_hotkey("Ctrl+Alt+m", "M", &["ctrl", "alt", "m"]));
+}
+
+#[test]
+fn test_in_window_hotkey_chord_star_plus_one() {
+    // Mode switch combo `*+1`
+    assert!(matches_in_window_hotkey("*+1", "1", &["*", "1"]));
+    // Missing `*` in held keys must reject
+    assert!(!matches_in_window_hotkey("*+1", "1", &["1"]));
+}
+
+#[test]
+fn test_in_window_hotkey_chord_ctrl_alt_m() {
+    // Mode switch combo `Ctrl+Alt+M`
+    assert!(matches_in_window_hotkey("Ctrl+Alt+M", "M", &["Ctrl", "Alt", "M"]));
+    assert!(matches_in_window_hotkey("Ctrl+Alt+M", "M", &["ControlLeft", "AltLeft", "M"]));
+    // Missing Alt
+    assert!(!matches_in_window_hotkey("Ctrl+Alt+M", "M", &["ControlLeft", "M"]));
+}
+
+#[test]
+fn test_in_window_hotkey_chord_rejects_missing_modifiers() {
+    assert!(!matches_in_window_hotkey("Ctrl+Shift+R", "R", &["Ctrl", "R"]));
+    assert!(!matches_in_window_hotkey("Ctrl+=", "=", &["="]));
+}
+
+#[test]
+fn test_in_window_hotkey_alternatives_slash() {
+    // Toggle binding `R / K`
+    assert!(matches_in_window_hotkey("R / K", "R", &["R"]));
+    assert!(matches_in_window_hotkey("R / K", "K", &["K"]));
+    assert!(!matches_in_window_hotkey("R / K", "J", &["J"]));
+}
+
+#[test]
+fn test_in_window_hotkey_skips_when_typing_in_input() {
+    let main_js = include_str!("../../src/main.js");
+    assert!(
+        main_js.contains("target.tagName === \"INPUT\"")
+            && main_js.contains("target.tagName === \"TEXTAREA\"")
+            && main_js.contains("target.isContentEditable"),
+        "main.js in-window hotkey dispatcher must guard against input, textarea, and contentEditable"
+    );
+}
+
+#[test]
+fn test_in_window_hotkey_skips_during_recording() {
+    let main_js = include_str!("../../src/main.js");
+    assert!(
+        main_js.contains("if (activeRecordingBtn) return;"),
+        "main.js in-window hotkey dispatcher must bypass when user is recording a hotkey"
+    );
+}
+
+#[test]
+fn test_in_window_hotkey_dispatcher_wiring() {
+    let main_js = include_str!("../../src/main.js");
+    assert!(
+        main_js.contains("function _matchesInWindowHotkey"),
+        "main.js must define _matchesInWindowHotkey"
+    );
+    assert!(
+        main_js.contains("const _heldWindowKeys = new Set();"),
+        "main.js must track _heldWindowKeys with a Set"
+    );
+    assert!(
+        main_js.contains("codeToPhysicalKey(e.code, e.key)"),
+        "main.js in-window key listener must normalize physical keys"
+    );
+}
+
+#[test]
+fn test_in_window_held_keys_lifecycle_and_blur_clear() {
+    let main_js = include_str!("../../src/main.js");
+    assert!(
+        main_js.contains("window.addEventListener(\"blur\", () => {"),
+        "main.js must wire blur listener"
+    );
+    assert!(
+        main_js.contains("_heldWindowKeys.clear();"),
+        "main.js must clear _heldWindowKeys on window blur to prevent stuck keys across windows"
+    );
+    assert!(
+        main_js.contains("window.addEventListener(\"keyup\""),
+        "main.js must wire keyup listener to remove keys from _heldWindowKeys"
+    );
+}
+
+#[test]
+fn test_in_window_work_mode_safety_toast_wiring() {
+    let main_js = include_str!("../../src/main.js");
+    assert!(
+        main_js.contains("currentConfig.active_mode === \"work\""),
+        "in-window toggle must check Work Mode"
+    );
+    assert!(
+        main_js.contains("tray_blocked_work_mode"),
+        "in-window toggle in Work Mode must warn with tray_blocked_work_mode toast"
+    );
+}
+
+#[test]
+fn test_in_window_emergency_stop_running_gate() {
+    let main_js = include_str!("../../src/main.js");
+    assert!(
+        main_js.contains("_matchesInWindowHotkey(hotkeys.emergency_stop, physicalKey, _heldWindowKeys)"),
+        "in-window dispatcher must evaluate emergency_stop hotkey"
+    );
+    assert!(
+        main_js.contains("if (isRunning) {"),
+        "in-window emergency stop must act when isRunning is true"
+    );
+}
+
+#[test]
+fn test_in_window_preset_slots_wiring() {
+    let main_js = include_str!("../../src/main.js");
+    assert!(
+        main_js.contains("Array.isArray(hotkeys.preset_hotkeys)"),
+        "in-window dispatcher must check preset_hotkeys array for slot shortcuts"
+    );
+    assert!(
+        main_js.contains("applyPreset(p.id)"),
+        "in-window slot shortcut must call applyPreset"
+    );
+}
+
+#[test]
+fn test_focus_resync_listeners_integrity() {
+    let main_js = include_str!("../../src/main.js");
+    assert!(
+        main_js.contains("async function resyncStatusOnFocus()"),
+        "main.js must define resyncStatusOnFocus"
+    );
+    assert!(
+        main_js.contains("window.addEventListener(\"focus\", () => {"),
+        "main.js must wire focus listener for status resync"
+    );
+    assert!(
+        main_js.contains("document.addEventListener(\"visibilitychange\", () => {"),
+        "main.js must wire visibilitychange listener for status resync"
+    );
+    assert!(
+        main_js.contains("invoke(\"get_status\")"),
+        "resyncStatusOnFocus must query backend status via get_status"
+    );
+}
+

@@ -43,6 +43,13 @@ foreach ($envPath in @("$PSScriptRoot\.env", "$PSScriptRoot\..\.env")) {
     }
 }
 
+if (-not $KeyPassword) {
+    $passFile = [System.IO.Path]::ChangeExtension($KeyPath, ".pass")
+    if (Test-Path -LiteralPath $passFile) {
+        $KeyPassword = (Get-Content -LiteralPath $passFile -Raw).Trim()
+    }
+}
+
 if (-not (Test-Path -LiteralPath $File)) {
     throw "Artifact not found: $File"
 }

@@ -2,8 +2,10 @@ use crate::config_manager::{
     AppConfig, AppProfile, ImageTrigger, PresetItem, StatsConfig, CONFIG_SCHEMA_VERSION,
 };
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
 pub const EMBEDDED_DEFAULT_CONFIG_JSON: &str = include_str!("default_config.json");
@@ -98,6 +100,41 @@ fn write_last_good_snapshot(dir_holder: &Path, config: &AppConfig) {
     if write_config_atomic(&snap_path, config).is_ok() {
         harden_last_good(&snap_path);
     }
+}
+
+/// Source-file revision (mtime) already promoted into the golden snapshot, per
+/// config path — the guard that stops a READ from being a WRITE.
+///
+/// MEASURED PROBLEM (2026-09-27): `ensure_config_file` promoted *on every clean
+/// parse*, i.e. on every `ConfigManager::load()`. The app-profile thread loads
+/// the config every 1.5 s, so a process "asleep" in the tray still performed
+/// ~40 snapshot rewrites a minute (pretty-print + tmp write + rename + two
+/// `SetFileAttributesW`) — the loop was never actually idle. A clean parse still
+/// promotes (a hand-edited but valid file stays recoverable), but only once per
+/// source revision. Explicit writers do not go through this guard:
+/// `refresh_last_good_snapshot` (used by `ConfigManager::save`, the repair paths
+/// and the shutdown flush) always writes.
+static LAST_PROMOTED: OnceLock<Mutex<HashMap<PathBuf, SystemTime>>> = OnceLock::new();
+
+/// Promote a cleanly parsed file into the golden snapshot, at most once per
+/// source revision (see [`LAST_PROMOTED`]).
+fn promote_last_good_once(config_path: &Path, source_mtime: Option<SystemTime>, config: &AppConfig) {
+    let Some(mtime) = source_mtime else {
+        // No mtime to reason about (exotic filesystem): keep the old behaviour.
+        write_last_good_snapshot(config_path, config);
+        return;
+    };
+    let map = LAST_PROMOTED.get_or_init(|| Mutex::new(HashMap::new()));
+    match map.lock() {
+        Ok(mut promoted) => {
+            if promoted.get(config_path) == Some(&mtime) {
+                return;
+            }
+            promoted.insert(config_path.to_path_buf(), mtime);
+        }
+        Err(_) => { /* poisoned: fall through and promote, never skip a write */ }
+    }
+    write_last_good_snapshot(config_path, config);
 }
 
 /// Load the golden snapshot if it parses cleanly (no repair allowed —
@@ -685,7 +722,9 @@ pub fn repair_and_patch_value(user_val: &Value) -> Result<(AppConfig, Vec<String
 ///    else falls back to factory default (`CorruptedAndRecovered`).
 /// 4. If file is valid -> snapshots it as last-known-good (hardened
 ///    readonly+hidden on Windows), applies schema migration if needed
-///    (`Migrated` or `LoadedExisting`).
+///    (`Migrated` or `LoadedExisting`). The snapshot is only rewritten when the
+///    file's mtime moved since the last promotion, so a *read* is not a disk
+///    write on every call (see `promote_last_good_once`).
 pub fn ensure_config_file(config_path: &Path) -> (AppConfig, SelfHealingAction) {
     if !config_path.exists() {
         let default_cfg = get_embedded_default_config();
@@ -693,6 +732,9 @@ pub fn ensure_config_file(config_path: &Path) -> (AppConfig, SelfHealingAction) 
         write_last_good_snapshot(config_path, &default_cfg);
         return (default_cfg, SelfHealingAction::CreatedFresh);
     }
+
+    // Source revision, read once: the promotion guard keys on it.
+    let source_mtime = fs::metadata(config_path).and_then(|m| m.modified()).ok();
 
     let raw_content = match fs::read_to_string(config_path) {
         Ok(c) => c,
@@ -728,8 +770,11 @@ pub fn ensure_config_file(config_path: &Path) -> (AppConfig, SelfHealingAction) 
             write_last_good_snapshot(config_path, &cfg);
             return (cfg, SelfHealingAction::Migrated);
         } else {
-            // Clean parse: this state is proven good — refresh the golden snapshot.
-            write_last_good_snapshot(config_path, &cfg);
+            // Clean parse: this state is proven good. Promote it into the golden
+            // snapshot — but only when the file was actually rewritten since the
+            // last promotion. Promoting on every read made the 1.5 s app-profile
+            // tick rewrite `config.last_good.json` ~40×/min while the app sat idle.
+            promote_last_good_once(config_path, source_mtime, &cfg);
             return (cfg, SelfHealingAction::LoadedExisting);
         }
     }
@@ -1105,6 +1150,63 @@ mod tests {
         assert_eq!(cfg4.engine.target_cps, 10.0);
         let snap2 = last_good_path(&config_file);
         assert!(snap2.exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A clean parse must promote the golden snapshot **once per source change**,
+    /// never once per read.
+    ///
+    /// MEASURED PROBLEM (2026-09-27): the app-profile thread calls
+    /// `ConfigManager::load()` every 1500 ms, and `load()` ends in
+    /// `ensure_config_file`, whose clean-parse branch rewrote
+    /// `config.last_good.json` unconditionally — pretty-print, tmp write, rename,
+    /// then two `SetFileAttributesW` calls. A process "asleep" in the tray
+    /// therefore performed ~40 disk writes a minute: the idle CPU/disk sawtooth
+    /// the user reported. Reading a config that did not change must not touch the
+    /// disk at all.
+    #[test]
+    fn clean_load_promotes_the_snapshot_once_per_change() {
+        let dir = std::env::temp_dir().join(format!("nanoclick_test_promote_{}", std::process::id()));
+        let config_file = dir.join("config.json");
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::create_dir_all(&dir);
+
+        let mut custom = get_embedded_default_config();
+        custom.engine.target_cps = 33.0;
+        write_config_atomic(&config_file, &custom).unwrap();
+
+        // 1. First clean parse of this revision -> the snapshot appears.
+        let (cfg, action) = ensure_config_file(&config_file);
+        assert_eq!(action, SelfHealingAction::LoadedExisting);
+        assert_eq!(cfg.engine.target_cps, 33.0);
+        let snap = last_good_path(&config_file);
+        assert!(snap.exists(), "a clean parse must still create the snapshot");
+        let first = fs::metadata(&snap).unwrap().modified().unwrap();
+
+        // 2. Two more reads of the SAME revision -> no disk write. NTFS has a
+        //    coarse mtime tick, so sleep enough to make a rewrite observable.
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        let _ = ensure_config_file(&config_file);
+        let _ = ensure_config_file(&config_file);
+        let second = fs::metadata(&snap).unwrap().modified().unwrap();
+        assert_eq!(
+            first, second,
+            "reading an unchanged config rewrote the golden snapshot: a read must not be a write"
+        );
+
+        // 3. A real change (a save, a hand edit) promotes again.
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        let mut edited = custom.clone();
+        edited.engine.target_cps = 44.0;
+        write_config_atomic(&config_file, &edited).unwrap();
+        let (cfg2, _) = ensure_config_file(&config_file);
+        assert_eq!(cfg2.engine.target_cps, 44.0);
+        let third = fs::metadata(&snap).unwrap().modified().unwrap();
+        assert_ne!(second, third, "a changed config must refresh the golden snapshot");
+        let snap_cfg: AppConfig =
+            serde_json::from_str(&fs::read_to_string(&snap).unwrap()).unwrap();
+        assert_eq!(snap_cfg.engine.target_cps, 44.0);
 
         let _ = fs::remove_dir_all(&dir);
     }
