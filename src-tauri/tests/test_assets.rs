@@ -4152,3 +4152,66 @@ fn test_focus_resync_listeners_integrity() {
     );
 }
 
+#[test]
+fn test_browser_accelerator_suppression_wiring() {
+    let main_js = include_str!("../../src/main.js");
+    assert!(
+        main_js.contains("// ── BROWSER ACCELERATOR SUPPRESSION ──────────────────────────────"),
+        "main.js must define the browser accelerator suppression block"
+    );
+    assert!(
+        main_js.contains("e.key === \"F5\""),
+        "main.js must suppress F5 reload"
+    );
+    assert!(
+        main_js.contains("(e.key === \"r\" || e.key === \"R\")"),
+        "main.js must suppress Ctrl+R reload"
+    );
+    assert!(
+        main_js.contains("e.preventDefault()"),
+        "suppression listener must call preventDefault"
+    );
+}
+
+#[test]
+fn test_f5_hotkey_parsing_and_recording_wiring() {
+    let main_js = include_str!("../../src/main.js");
+    assert!(
+        main_js.contains("if (code.startsWith(\"F\") && !isNaN(code.slice(1))) return code;"),
+        "codeToPhysicalKey must return F function key codes like F5"
+    );
+
+    let win_mod = include_str!("../src/platform/windows/mod.rs");
+    assert!(
+        win_mod.contains("if let Some(rest) = l.strip_prefix(['f', 'F'])"),
+        "vk_from_label must parse F1..F24 function keys"
+    );
+    assert!(
+        win_mod.contains("return Some(0x70 + (n - 1) as u16)"),
+        "vk_from_label must compute VK_F1..VK_F24 virtual keys"
+    );
+}
+
+#[test]
+fn test_beforeunload_does_not_blindly_kill_backend() {
+    let main_js = include_str!("../../src/main.js");
+    // Ensure beforeunload listener exists
+    assert!(
+        main_js.contains("window.addEventListener(\"beforeunload\""),
+        "main.js must have beforeunload listener"
+    );
+    // Ensure beforeunload does NOT call exit_app directly
+    let beforeunload_block = main_js
+        .split("window.addEventListener(\"beforeunload\"")
+        .nth(1)
+        .unwrap_or("")
+        .split("});")
+        .next()
+        .unwrap_or("");
+    assert!(
+        !beforeunload_block.contains("invoke(\"exit_app\")"),
+        "beforeunload must NOT call exit_app on arbitrary webview reloads/navigations"
+    );
+}
+
+

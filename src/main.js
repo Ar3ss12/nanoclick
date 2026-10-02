@@ -23,6 +23,36 @@ function bootCanary(label) {
 }
 bootCanary("main.js evaluated");
 
+// ── BROWSER ACCELERATOR SUPPRESSION ──────────────────────────────
+// In WebView2 (Chromium), F5, Ctrl+R, F7, F3, Ctrl+F, Ctrl+P, Ctrl+S are default
+// browser shortcuts (page reload, caret browsing, find, print, save).
+// In a desktop automation utility, F5 is a frequent user-bound hotkey, NOT
+// a page reload command. Unchecked, F5 triggers page reload -> beforeunload ->
+// exit_app -> terminates the application before saveConfig can run.
+// Intercepting at capture phase (useCapture: true) blocks browser default handling
+// while allowing the hotkey recorder and DOM dispatcher to handle the key cleanly.
+window.addEventListener(
+  "keydown",
+  (e) => {
+    const isReload =
+      e.key === "F5" ||
+      ((e.ctrlKey || e.metaKey) && (e.key === "r" || e.key === "R"));
+    const isCaretBrowsing = e.key === "F7";
+    const isBrowserFind =
+      e.key === "F3" ||
+      ((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "F"));
+    const isBrowserPrint =
+      (e.ctrlKey || e.metaKey) && (e.key === "p" || e.key === "P");
+    const isBrowserSave =
+      (e.ctrlKey || e.metaKey) && (e.key === "s" || e.key === "S");
+
+    if (isReload || isCaretBrowsing || isBrowserFind || isBrowserPrint || isBrowserSave) {
+      e.preventDefault();
+    }
+  },
+  true
+);
+
 // Forward a client-side crash to the Rust log (%TEMP%\nanoclick_web.log).
 // Level "error" (and "warn") is written even in release builds — the backend
 // filters only "info" when debug mode is off (see `debug_log_internal` in
@@ -6614,13 +6644,9 @@ window.__nanoclick_tray_flush__ = async () => {
 window.addEventListener("beforeunload", () => {
   // Webview2 fires beforeunload for internal reloads with no trusted user
   // intent; the app's own CloseRequested path in Rust (RunEvent::WindowEvent)
-  // already performs the full shutdown, so a JS-initiated exit here is only
-  // needed as a last-resort fallback. Gate it behind the same flag the
-  // updater relaunch uses: a page that is being swapped out must NOT kill us.
+  // already performs the full shutdown, so an accidental webview reload or navigation
+  // must NEVER kill the backend process.
   if (window.__NANOCLICK_RELOADING__) return;
-  if (typeof invoke === "function") {
-    invoke("exit_app").catch(() => {});
-  }
 });
 
 window.addEventListener("nanoclick-language-changed", () => {
