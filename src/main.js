@@ -53,6 +53,15 @@ window.addEventListener(
   true
 );
 
+// ── CONTEXT MENU SUPPRESSION ──────────────────────────────────────
+// The Chromium/WebView2 native right-click context menu is never useful in
+// this app and actively harmful when "right mouse button" is configured as the
+// click mode: synthetic MOUSEEVENTF_RIGHTDOWN events that land on the NanoClick
+// window open the context menu, which steals the foreground → the focus-loss
+// guard stops the autoclicker, and the toggle hotkey cannot reach the page
+// while the menu is open. Suppress it unconditionally at the capture phase.
+window.addEventListener("contextmenu", (e) => e.preventDefault(), true);
+
 // Forward a client-side crash to the Rust log (%TEMP%\nanoclick_web.log).
 // Level "error" (and "warn") is written even in release builds — the backend
 // filters only "info" when debug mode is off (see `debug_log_internal` in

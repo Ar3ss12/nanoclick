@@ -1,6 +1,10 @@
 // nanoclick floating HUD — displays session click count.
 // Renders immediately on DOM ready (no opacity gate).
 // Updates in real-time via targeted hud-clicks IPC events from scheduler.rs.
+
+// Suppress native context menu on all HUD pages (right-click click mode support).
+window.addEventListener("contextmenu", (e) => e.preventDefault(), true);
+
 function initHud() {
   const el = document.getElementById("hud");
 

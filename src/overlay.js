@@ -2,6 +2,9 @@
 // Zero-overhead hardware-accelerated Canvas 2D ripple renderer.
 // Completely eliminates DOM allocation churn, orphaned nodes, and timer leaks.
 
+// Suppress native context menu on all overlay pages (right-click click mode support).
+window.addEventListener("contextmenu", (e) => e.preventDefault(), true);
+
 document.addEventListener("DOMContentLoaded", async () => {
   const tauri = window.__TAURI__;
   const canvas = document.getElementById("rippleCanvas");

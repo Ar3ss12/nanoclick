@@ -4240,3 +4240,20 @@ fn test_hotkey_toggle_bypasses_gui_lock_and_stops_immediately() {
 
 
 
+
+#[test]
+fn test_context_menu_is_suppressed_on_all_pages() {
+    // The Chromium/WebView2 native right-click context menu must be disabled on
+    // all pages. Without suppression, synthetic MOUSEEVENTF_RIGHTDOWN events
+    // (produced when "right mouse button" is configured) that land on a NanoClick
+    // window open the context menu — it steals the foreground, the focus-loss
+    // guard stops the clicker, and the toggle hotkey cannot reach the page while
+    // the menu is open.
+    let main_js    = include_str!("../../src/main.js");
+    let hud_js     = include_str!("../../src/hud.js");
+    let overlay_js = include_str!("../../src/overlay.js");
+    let needle = r#"window.addEventListener("contextmenu", (e) => e.preventDefault(), true)"#;
+    assert!(main_js.contains(needle),    "main.js must suppress contextmenu at capture phase");
+    assert!(hud_js.contains(needle),     "hud.js must suppress contextmenu at capture phase");
+    assert!(overlay_js.contains(needle), "overlay.js must suppress contextmenu at capture phase");
+}
