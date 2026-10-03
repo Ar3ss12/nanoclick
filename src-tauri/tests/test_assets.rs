@@ -4214,4 +4214,29 @@ fn test_beforeunload_does_not_blindly_kill_backend() {
     );
 }
 
+#[test]
+fn test_hotkey_toggle_bypasses_gui_lock_and_stops_immediately() {
+    let main_js = include_str!("../../src/main.js");
+    // Ensure executeStartAutomation accepts options with skipGuiLock
+    assert!(
+        main_js.contains("async function executeStartAutomation(options = {})"),
+        "executeStartAutomation must accept options parameter"
+    );
+    assert!(
+        main_js.contains("if (!options.skipGuiLock) {"),
+        "executeStartAutomation must guard button lock with skipGuiLock"
+    );
+    // Ensure in-window hotkey dispatching does NOT route through toggleBtn.click()
+    assert!(
+        main_js.contains("executeStartAutomation({ skipGuiLock: true });"),
+        "in-window hotkey toggle must call executeStartAutomation with skipGuiLock: true"
+    );
+    // Ensure stop path resets isButtonLocked and guiLockTimer
+    assert!(
+        main_js.contains("isButtonLocked = false;"),
+        "stop path in executeStartAutomation must clear isButtonLocked immediately"
+    );
+}
+
+
 

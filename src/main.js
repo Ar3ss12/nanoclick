@@ -4491,38 +4491,55 @@ function cancelStartDelay() {
   }
 }
 
-async function executeStartAutomation() {
+async function executeStartAutomation(options = {}) {
   const op = stage("Toggle");
   try {
     // ── STEP 1: Verify UI is in a togglable state ─────────────────────
     await op.run("check-active-mode", () => {
-      if (currentConfig.active_mode === "work") {
+      if (currentConfig.active_mode === "work" && !isRunning) {
         op.log("blocked", "WORK mode — cannot toggle");
         return false; // blocks the stage
       }
       return `mode=${currentConfig.active_mode} ✓`;
     });
 
+    if (startDelayTimer) {
+      cancelStartDelay();
+      if (!isRunning) {
+        return;
+      }
+    }
+
     // ── STEP 2: Lock the button (debounce window) ─────────────────────
     if (!isRunning) {
-      await op.run("apply-button-lock", () => {
-        isButtonLocked = true;
-        if (toggleBtn) toggleBtn.style.pointerEvents = "none";
-        setAutomationButtonLabel("running_locked");
-        return `pointerEvents=none for ${parseInt(guiLockDelayInput?.value, 10) || 1500}ms`;
-      });
+      if (!options.skipGuiLock) {
+        await op.run("apply-button-lock", () => {
+          isButtonLocked = true;
+          if (toggleBtn) toggleBtn.style.pointerEvents = "none";
+          setAutomationButtonLabel("running_locked");
+          return `pointerEvents=none for ${parseInt(guiLockDelayInput?.value, 10) || 1500}ms`;
+        });
 
-      await op.run("start-gui-lock-timer", () => {
-        const lockDuration = parseInt(guiLockDelayInput?.value, 10) || 1500;
-        if (guiLockTimer) clearTimeout(guiLockTimer);
-        guiLockTimer = setTimeout(() => {
-          isButtonLocked = false;
-          if (toggleBtn) toggleBtn.style.pointerEvents = "auto";
-          if (isRunning) setAutomationButtonLabel("stop");
-          logCall("→STAGE✓", "[Toggle] gui-lock released");
-        }, lockDuration);
-        return "timer scheduled";
-      });
+        await op.run("start-gui-lock-timer", () => {
+          const lockDuration = parseInt(guiLockDelayInput?.value, 10) || 1500;
+          if (guiLockTimer) clearTimeout(guiLockTimer);
+          guiLockTimer = setTimeout(() => {
+            isButtonLocked = false;
+            if (toggleBtn) toggleBtn.style.pointerEvents = "auto";
+            if (isRunning) setAutomationButtonLabel("stop");
+            logCall("→STAGE✓", "[Toggle] gui-lock released");
+          }, lockDuration);
+          return "timer scheduled";
+        });
+      } else {
+        // Hotkey start: no GUI lock, button immediately reflects stop/active state
+        if (guiLockTimer) {
+          clearTimeout(guiLockTimer);
+          guiLockTimer = null;
+        }
+        isButtonLocked = false;
+        if (toggleBtn) toggleBtn.style.pointerEvents = "auto";
+      }
 
       // ── STEP 3+4: auto-stop is owned by the BACKEND ────────────────────
       // `stop_duration_ms` / `stop_time_str` are persisted by saveConfig(); the
@@ -4538,8 +4555,15 @@ async function executeStartAutomation() {
         return `${ms > 0 ? `${ms}ms` : "-"} / at ${at || "-"} → Rust timer`;
       });
     } else {
-      // Stop path — drop a pending Start countdown (the backend cancels its own
-      // timers by leaving the loop, so there is nothing else to clear here).
+      // Stop path — full reset of all lock state and pending timers.
+      // Hotkey stop or emergency stop always terminates run immediately.
+      if (guiLockTimer) {
+        clearTimeout(guiLockTimer);
+        guiLockTimer = null;
+      }
+      isButtonLocked = false;
+      if (toggleBtn) toggleBtn.style.pointerEvents = "auto";
+
       await op.run("clear-start-countdown", () => {
         clearAutoTimers();
         return "start-delay countdown cancelled";
@@ -5233,6 +5257,7 @@ function _matchesInWindowHotkey(bindingStr, currentKey, heldKeys) {
 
 window.addEventListener("keydown", (e) => {
   if (activeRecordingBtn) return;
+  if (e.repeat) return;
 
   const target = e.target;
   const isInput = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
@@ -5248,7 +5273,7 @@ window.addEventListener("keydown", (e) => {
   if (_matchesInWindowHotkey(hotkeys.emergency_stop, physicalKey, _heldWindowKeys)) {
     if (isRunning) {
       e.preventDefault();
-      if (toggleBtn) toggleBtn.click();
+      executeStartAutomation({ skipGuiLock: true });
       return;
     }
   }
@@ -5263,15 +5288,14 @@ window.addEventListener("keydown", (e) => {
   }
 
   // 3. Toggle clicking (e.g. R or K)
+  // Hotkey toggle bypasses GUI button freeze and stops unconditionally without delay
   if (_matchesInWindowHotkey(hotkeys.toggle, physicalKey, _heldWindowKeys)) {
     e.preventDefault();
-    if (currentConfig.active_mode === "work") {
+    if (currentConfig.active_mode === "work" && !isRunning) {
       showToast(getI18nText("tray_blocked_work_mode", {}, "Blocked: Work Mode is active"), "warn");
       return;
     }
-    if (toggleBtn) {
-      toggleBtn.click();
-    }
+    executeStartAutomation({ skipGuiLock: true });
     return;
   }
 
