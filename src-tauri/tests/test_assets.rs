@@ -4317,3 +4317,155 @@ fn test_sound_manager_assets_and_capabilities() {
         "index.html must include sound_manager.js"
     );
 }
+
+#[test]
+fn test_foreground_patrol_wiring_and_tray_invariant() {
+    // 1. The patrol module must exist and obey the hook contract.
+    let watch = include_str!("../src/platform/windows/foreground_watch.rs");
+    for needle in [
+        "SetWinEventHook",
+        "UnhookWinEvent",
+        "WINEVENT_OUTOFCONTEXT",
+        "WINEVENT_SKIPOWNPROCESS",
+        "EVENT_SYSTEM_FOREGROUND",
+        "GetMessageW",
+        "PostThreadMessageW",
+        "WINEVENT_TX_FAILED",
+        "should_handle_foreground_event",
+    ] {
+        assert!(
+            watch.contains(needle),
+            "foreground_watch.rs must contain `{needle}`"
+        );
+    }
+    // The callback hands over and nothing else: no log, no emit, no lock.
+    let cb = watch
+        .find("unsafe extern \"system\" fn winevent_proc")
+        .expect("winevent_proc must exist");
+    let cb_body = &watch[cb..];
+    let cb_end = cb_body.find("\n}\n").map(|i| i + 3).unwrap_or(cb_body.len());
+    let cb_body = &cb_body[..cb_end];
+    for banned in ["debug_log_internal", ".emit(", "Mutex", "RwLock", "try_lock"] {
+        assert!(
+            !cb_body.contains(banned),
+            "the WinEvent callback must never contain `{banned}` (system chain)"
+        );
+    }
+    assert!(
+        cb_body.contains("WINEVENT_TX_FAILED.fetch_add"),
+        "a dropped hand-over must be counted, never silent"
+    );
+
+    // 2. The F10 invariant: the tray is never resurrected by a block.
+    let lib_src = include_str!("../src/lib.rs");
+    let alert = lib_src
+        .find("fn foreground_alert_on_elevated_focus")
+        .expect("foreground_alert_on_elevated_focus must exist");
+    let alert_body = &lib_src[alert..];
+    let alert_end = alert_body
+        .find("\n}\n")
+        .map(|i| i + 3)
+        .unwrap_or(alert_body.len());
+    let alert_body = &alert_body[..alert_end];
+    assert!(
+        alert_body.contains("main_window_visible(app)"),
+        "the alert must go through the single visibility gate"
+    );
+    assert!(
+        alert_body.contains("notify_balloon"),
+        "the tray path must balloon, never show"
+    );
+    assert!(
+        !alert_body.contains("set_always_on_top"),
+        "no sticky topmost over a crosshair — show+focus only"
+    );
+    // Lifecycle: start once at boot, stop on every teardown path.
+    assert!(
+        lib_src.contains("platform::windows::start_foreground_watch()"),
+        "the patrol must start at boot next to the hotkey backend"
+    );
+    assert!(
+        lib_src.matches("platform::windows::stop_foreground_watch()").count() >= 2,
+        "the patrol must stop in shutdown_application AND RunEvent::Exit"
+    );
+
+    // 3. Task Scheduler surface: pure schtasks CLI, opt-in only, no COM.
+    let uipi = include_str!("../src/platform/windows/uipi.rs");
+    for needle in [
+        "ELEVATED_TASK_NAME",
+        "scheduled_task_create_argv",
+        "scheduled_task_delete_argv",
+        "scheduled_task_query_argv",
+        "classify_schtasks_exit",
+        "register_scheduled_elevated_task",
+        "unregister_scheduled_elevated_task",
+        "/RL",
+        "HIGHEST",
+        "ONLOGON",
+    ] {
+        assert!(uipi.contains(needle), "uipi.rs must contain `{needle}`");
+    }
+    for banned in ["ITaskService", "TaskScheduler", "CoCreateInstance", "winapi::"] {
+        assert!(
+            !uipi.contains(banned),
+            "elevation must stay a schtasks CLI call — no COM (`{banned}`)"
+        );
+    }
+    assert!(
+        !uipi.contains("std::process::Command::new(\"schtasks\")\n        .arg(\"/Create\")"),
+        "argv construction must go through the tested builder, not inline literals"
+    );
+    let cmds = include_str!("../src/commands/tauri_commands.rs");
+    for needle in [
+        "register_elevated_logon_task",
+        "unregister_elevated_logon_task",
+        "get_elevated_logon_task_registered",
+    ] {
+        assert!(cmds.contains(needle), "tauri_commands.rs must expose `{needle}`");
+    }
+    assert!(
+        lib_src.contains("commands::register_elevated_logon_task"),
+        "the new commands must be registered in the invoke handler"
+    );
+
+    // 4. Frontend: the opt-in checkbox + all three locales.
+    let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
+    let html_key = tauri::utils::assets::AssetKey::from("index.html");
+    let html_binding = ctx.assets().get(&html_key).expect("index.html not embedded");
+    let html = String::from_utf8_lossy(&html_binding);
+    assert!(
+        html.contains("id=\"uipiScheduledTaskCheckbox\""),
+        "index.html must have #uipiScheduledTaskCheckbox"
+    );
+    let uipi_key = tauri::utils::assets::AssetKey::from("uipi_manager.js");
+    let uipi_binding = ctx
+        .assets()
+        .get(&uipi_key)
+        .expect("uipi_manager.js must be embedded");
+    let uipi_js = String::from_utf8_lossy(&uipi_binding);
+    for needle in [
+        "register_elevated_logon_task",
+        "unregister_elevated_logon_task",
+        "scheduled_elevated_task",
+        "syncScheduledTaskCheckbox",
+    ] {
+        assert!(uipi_js.contains(needle), "uipi_manager.js must contain `{needle}`");
+    }
+    for locale in ["en", "ua", "ru"] {
+        let asset = format!("locales/{locale}.json");
+        let key = tauri::utils::assets::AssetKey::from(asset.as_str());
+        let bytes = ctx
+            .assets()
+            .get(&key)
+            .unwrap_or_else(|| panic!("{locale}.json must be embedded"));
+        let v: serde_json::Value =
+            serde_json::from_str(&String::from_utf8_lossy(&bytes)).expect("locale must be valid JSON");
+        for k in ["uipi_scheduled_task_checkbox", "uipi_scheduled_task_hint"] {
+            assert!(
+                v.get(k).is_some_and(|x| x.is_string()),
+                "locale {locale} missing key {k}"
+            );
+        }
+    }
+}
+

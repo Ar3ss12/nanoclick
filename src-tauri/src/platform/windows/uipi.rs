@@ -1,4 +1,4 @@
-//! Windows UIPI (User Interface Privilege Isolation), UAC elevation, and DPI awareness.
+﻿//! Windows UIPI (User Interface Privilege Isolation), UAC elevation, and DPI awareness.
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, POINT};
 use windows::Win32::Security::{
@@ -256,6 +256,188 @@ pub fn is_always_run_as_admin() -> bool {
         }
     }
     false
+}
+
+/// Name of the opt-in Task Scheduler entry for seamless elevation.
+///
+/// One task per machine, quoted exe path, `/RL HIGHEST` so the logon trigger
+/// needs the UAC consent exactly ONCE (at registration) and never again.
+pub const ELEVATED_TASK_NAME: &str = "NanoClick (elevated, user logon)";
+
+/// Pure builder for `schtasks /Query` — probes whether the opt-in task
+/// exists, without touching the scheduler. No side effects, unit-tested.
+pub fn scheduled_task_query_argv() -> Vec<String> {
+    vec![
+        "/Query".to_string(),
+        "/TN".to_string(),
+        ELEVATED_TASK_NAME.to_string(),
+    ]
+}
+
+/// Pure builder for `schtasks /Create` — registers the logon task that
+/// starts THIS exe with highest privileges. Quoting the path is load-bearing:
+/// `C:\Program Files\...` without quotes would split the `/TR` argument.
+pub fn scheduled_task_create_argv(exe_path: &str) -> Vec<String> {
+    vec![
+        "/Create".to_string(),
+        "/F".to_string(),
+        "/TN".to_string(),
+        ELEVATED_TASK_NAME.to_string(),
+        "/TR".to_string(),
+        format!("\"{exe_path}\""),
+        "/SC".to_string(),
+        "ONLOGON".to_string(),
+        "/RL".to_string(),
+        "HIGHEST".to_string(),
+    ]
+}
+
+/// Pure builder for `schtasks /Delete` — removes the opt-in task again.
+pub fn scheduled_task_delete_argv() -> Vec<String> {
+    vec![
+        "/Delete".to_string(),
+        "/F".to_string(),
+        "/TN".to_string(),
+        ELEVATED_TASK_NAME.to_string(),
+    ]
+}
+
+/// Classify a `schtasks` exit the way the UI needs it: ok / not-found /
+/// failed-with-stderr. Pure, so the error copy is unit-tested without ever
+/// spawning a process in `cargo test`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduledTaskStatus {
+    Ok,
+    NotFound,
+    Failed,
+}
+
+pub fn classify_schtasks_exit(code: Option<i32>, stderr: &str) -> ScheduledTaskStatus {
+    if code == Some(0) {
+        return ScheduledTaskStatus::Ok;
+    }
+    let lower = stderr.to_lowercase();
+    if lower.contains("cannot find")
+        || lower.contains("not found")
+        || lower.contains("не удается найти")
+        || lower.contains("не знайдено")
+    {
+        ScheduledTaskStatus::NotFound
+    } else {
+        ScheduledTaskStatus::Failed
+    }
+}
+
+/// Does the opt-in elevated logon task exist? Read-only probe (`/Query`),
+/// no mutation, no prompt.
+pub fn is_scheduled_elevated_task_registered() -> bool {
+    let out = std::process::Command::new("schtasks")
+        .args(scheduled_task_query_argv())
+        .output();
+    matches!(out, Ok(o) if o.status.success())
+}
+
+/// Register the opt-in task. The UAC consent happens HERE, once, owned by
+/// the user's explicit click — never at boot, never silently.
+pub fn register_scheduled_elevated_task() -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| format!("failed to get current exe path: {e}"))?;
+    let exe_str = exe
+        .to_str()
+        .ok_or_else(|| "invalid exe path string".to_string())?;
+    let out = std::process::Command::new("schtasks")
+        .args(scheduled_task_create_argv(exe_str))
+        .output()
+        .map_err(|e| format!("failed to run schtasks: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // Honest copy for the toast: a missing service vs a refused consent are
+    // different next steps for the user.
+    match classify_schtasks_exit(out.status.code(), &stderr) {
+        ScheduledTaskStatus::Ok => Ok(()),
+        ScheduledTaskStatus::NotFound => Err(format!(
+            "Task Scheduler not available on this machine: {}",
+            stderr.trim()
+        )),
+        ScheduledTaskStatus::Failed => Err(format!("schtasks /Create failed: {}", stderr.trim())),
+    }
+}
+
+/// Remove the opt-in task again (the checkbox is a real toggle, not a trap).
+pub fn unregister_scheduled_elevated_task() -> Result<(), String> {
+    let out = std::process::Command::new("schtasks")
+        .args(scheduled_task_delete_argv())
+        .output()
+        .map_err(|e| format!("failed to run schtasks: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    match classify_schtasks_exit(out.status.code(), &stderr) {
+        // Deleting a task that is already gone is success, not an error:
+        // the end state (no task) is exactly what the user asked for.
+        ScheduledTaskStatus::NotFound | ScheduledTaskStatus::Ok => Ok(()),
+        ScheduledTaskStatus::Failed => Err(format!("schtasks /Delete failed: {}", stderr.trim())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn task_name_is_stable_and_single() {
+        assert_eq!(ELEVATED_TASK_NAME, "NanoClick (elevated, user logon)");
+    }
+
+    #[test]
+    fn query_argv_probes_without_mutation() {
+        let argv = scheduled_task_query_argv();
+        assert_eq!(argv, vec!["/Query", "/TN", ELEVATED_TASK_NAME]);
+        assert!(!argv.iter().any(|a| a == "/Create" || a == "/Delete"));
+    }
+
+    #[test]
+    fn create_argv_runs_highest_at_logon_with_quoted_exe() {
+        let argv = scheduled_task_create_argv(r"C:\Program Files\NanoClick\NanoClick.exe");
+        let joined = argv.join(" ");
+        assert!(argv.contains(&"/SC".to_string()));
+        assert!(argv.contains(&"ONLOGON".to_string()));
+        assert!(argv.contains(&"/RL".to_string()));
+        assert!(argv.contains(&"HIGHEST".to_string()));
+        // Quoting is load-bearing: an unquoted Program Files path splits /TR.
+        // NOTE: quotes wrap the VALUE element after /TR (one argv item),
+        let tr_value: String = argv
+            .windows(2)
+            .find(|w| w[0] == "/TR")
+            .map(|w| w[1].clone())
+            .expect("trp");
+        assert!(tr_value.starts_with('"'));
+        assert!(tr_value.ends_with('"'));
+        let _ = joined;
+    }
+
+    #[test]
+    fn delete_argv_targets_only_our_task() {
+        let argv = scheduled_task_delete_argv();
+        assert_eq!(argv, vec!["/Delete", "/F", "/TN", ELEVATED_TASK_NAME]);
+    }
+
+    #[test]
+    fn exit_classification_never_spawns_a_process() {
+        use ScheduledTaskStatus::*;
+        assert_eq!(classify_schtasks_exit(Some(0), "anything"), Ok);
+        assert_eq!(
+            classify_schtasks_exit(Some(1), "ERROR: The system cannot find the file specified."),
+            NotFound
+        );
+        assert_eq!(
+            classify_schtasks_exit(Some(1), "Access is denied."),
+            Failed
+        );
+        assert_eq!(classify_schtasks_exit(None, ""), Failed);
+    }
 }
 
 /// Play a standard Windows alert/warning chime when UIPI prevents action.

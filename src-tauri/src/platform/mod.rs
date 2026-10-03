@@ -330,6 +330,16 @@ pub fn set_always_run_as_admin(_enabled: bool) -> Result<(), String> { Ok(()) }
 #[cfg(not(target_os = "windows"))]
 pub fn is_always_run_as_admin() -> bool { false }
 #[cfg(not(target_os = "windows"))]
+pub fn is_scheduled_elevated_task_registered() -> bool { false }
+#[cfg(not(target_os = "windows"))]
+pub fn register_scheduled_elevated_task() -> Result<(), String> {
+    Err("Only supported on Windows".into())
+}
+#[cfg(not(target_os = "windows"))]
+pub fn unregister_scheduled_elevated_task() -> Result<(), String> {
+    Err("Only supported on Windows".into())
+}
+#[cfg(not(target_os = "windows"))]
 pub fn play_warning_sound() {}
 #[cfg(not(target_os = "windows"))]
 pub fn init_dpi_awareness() {}

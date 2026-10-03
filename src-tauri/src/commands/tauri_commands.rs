@@ -31,6 +31,7 @@ pub fn check_elevation() -> serde_json::Value {
     serde_json::json!({
         "is_elevated": crate::platform::is_current_process_elevated(),
         "always_run_as_admin": crate::platform::is_always_run_as_admin(),
+        "scheduled_elevated_task": crate::platform::is_scheduled_elevated_task_registered(),
     })
 }
 
@@ -50,6 +51,26 @@ pub fn set_always_run_as_admin(enabled: bool) -> Result<(), String> {
 #[tauri::command]
 pub fn get_always_run_as_admin() -> bool {
     crate::platform::is_always_run_as_admin()
+}
+
+/// Opt-in seamless elevation: register the logon task (`schtasks /Create
+/// /RL HIGHEST`) so the app starts elevated without a UAC prompt on logon.
+/// The consent happens here, on the user's explicit click — never at boot.
+#[tauri::command]
+pub fn register_elevated_logon_task() -> Result<(), String> {
+    crate::platform::register_scheduled_elevated_task()
+}
+
+/// Remove the opt-in logon task again.
+#[tauri::command]
+pub fn unregister_elevated_logon_task() -> Result<(), String> {
+    crate::platform::unregister_scheduled_elevated_task()
+}
+
+/// Read-only probe: does the opt-in logon task exist?
+#[tauri::command]
+pub fn get_elevated_logon_task_registered() -> bool {
+    crate::platform::is_scheduled_elevated_task_registered()
 }
 
 /// Smart Guard — identify the app the user has focused.

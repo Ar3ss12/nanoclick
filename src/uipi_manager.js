@@ -7,9 +7,10 @@
 // every badge update only allocated garbage — oxlint: consistent-function-scoping.
 const tI18n = (k, fb) => (window.I18nEngine ? window.I18nEngine.t(k, {}, fb) : fb);
 
-const UipiManager = {
+  const UipiManager = {
   isElevated: false,
   alwaysAdmin: false,
+  scheduledTask: false,
   _audioCtx: null,
 
   async init(config) {
@@ -26,7 +27,9 @@ const UipiManager = {
         if (info && typeof info === "object") {
           this.isElevated = !!info.is_elevated;
           this.alwaysAdmin = !!info.always_run_as_admin;
+          this.scheduledTask = !!info.scheduled_elevated_task;
           this.updateHeaderBadge();
+          this.syncScheduledTaskCheckbox();
         }
       }
     } catch (e) {
@@ -85,6 +88,46 @@ const UipiManager = {
         if (window.saveConfig) window.saveConfig();
       });
     }
+
+    const schedCb = document.getElementById("uipiScheduledTaskCheckbox");
+    if (schedCb) {
+      schedCb.checked = this.scheduledTask;
+      schedCb.addEventListener("change", async () => {
+        const enabled = schedCb.checked;
+        try {
+          if (window.__TAURI__?.core?.invoke) {
+            if (enabled) {
+              await window.__TAURI__.core.invoke("register_elevated_logon_task");
+            } else {
+              await window.__TAURI__.core.invoke("unregister_elevated_logon_task");
+            }
+          }
+          this.scheduledTask = enabled;
+        } catch (err) {
+          // A failed schtasks run (no consent, no rights) must not leave the
+          // box checked: the UI reports the state that EXISTS, not the one
+          // the user requested (same rule as the tray toggle).
+          schedCb.checked = false;
+          this.scheduledTask = false;
+          // NOTE: `showToast` from main.js is NOT reachable here — main.js is
+          // an ES module, its top-level functions are module-scoped and
+          // invisible to this classic script. Same failure path as
+          // `restartAsAdmin` below: console + alert.
+          const msg = String(err && err.message ? err.message : err);
+          console.error("[UIPI] Elevated logon task failed:", err);
+          alert(msg);
+        }
+        this.syncScheduledTaskCheckbox();
+      });
+      this.syncScheduledTaskCheckbox();
+    }
+  },
+
+  syncScheduledTaskCheckbox() {
+    const schedCb = document.getElementById("uipiScheduledTaskCheckbox");
+    if (schedCb) schedCb.checked = !!this.scheduledTask;
+    const hint = document.getElementById("uipiScheduledTaskHint");
+    if (hint) hint.classList.toggle("hidden", !this.scheduledTask);
   },
 
   setupListeners() {

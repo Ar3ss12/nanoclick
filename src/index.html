@@ -1467,6 +1467,14 @@
             <span data-i18n="uipi_always_checkbox">Always Run as Administrator (Windows Registry)</span>
           </label>
         </div>
+        <div class="uipi-options-row">
+          <label class="checkbox-row">
+            <input type="checkbox" id="uipiScheduledTaskCheckbox" class="custom-checkbox">
+            <span class="checkbox-box"></span>
+            <span data-i18n="uipi_scheduled_task_checkbox">Start elevated at logon (Task Scheduler, no UAC prompt)</span>
+          </label>
+          <p id="uipiScheduledTaskHint" class="uipi-help-text hidden" data-i18n="uipi_scheduled_task_hint">UAC was accepted once at registration — logons from now on start elevated silently. Uncheck to remove the task.</p>
+        </div>
       </div>
       <div class="modal-footer">
         <button id="uipiCancelBtn" class="preset-modal-btn cancel" data-i18n="uipi_cancel_btn">Cancel</button>

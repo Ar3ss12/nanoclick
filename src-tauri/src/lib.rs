@@ -559,6 +559,16 @@ fn dump_input_diagnostics() -> usize {
     for line in toggles {
         debug_log_internal("warn", &format!("[Diag] toggle: {line}"));
     }
+    #[cfg(target_os = "windows")]
+    {
+        debug_log_internal(
+            "warn",
+            &format!(
+                "[Diag] foreground: undelivered_total={}",
+                crate::platform::windows::foreground_watch::foreground_events_undelivered_total()
+            ),
+        );
+    }
     debug_log_internal("warn", "[Diag] end of input dump");
     total
 }
@@ -903,6 +913,45 @@ pub(crate) fn tray_clicking_active(app: &AppHandle) -> bool {
 fn report_tray_action(app: &AppHandle, msg: &str) {
     if app.get_webview_window("main").is_none() {
         tray::notify_balloon("NanoClick", msg);
+    }
+}
+
+/// A foreground switch onto an elevated (UIPI) window while automation is
+/// live — called on the Tauri main thread from the passive foreground
+/// patrol (`platform::windows::foreground_watch`).
+///
+/// THE F10 INVARIANT LIVES HERE: a window the user put in the tray is NEVER
+/// resurrected by a block. Tray/deep-sleep gets `MessageBeep` (already played
+/// by the caller) + `NotificationStore` entry (already pushed) + a tray
+/// balloon; the UIPI modal waits inside the hidden page for the user's own
+/// return (`syncPendingNotifications`). ONLY a window that is already on
+/// screen (`main_window_visible`) gets the Z-ram: `unminimize + show +
+/// set_focus`, so the alert lands in front of a windowed game instead of
+/// blinking orange behind it. No `set_always_on_top` games: a sticky topmost
+/// over a crosshair is worse than a blink.
+pub(crate) fn foreground_alert_on_elevated_focus(app: &AppHandle) {
+    if !main_window_visible(app) {
+        // `MAIN_IN_TRAY` outranks everything: with deep sleep there is no
+        // WebView at all, and building one here would respawn the whole
+        // `msedgewebview2.exe` tree (~120 MB) for a popup nobody asked for.
+        tray::notify_balloon(
+            "NanoClick",
+            "Focused window runs elevated (UIPI): clicks will be blocked",
+        );
+        debug_log_internal(
+            "warn",
+            "[UIPI] elevated focus while the window lives in the tray (balloon, no window resurrected)",
+        );
+        return;
+    }
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
+        debug_log_internal(
+            "warn",
+            "[UIPI] elevated focus with the window on screen (brought forward, no topmost latch)",
+        );
     }
 }
 
@@ -1455,6 +1504,7 @@ pub(crate) fn shutdown_application(app: &AppHandle) {
     }
     platform::default_input_backend_hotkey_stop();
     platform::stop_recorder_hooks();
+    platform::windows::stop_foreground_watch();
     if let Some(exec) = crate::core::global() {
         exec.stop();
     }
@@ -1957,6 +2007,10 @@ pub fn run() {
             if let Err(e) = hk.start() {
                 crate::debug_log_internal("warn", &format!("[Hotkeys] backend start failed: {e}"));
             }
+            // Passive foreground patrol: one Win32 event per foreground switch
+            // (0% CPU between switches). Warns when automation is live and the
+            // user lands on an elevated window; never resurrects the tray.
+            platform::windows::start_foreground_watch();
             // LAZY secondary WebViews: cold boot = main window ONLY.
             // Overlay is restored here (staggered, off the critical boot path)
             // so persisted visual_ripple=true keeps working without any
@@ -2083,6 +2137,9 @@ pub fn run() {
             commands::restart_as_admin,
             commands::set_always_run_as_admin,
             commands::get_always_run_as_admin,
+            commands::register_elevated_logon_task,
+            commands::unregister_elevated_logon_task,
+            commands::get_elevated_logon_task_registered,
             commands::capture_foreground_app,
             commands::get_smart_guard_defaults,
             commands::get_smart_guard_status,
@@ -2198,6 +2255,7 @@ pub fn run() {
                 // v4.2 — stop via the HotkeyBackend contract.
                 platform::default_input_backend_hotkey_stop();
                 platform::stop_recorder_hooks();
+                platform::windows::stop_foreground_watch();
                 if let Some(exec) = crate::core::global() {
                     exec.stop();
                 }

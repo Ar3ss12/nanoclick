@@ -421,6 +421,8 @@
   "uipi_alert_desc": "The target window is running with elevated privileges (Administrator / UAC), while NanoClick is running in standard mode. Windows prohibits standard processes from sending SendInput to elevated windows.",
   "uipi_help_text": "To click into protected windows (Task Manager, elevated terminals, protected games, etc.), restart NanoClick as Administrator.",
   "uipi_always_checkbox": "Always Run as Administrator (Windows Registry)",
+  "uipi_scheduled_task_checkbox": "Start elevated at logon (Task Scheduler, no UAC prompt)",
+  "uipi_scheduled_task_hint": "UAC was accepted once at registration — logons from now on start elevated silently. Uncheck to remove the task.",
   "uipi_cancel_btn": "Cancel",
   "uipi_restart_btn": "🛡️ Restart as Administrator",
   "update_bar_title": "Update available",
