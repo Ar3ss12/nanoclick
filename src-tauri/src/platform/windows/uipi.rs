@@ -115,7 +115,8 @@ pub fn is_window_elevated(hwnd: HWND) -> bool {
 /// Every click passes through [`uipi_guard_check`], so this is what keeps the
 /// expensive part off the hot path: `WindowFromPoint` + `OpenProcess` +
 /// `GetTokenInformation` run at most this often instead of at 150 CPS.
-pub const UIPI_ALERT_THROTTLE_MS: u64 = 3000;
+/// Tuned from 3000ms to 1500ms for responsive detection.
+pub const UIPI_ALERT_THROTTLE_MS: u64 = 1500;
 
 /// Throttled UIPI check for the shared click path.
 ///
@@ -163,6 +164,14 @@ pub fn uipi_guard_check(x: i32, y: i32) {
     LAST_CHECK.store(now_ms, Ordering::Relaxed);
     play_warning_sound();
     crate::platform::windows::trigger_uipi_block_notification(x, y);
+
+    crate::notifications::push_notification(
+        crate::notifications::NotificationCode::UipiBlocked,
+        "NanoClick — Administrator Rights Required",
+        "Click blocked: the target window runs elevated (UIPI)",
+        Some(serde_json::json!({ "x": x, "y": y })),
+        true,
+    );
 }
 
 /// Check if the target screen point (x, y) resides over a window of an elevated process.

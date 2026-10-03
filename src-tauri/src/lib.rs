@@ -11,6 +11,8 @@ mod scheduler;
 mod overlay;
 mod tray;
 mod watcher;
+pub mod notifications;
+pub use notifications::*;
 
 use config_manager::{AppConfig, ConfigManager};
 use scheduler::ClickScheduler;
@@ -44,6 +46,7 @@ pub struct AppState {
     /// Non-blocking runtime toast queue fed by the observer watcher.
     /// Drained by `poll_file_toasts` (auto-dismiss in UI, no OK bolt).
     pub file_toasts: Mutex<Vec<AppNotice>>,
+    pub notification_store: Arc<NotificationStore>,
 }
 
 /// Shared observer handle so save-commands can mark their own writes.
@@ -166,6 +169,44 @@ fn get_startup_notices(state: State<'_, AppState>) -> Vec<AppNotice> {
 #[tauri::command]
 fn poll_file_toasts(state: State<'_, AppState>) -> Vec<AppNotice> {
     state.file_toasts.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default()
+}
+
+#[tauri::command]
+fn get_notifications(
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+) -> Vec<AppNotification> {
+    state.notification_store.get_all(limit)
+}
+
+#[tauri::command]
+fn get_unread_notifications(state: State<'_, AppState>) -> Vec<AppNotification> {
+    state.notification_store.get_unread()
+}
+
+#[tauri::command]
+fn mark_notifications_read(
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+) -> Result<(), String> {
+    state.notification_store.mark_read(&ids);
+    Ok(())
+}
+
+#[tauri::command]
+fn clear_notifications(state: State<'_, AppState>) -> Result<(), String> {
+    state.notification_store.clear();
+    Ok(())
+}
+
+#[tauri::command]
+fn push_client_notification(
+    state: State<'_, AppState>,
+    notification: AppNotification,
+) -> Result<String, String> {
+    let id = notification.id.clone();
+    state.notification_store.push(notification, None, false);
+    Ok(id)
 }
 
 #[tauri::command]
@@ -1654,11 +1695,15 @@ pub fn run() {
     let scheduler_for_setup = Arc::clone(&scheduler);
     let config_manager_arc = Arc::clone(&config_manager);
 
+    let notification_store = Arc::new(NotificationStore::new());
+    set_global_notification_store(Arc::clone(&notification_store));
+
     let app_state = AppState {
         scheduler,
         config_manager,
         startup_notices,
         file_toasts,
+        notification_store,
     };
 
     let macro_state = commands::MacroState::default();
@@ -1983,6 +2028,11 @@ pub fn run() {
             get_app_config,
             get_startup_notices,
             poll_file_toasts,
+            get_notifications,
+            get_unread_notifications,
+            mark_notifications_read,
+            clear_notifications,
+            push_client_notification,
             save_app_config,
             toggle_mode,
             complete_onboarding,

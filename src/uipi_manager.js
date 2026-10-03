@@ -140,6 +140,10 @@ const UipiManager = {
   },
 
   playAlertChime() {
+    if (window.SoundManager) {
+      window.SoundManager.play("warning");
+      return;
+    }
     try {
       const AudioContext = window.AudioContext || window.webkitAudioContext;
       if (!AudioContext) return;

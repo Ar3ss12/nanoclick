@@ -71,6 +71,7 @@ pub struct Config {
     pub sequence_points: Vec<crate::config_manager::SequencePoint>,
     pub visual_ripple: bool,
     pub presets: Vec<crate::config_manager::PresetItem>,
+    pub show_notifications: bool,
 }
 
 impl Default for Config {
@@ -116,6 +117,7 @@ impl Default for Config {
             sequence_points: Vec::new(),
             visual_ripple: true,
             presets: Vec::new(),
+            show_notifications: true,
         }
     }
 }
@@ -173,6 +175,7 @@ impl From<AppConfig> for Config {
             sequence_points: app_cfg.engine.sequence_points.clone(),
             visual_ripple: app_cfg.ui.visual_ripple,
             presets: app_cfg.presets.clone(),
+            show_notifications: app_cfg.ui.show_notifications,
         }
     }
 }

@@ -426,6 +426,7 @@ impl ClickScheduler {
             app_filter_list: self.app_filter.list(),
             pause_on_focus_loss: self.focus_guard.is_enabled(),
             presets: self.presets.lock().unwrap().clone(),
+            show_notifications: true,
         }
     }
 
@@ -1767,6 +1768,23 @@ impl ClickScheduler {
                 // page folds into its idle state. Emitted AFTER the IDLE status and
                 // OUTSIDE the loop — the click path stays IPC-free.
                 if let Some(reason) = auto_stop_reason {
+                    let code = if reason == "duration" {
+                        crate::notifications::NotificationCode::AutoStopDuration
+                    } else {
+                        crate::notifications::NotificationCode::AutoStopWallclock
+                    };
+                    let title = "NanoClick — Auto-Stop";
+                    let msg = format!("Autoclicker stopped: {reason} limit reached ({auto_stop_elapsed_ms}ms elapsed)");
+                    crate::notifications::push_notification(
+                        code,
+                        title,
+                        &msg,
+                        Some(serde_json::json!({
+                            "reason": reason,
+                            "elapsed_ms": auto_stop_elapsed_ms,
+                        })),
+                        true,
+                    );
                     let _ = app.emit(
                         "auto-stop",
                         serde_json::json!({

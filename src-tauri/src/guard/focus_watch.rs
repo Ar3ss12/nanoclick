@@ -165,8 +165,16 @@ pub fn spawn_focus_watcher_with(
             };
             if focus_lost(&focus_guard, fg.as_deref()) {
                 active.store(false, Ordering::Relaxed);
-                if stop.request_stop(fg) {
+                if stop.request_stop(fg.clone()) {
                     // Won the claim: notify now, don't wait for unwind.
+                    let thief_str = fg.as_deref().unwrap_or("another application");
+                    crate::notifications::push_notification(
+                        crate::notifications::NotificationCode::FocusLossPaused,
+                        "NanoClick — Paused",
+                        &format!("Clicking paused: focus switched to {thief_str}"),
+                        fg.as_ref().map(|t| serde_json::json!({ "exe": t })),
+                        true,
+                    );
                     if let Some(ref app) = app_handle {
                         use tauri::Emitter;
                         let _ = app.emit("focus-loss-paused", stop.take_thief());

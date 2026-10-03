@@ -4257,3 +4257,63 @@ fn test_context_menu_is_suppressed_on_all_pages() {
     assert!(hud_js.contains(needle),     "hud.js must suppress contextmenu at capture phase");
     assert!(overlay_js.contains(needle), "overlay.js must suppress contextmenu at capture phase");
 }
+
+#[test]
+fn test_standardized_notification_protocol_and_store_wiring() {
+    // Protocol integrity tripwire:
+    // 1. Rust backend must expose the full notification command surface
+    let lib_rs = include_str!("../src/lib.rs");
+    assert!(lib_rs.contains("get_notifications"), "lib.rs must register get_notifications");
+    assert!(lib_rs.contains("get_unread_notifications"), "lib.rs must register get_unread_notifications");
+    assert!(lib_rs.contains("mark_notifications_read"), "lib.rs must register mark_notifications_read");
+    assert!(lib_rs.contains("clear_notifications"), "lib.rs must register clear_notifications");
+    assert!(lib_rs.contains("push_client_notification"), "lib.rs must register push_client_notification");
+    assert!(lib_rs.contains("notification_store: Arc<NotificationStore>"), "AppState must carry notification_store");
+
+    // 2. notifications.rs must define the 6 categories and core types
+    let notifs_rs = include_str!("../src/notifications.rs");
+    assert!(notifs_rs.contains("pub enum NotificationCategory"), "notifications.rs must define NotificationCategory");
+    assert!(notifs_rs.contains("pub enum NotificationCode"), "notifications.rs must define NotificationCode");
+    assert!(notifs_rs.contains("pub enum SoundCue"), "notifications.rs must define SoundCue");
+    assert!(notifs_rs.contains("pub struct NotificationStore"), "notifications.rs must define NotificationStore");
+    assert!(notifs_rs.contains("MAX_BUFFERED_NOTIFICATIONS: usize = 50;"), "notifications.rs must enforce 50-item ring buffer");
+
+    // 3. Frontend synchronization
+    let main_js = include_str!("../../src/main.js");
+    assert!(main_js.contains("syncPendingNotifications"), "main.js must define syncPendingNotifications");
+    assert!(main_js.contains("notification-created"), "main.js must listen for notification-created event");
+    assert!(main_js.contains("get_unread_notifications"), "main.js must fetch unread notifications");
+    assert!(main_js.contains("mark_notifications_read"), "main.js must mark processed notifications read");
+}
+
+#[test]
+fn test_uipi_detection_throttle_is_responsive() {
+    // UIPI detection throttle was tuned from 3000ms to 1500ms so elevation blocks
+    // feel immediate without burning syscalls on the hot path.
+    let uipi_rs = include_str!("../src/platform/windows/uipi.rs");
+    assert!(
+        uipi_rs.contains("pub const UIPI_ALERT_THROTTLE_MS: u64 = 1500;"),
+        "UIPI alert throttle must be 1500ms for responsive block detection"
+    );
+}
+
+#[test]
+fn test_sound_manager_assets_and_capabilities() {
+    // Procedural sound engine:
+    // 1. sound_manager.js must exist and implement the 6 procedural sound cues
+    let sound_js = include_str!("../../src/sound_manager.js");
+    assert!(sound_js.contains("const SoundManager ="), "sound_manager.js must define SoundManager");
+    assert!(sound_js.contains(r#"case "start":"#), "SoundManager must support start chime");
+    assert!(sound_js.contains(r#"case "stop":"#), "SoundManager must support stop tone");
+    assert!(sound_js.contains(r#"case "success":"#), "SoundManager must support success arpeggio");
+    assert!(sound_js.contains(r#"case "warning":"#), "SoundManager must support warning chime");
+    assert!(sound_js.contains(r#"case "emergency":"#), "SoundManager must support emergency alarm");
+    assert!(sound_js.contains(r#"case "tick":"#), "SoundManager must support tick micro-blip");
+
+    // 2. index.html must load sound_manager.js
+    let index_html = include_str!("../../src/index.html");
+    assert!(
+        index_html.contains(r#"<script src="sound_manager.js"></script>"#),
+        "index.html must include sound_manager.js"
+    );
+}

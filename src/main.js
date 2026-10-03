@@ -1497,6 +1497,7 @@ function updateUiFromConfig(config) {
   renderPresetsGrid();
   // Config is real from here on: a status payload may now safely trigger a save.
   configHydrated = true;
+  syncPendingNotifications();
 }
 
 function setRadioChecked(name, val) {
@@ -1950,11 +1951,20 @@ function ensureToastHost() {
   return host;
 }
 
-function showToast(message, level) {
+function showToast(message, level, soundCue) {
   try {
+    const lvl = String(level || "info").toLowerCase();
+    if (window.SoundManager) {
+      if (soundCue) {
+        window.SoundManager.play(soundCue);
+      } else if (lvl === "error") {
+        window.SoundManager.play("emergency");
+      } else if (lvl === "warn") {
+        window.SoundManager.play("warning");
+      }
+    }
     const host = ensureToastHost();
     if (!host) return;
-    const lvl = String(level || "info").toLowerCase();
     const el = document.createElement("div");
     el.className = "toast toast-" + lvl;
     el.textContent = String(message == null ? "" : message);
@@ -1963,6 +1973,7 @@ function showToast(message, level) {
     // to an informational one — which is how a failed save stayed invisible.
     const border = lvl === "error" ? "rgba(239,68,68,0.70)"
                  : lvl === "warn"  ? "rgba(245,158,11,0.65)"
+                 : lvl === "success" ? "rgba(16,185,129,0.70)"
                  : "rgba(255,255,255,.12)";
     el.style.cssText = "pointer-events:auto;margin-top:8px;padding:10px 14px;border-radius:8px;" +
       "background:rgba(20,24,32,.95);border:1px solid " + border + ";" +
@@ -1973,6 +1984,65 @@ function showToast(message, level) {
     /* toasts are best-effort — never break the calling flow */
   }
 }
+
+async function syncPendingNotifications() {
+  try {
+    const inv = window.__TAURI__?.core?.invoke;
+    if (!inv) return;
+    const unread = await inv("get_unread_notifications");
+    if (!Array.isArray(unread) || unread.length === 0) return;
+
+    const readIds = [];
+    for (const notif of unread) {
+      readIds.push(notif.id);
+
+      if (notif.sound && window.SoundManager) {
+        window.SoundManager.play(notif.sound);
+      }
+
+      if (notif.code === "uipi_blocked" && window.UipiManager) {
+        window.UipiManager.showModal();
+      }
+
+      if (notif.channel !== "modal") {
+        const title = notif.default_title || "";
+        const msg = notif.default_message || "";
+        const toastText = title && msg ? `${title}: ${msg}` : (title || msg);
+        showToast(toastText, notif.severity || "info");
+      }
+    }
+
+    if (readIds.length > 0) {
+      await inv("mark_notifications_read", { ids: readIds });
+    }
+  } catch (_) {}
+}
+
+if (window.__TAURI__?.event?.listen) {
+  window.__TAURI__.event.listen("notification-created", (event) => {
+    try {
+      const notif = event?.payload;
+      if (!notif) return;
+      if (notif.sound && window.SoundManager) {
+        window.SoundManager.play(notif.sound);
+      }
+      if (notif.code === "uipi_blocked" && window.UipiManager) {
+        window.UipiManager.showModal();
+      }
+      if (notif.channel !== "modal") {
+        const title = notif.default_title || "";
+        const msg = notif.default_message || "";
+        const toastText = title && msg ? `${title}: ${msg}` : (title || msg);
+        showToast(toastText, notif.severity || "info");
+      }
+      if (notif.id && window.__TAURI__?.core?.invoke) {
+        window.__TAURI__.core.invoke("mark_notifications_read", { ids: [notif.id] }).catch(() => {});
+      }
+    } catch (_) {}
+  }).catch(() => {});
+}
+
+window.addEventListener("focus", syncPendingNotifications);
 
 // Module scope on purpose: this closes over nothing but module-level helpers, so
 // building it inside startFileToastPolling() only allocated a fresh closure each
