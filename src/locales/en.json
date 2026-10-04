@@ -375,7 +375,7 @@
   "about_header": "ABOUT NANOCLICK",
   "about_tagline": "High-performance, bloat-free desktop automation engine built with pure Rust.",
   "about_feat1_title": "🦀 Pure Rust Core",
-  "about_feat1_desc": "~3.5 MB installer, 15 MB RAM. No Electron, no hidden background services, no garbage collection freezes.",
+  "about_feat1_desc": "~2.3 MB installer, 15 MB RAM. No Electron, no hidden background services, no garbage collection freezes.",
   "about_feat2_title": "🛡️ Smart Guard Engine",
   "about_feat2_desc": "UIPI elevation handling for Admin windows and intelligent hotkey lockout while typing in chat.",
   "about_feat3_title": "📐 RDP Vector Compression",

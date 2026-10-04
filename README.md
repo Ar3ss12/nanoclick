@@ -2,9 +2,9 @@
 
 **A fast, modern Windows desktop automation tool** — autoclicker, macro recorder, and visual macro editor in one lightweight app.
 
-Built with **Tauri 2 + Rust + vanilla JS**. No Electron, no bundler, no bloat: the production installer is **~3.5 MB**.
+Built with **Tauri 2 + Rust + vanilla JS**. No Electron, no bundler, no bloat: the production installer is **~2.3 MB**, the portable binary **~5.2 MB**.
 
-![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue) ![Version](https://img.shields.io/badge/version-1.3.0-brightgreen) ![Tests](https://img.shields.io/badge/tests-345%2F345-brightgreen) ![i18n](https://img.shields.io/badge/i18n-UA%20%7C%20RU%20%7C%20EN-blue) ![Tauri](https://img.shields.io/badge/Tauri-2.x-FFC131) ![Rust](https://img.shields.io/badge/rust-stable--msvc-DEA584)
+![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue) ![Version](https://img.shields.io/badge/version-1.3.0-brightgreen) ![Tests](https://img.shields.io/badge/tests-358%2F358-brightgreen) ![i18n](https://img.shields.io/badge/i18n-UA%20%7C%20RU%20%7C%20EN-blue) ![Tauri](https://img.shields.io/badge/Tauri-2.x-FFC131) ![Rust](https://img.shields.io/badge/rust-stable--msvc-DEA584)
 
 ---
 
@@ -93,11 +93,11 @@ All hotkeys are handled by an event-driven `WH_KEYBOARD_LL` listener in Rust —
 
 ## 📦 Install
 
-Download the `v1.2.0` installer from [Releases](https://github.com/Ar3ss12/nanoclick/releases/tag/v1.2.0):
+Download the `v1.3.0` installer from [Releases](https://github.com/Ar3ss12/nanoclick/releases/tag/v1.3.0):
 
 ```
-NanoClick_1.2.0_x64-setup.exe   (~2.2 MB)
-NanoClick-portable.exe          (~5.1 MB, zero-install)
+NanoClick_1.3.0_x64-setup.exe   (~2.3 MB)
+NanoClick-portable.exe          (~5.2 MB, zero-install)
 ```
 
 - Installs per-user (no admin rights needed)
