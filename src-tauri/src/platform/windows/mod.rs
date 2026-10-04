@@ -629,6 +629,17 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
                     // also match the toggle binding, e.g. a `T` hotkey).
                     let mut killed_by_text_press = false;
 
+                    // Work Mode owns the whole typing-guard block below: the
+                    // clicker can never run there (`decide_toggle` gate #2
+                    // vetoes every start), so arming a lockout that gates
+                    // nothing is pure waste — and worse, it leaks across the
+                    // Work→Autoclicker switch: the first ~800 ms after the
+                    // switch would refuse a toggle with `BlockedByTyping`
+                    // for typing that happened in the OTHER mode. Hotkey
+                    // dispatch (mode_switch back, emergency stop, presets)
+                    // keeps running; only the guard sleeps.
+                    let typing_guard_awake = scheduler.is_autoclicker_mode();
+
                     // ── TYPING GUARD: KILL ACTIVE CLICKER FIRST ──────────────
                     // New requirement: the moment a REAL text key lands, a
                     // running clicker is stopped immediately and stays off.
@@ -644,7 +655,10 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
                     // the user bound to a hotkey is exempt, so pressing the
                     // toggle must never stop the clicker on its way to starting
                     // it. This single call was the `J` bug.
-                    if scheduler.key_policy().is_text_keypress(event.vk) && !toggle_deferred {
+                    if typing_guard_awake
+                        && scheduler.key_policy().is_text_keypress(event.vk)
+                        && !toggle_deferred
+                    {
                         let was_active = scheduler.is_active();
                         scheduler.set_active(false, Some(&app_handle));
                         if let Some(exec) = crate::core::global() {
@@ -776,7 +790,13 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
                     // held-back press is proven to be a letter inside a word.
                     // Gameplay keys (WASD, hotbar digits, arrows, ...) never
                     // arm or cancel anything.
-                    if scheduler.key_policy().is_text_keypress(event.vk) && !toggle_deferred {
+                    //
+                    // Same Work Mode rule as the kill-switch above: no arming
+                    // while the guard sleeps.
+                    if typing_guard_awake
+                        && scheduler.key_policy().is_text_keypress(event.vk)
+                        && !toggle_deferred
+                    {
                         scheduler.typing_guard().note();
                         hotkey_diag_push(format!("armed_guard vk=0x{:02X}", event.vk));
                     }

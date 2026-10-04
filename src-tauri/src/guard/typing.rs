@@ -211,6 +211,20 @@ impl TypingGuard {
         !self.hotkeys_locked()
     }
 
+    /// Disarm: clear the lockout bookkeeping and drop a pending toggle.
+    ///
+    /// Called on Work->Autoclicker (`toggle_mode`) so a lockout armed in the
+    /// OTHER mode can never suppress the first toggle after the switch. The
+    /// pause window itself is untouched - only stale timestamps go.
+    /// `last_text_ms = 0` reads as "typed at the epoch": with a u64
+    /// epoch-scale gap the window in `lock_remaining_ms` can never cover it.
+    pub fn disarm(&self) {
+        self.pending_deadline.store(0, Ordering::Relaxed);
+        self.text_events.store(0, Ordering::Relaxed);
+        self.last_text_ms.store(0, Ordering::Relaxed);
+    }
+
+
     /* ── toggle confirmation (ambiguous single-key hotkeys) ───────── */
 
     /// Try to open a confirmation window for a matched toggle press.
@@ -557,3 +571,17 @@ mod tests {
         assert!(!is_text_keypress_vk(0x20), "Space must be treated as a gameplay key");
     }
 }
+
+
+    /// Disarm drops the lockout and the pending window together.
+    #[test]
+    fn disarm_clears_lockout_and_pending() {
+        let guard = TypingGuard::new(TYPING_FREEZE_MS);
+        guard.note();
+        assert!(guard.hotkeys_locked());
+        guard.disarm();
+        assert!(!guard.hotkeys_locked(), "disarm must release the lockout");
+        assert!(guard.allows_hotkey());
+        assert!(!guard.is_toggle_pending());
+        assert_eq!(guard.lock_remaining_ms(), 0);
+    }

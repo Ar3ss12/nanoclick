@@ -3565,6 +3565,41 @@ fn the_hook_uses_the_policy_not_the_free_function() {
     );
 }
 
+/// The typing guard sleeps in Work Mode.
+///
+/// The hook loop must skip BOTH the kill-switch (`set_active(false)`) and the
+/// arming (`typing_guard().note()`) when `is_autoclicker_mode()` is false:
+/// the clicker can never run there (`decide_toggle` gate #2 vetoes every
+/// start), so a lockout that gates nothing is waste — and it leaks across
+/// the Work→Autoclicker switch as a `BlockedByTyping` for typing that
+/// happened in the OTHER mode. Hotkey dispatch itself (mode_switch back,
+/// emergency stop, presets) is unaffected — only the guard sleeps.
+#[test]
+fn typing_guard_sleeps_in_work_mode() {
+    let src = include_str!("../src/platform/windows/mod.rs");
+    assert!(
+        src.contains("typing_guard_awake"),
+        "the hook loop must compute the guard awake-flag from the mode"
+    );
+    assert!(
+        src.contains("scheduler.is_autoclicker_mode()"),
+        "the awake-flag must read the live mode, never a cached copy"
+    );
+    // Both guard touch-points sit behind the flag: the kill-switch above and
+    // the arming at the bottom of the key-down branch.
+    let awake_uses = src.matches("typing_guard_awake").count();
+    assert!(
+        awake_uses >= 3,
+        "both guard sites (kill-switch + arming) must check the flag (found {awake_uses} uses)"
+    );
+    // The mode switch back is NOT gated — Work Mode must always be escapable.
+    let sched_src = include_str!("../src/scheduler.rs");
+    assert!(
+        sched_src.contains("self.typing_guard.disarm()"),
+        "Work->Autoclicker must enter with a disarmed guard"
+    );
+}
+
 /// Layer A must be applied BOTH on startup and on every re-parse.
 ///
 /// The previous version compared two `find()` positions and passed while the

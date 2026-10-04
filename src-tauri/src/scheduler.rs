@@ -605,6 +605,15 @@ impl ClickScheduler {
             report_stop("mode_switch_to_work");
             self.set_active(false, app_handle);
         }
+        if new_mode {
+            // Work→Autoclicker enters with a clean guard: any lockout armed
+            // while the guard slept in Work Mode is foreign state — the user
+            // typed in the OTHER mode, and the first toggle after the switch
+            // must not eat a `BlockedByTyping` for it. `disarm` only clears
+            // the bookkeeping (last_text/stamp/pending); the pause window
+            // itself is untouched.
+            self.typing_guard.disarm();
+        }
 
         let mode_str = if new_mode { "autoclicker" } else { "work" };
         if let Some(ref app) = app_handle {
@@ -3215,6 +3224,30 @@ mod hotkey_stop_path_tests {
         let mode2 = scheduler.toggle_mode(None);
         assert_eq!(mode2, "autoclicker");
         assert!(scheduler.is_autoclicker_mode());
+    }
+
+    #[test]
+    fn work_to_autoclicker_enters_with_a_clean_guard() {
+        // The typing guard sleeps in Work Mode (the hook loop skips both the
+        // kill-switch and the arming when `is_autoclicker_mode()` is false),
+        // but belt and suspenders: a lockout armed BEFORE the switch (or by
+        // any path that bypassed the skip) must not suppress the first toggle
+        // after returning to Autoclicker mode.
+        let scheduler = ClickScheduler::new();
+        scheduler.toggle_mode(None); // autoclicker -> work
+        assert!(!scheduler.is_autoclicker_mode());
+        scheduler.typing_guard().note(); // foreign state from the OTHER mode
+        assert!(scheduler.typing_guard().hotkeys_locked());
+        scheduler.toggle_mode(None); // work -> autoclicker: clean entry
+        assert!(scheduler.is_autoclicker_mode());
+        assert!(
+            !scheduler.typing_guard().hotkeys_locked(),
+            "Work->Autoclicker must disarm the guard"
+        );
+        assert!(
+            scheduler.typing_guard().allows_hotkey(),
+            "the first toggle after the switch must not eat BlockedByTyping"
+        );
     }
 
     #[test]
