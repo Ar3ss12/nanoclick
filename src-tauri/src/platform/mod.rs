@@ -4,6 +4,17 @@
 //! Reference: `docs/MACRO_ARCHITECTURE.md` §11.
 
 pub mod backend;
+#[cfg(target_os = "windows")]
+pub mod portable_update_shim {
+    /// Re-export the portable updater surface for non-platform callers.
+    /// (The real code lives in `windows::uipi`; this shim keeps the
+    /// `platform::` path stable across targets.)
+    pub use super::windows::uipi::{
+        cleanup_old_binary_deferred, is_portable_runtime, portable_swap_paths, updated_from_pid,
+        wait_for_parent_exit,
+    };
+}
+pub mod update_ping;
 
 pub use backend::PlatformCapabilities;
 

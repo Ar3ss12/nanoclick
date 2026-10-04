@@ -48,5 +48,24 @@ fn apply_webview_memory_policy() {
 
 fn main() {
     apply_webview_memory_policy();
+    // Update handover (portable in-place path): the old process spawned us
+    // with `--updated-from=<pid>` while IT was still alive. Wait for it to
+    // die BEFORE Tauri boots — otherwise we meet its single-instance lock,
+    // get forwarded to it, and the update child exits without ever booting.
+    // Bounded (10 s): a dead parent must not brick the launch.
+    #[cfg(target_os = "windows")]
+    {
+        let argv: Vec<String> = std::env::args().collect();
+        if let Some(parent_pid) = nanoclick::platform::windows::uipi::updated_from_pid(&argv) {
+            nanoclick::platform::windows::uipi::wait_for_parent_exit(parent_pid, 10_000);
+            // The swap left `<exe>.old` next to us — lazy-delete it now that
+            // we booted healthy (with reboot fallback). Until now it was the
+            // free rollback copy.
+            if let Ok(exe) = std::env::current_exe() {
+                let (_, old_path) = nanoclick::platform::windows::uipi::portable_swap_paths(&exe);
+                nanoclick::platform::windows::uipi::cleanup_old_binary_deferred(old_path);
+            }
+        }
+    }
     nanoclick::run();
 }

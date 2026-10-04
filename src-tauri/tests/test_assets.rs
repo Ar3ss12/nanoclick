@@ -4469,3 +4469,145 @@ fn test_foreground_patrol_wiring_and_tray_invariant() {
     }
 }
 
+/// Updater hardening (Mine 4) + portable in-place self-update.
+///
+/// * NSIS: `download()` and `install()` MUST be split — `prepare_nsis_update`
+///   runs between them (tray/hooks down before the plugin's `exit(0)`). The
+///   one-shot plugin helper and the dead restart command
+///   must never come back: after a successful install the process is gone,
+///   so any JS after it is unreachable.
+/// * Portable: the running `.exe` swaps in place (no NSIS installer may ever
+///   land on a zero-install user). The manifest's `portable` section and the
+///   `.sig` twin are produced by `release.ps1`; verify uses the same pubkey.
+#[test]
+fn test_updater_hardening_and_portable_self_update() {
+    let lib_src = include_str!("../src/lib.rs");
+    let cmds_src = include_str!("../src/commands/tauri_commands.rs");
+    let uipi_src = include_str!("../src/platform/windows/uipi.rs");
+    let main_rs = include_str!("../src/main.rs");
+    let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
+    let main_key = tauri::utils::assets::AssetKey::from("main.js");
+    let main_binding = ctx.assets().get(&main_key).expect("main.js must be embedded");
+    let main_js = String::from_utf8_lossy(&main_binding);
+
+    // 1. NSIS teardown exists and is registered; dead relaunch is gone.
+    assert!(
+        lib_src.contains("fn prepare_nsis_update"),
+        "prepare_nsis_update must exist (Mine 4 teardown)"
+    );
+    assert!(
+        lib_src.contains("teardown_before_nsis_install"),
+        "the handle-free teardown helper must exist"
+    );
+    assert!(
+        !lib_src.contains("fn relaunch_app"),
+        "relaunch_app is dead code: install() exits the process itself"
+    );
+    assert!(
+        !main_js.contains("invoke(\"restart"),
+        "main.js must not invoke a removed restart command"
+    );
+    assert!(
+        !main_js.contains("download_and_install"),
+        "NSIS flow must split download/install so teardown runs between them"
+    );
+    assert!(
+        main_js.contains("prepare_nsis_update"),
+        "main.js must call prepare_nsis_update between download and install"
+    );
+
+    // 2. Portable surface: commands registered, handover in main.rs.
+    for needle in ["get_portable_update_info", "portable_self_update"] {
+        assert!(cmds_src.contains(needle), "tauri_commands.rs must expose `{needle}`");
+        assert!(
+            lib_src.contains(&format!("commands::{needle}")),
+            "the portable command `{needle}` must be registered in the invoke handler"
+        );
+    }
+    assert!(
+        main_rs.contains("--updated-from=") || main_rs.contains("updated_from_pid"),
+        "main.rs must drain the update handover before Tauri boots"
+    );
+    assert!(
+        uipi_src.contains("wait_for_parent_exit") && uipi_src.contains("cleanup_old_binary_deferred"),
+        "uipi.rs must own the parent-wait and the deferred .old cleanup"
+    );
+    assert!(
+        uipi_src.contains("verify_portable_signature"),
+        "portable verify must go through minisign with the shared pubkey"
+    );
+    assert!(
+        cmds_src.contains("only supported on Windows"),
+        "the portable updater needs a non-Windows stub (cfg-gated commands)"
+    );
+    assert!(
+        !uipi_src.contains("use reqwest") && !cmds_src.contains("use reqwest"),
+        "portable download must stay WinHTTP — no new HTTP crate"
+    );
+
+    // 3. Pubkey mirror: the Rust copy must equal tauri.conf.json.
+    let conf_text = include_str!("../tauri.conf.json");
+    let conf: serde_json::Value =
+        serde_json::from_str(conf_text).expect("tauri.conf.json must parse");
+    let conf_pubkey = conf
+        .pointer("/plugins/updater/pubkey")
+        .and_then(|v| v.as_str())
+        .expect("plugins.updater.pubkey must exist");
+    assert!(
+        cmds_src.contains(conf_pubkey),
+        "UPDATER_PUBKEY must mirror tauri.conf.json plugins.updater.pubkey"
+    );
+    // The updater plugin keeps hitting GitHub directly — the Worker is
+    // analytics-only and must never become a single point of failure.
+    let endpoints = conf
+        .pointer("/plugins/updater/endpoints")
+        .and_then(|v| v.as_array())
+        .expect("plugins.updater.endpoints must exist");
+    assert!(
+        endpoints.iter().any(|e| e
+            .as_str()
+            .is_some_and(|s| s.contains("github.com"))),
+        "the update endpoint must stay direct GitHub (Worker is radar-only)"
+    );
+
+    // 4. Frontend branches: NSIS + portable installers both wired.
+    for needle in ["installNsisUpdate", "installPortableUpdate", "update-progress", "isPortableRuntime"] {
+        assert!(main_js.contains(needle), "main.js must contain `{needle}`");
+    }
+    assert!(
+        main_js.contains("platforms") && main_js.contains("portable"),
+        "the portable branch must read the manifest portable section"
+    );
+
+    // 5. Release pipeline signs + uploads the portable twin.
+    let release_ps1 = include_str!("../../scripts/release.ps1");
+    for needle in [
+        "NanoClick-portable.exe.sig",
+        "portable",
+        "platforms",
+    ] {
+        assert!(release_ps1.contains(needle), "release.ps1 must handle `{needle}`");
+    }
+
+    // 6. Radar: tray-aware backend ping, Worker is analytics-only.
+    let ping_src = include_str!("../src/platform/update_ping.rs");
+    for needle in [
+        "nanoclick-update.aarik6131.workers.dev",
+        "RADAR_PING_INTERVAL_MS",
+        "start_radar_ping",
+    ] {
+        assert!(ping_src.contains(needle), "update_ping.rs must contain `{needle}`");
+    }
+    assert!(
+        lib_src.contains("start_radar_ping"),
+        "setup() must start the radar thread (tray-aware, window-independent)"
+    );
+    // The Worker URL must appear exactly once (the module) — never baked
+    // into tauri.conf.json endpoints (that would route updates through it).
+    let conf_endpoint_hits = conf_text.matches("workers.dev").count();
+    assert_eq!(
+        conf_endpoint_hits, 0,
+        "tauri.conf.json endpoints must stay GitHub-direct, never the Worker"
+    );
+}
+

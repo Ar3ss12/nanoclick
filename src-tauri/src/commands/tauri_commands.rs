@@ -73,6 +73,131 @@ pub fn get_elevated_logon_task_registered() -> bool {
     crate::platform::is_scheduled_elevated_task_registered()
 }
 
+/// Portable self-update status probe for the update bar.
+/// Non-Windows stub: portable in-place swap is a Win32-only path.
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+pub fn get_portable_update_info() -> serde_json::Value {
+    serde_json::json!({ "is_portable": false, "exe_name": "" })
+}
+
+/// Portable self-update status probe for the update bar.
+#[cfg(target_os = "windows")]
+#[tauri::command]
+pub fn get_portable_update_info() -> serde_json::Value {
+    let argv: Vec<String> = std::env::args().collect();
+    let exe_name = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|s| s.to_string_lossy().to_string()))
+        .unwrap_or_default();
+    serde_json::json!({
+        "is_portable": crate::platform::windows::uipi::is_portable_runtime(&argv, &exe_name),
+        "exe_name": exe_name,
+    })
+}
+
+/// Download → verify → atomic swap → respawn for the portable binary.
+///
+/// Progress goes to the page through `update-progress` events
+/// (`{ received, total }`), the update bar renders them — no polling.
+/// On success this function NEVER returns: the new process is spawned and
+/// the old one exits. On failure it returns `Err` and the `.new` file
+/// (if any) is deleted; the running binary is untouched.
+/// Windows-only: other platforms get a stub that refuses.
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+pub async fn portable_self_update(
+    _download_url: String,
+    _signature: String,
+) -> Result<(), String> {
+    Err("portable self-update is only supported on Windows".into())
+}
+
+/// Download → verify → atomic swap → respawn for the portable binary.
+///
+/// Progress goes to the page through `update-progress` events
+/// (`{ received, total }`), the update bar renders them — no polling.
+#[cfg(target_os = "windows")]
+#[tauri::command]
+pub async fn portable_self_update(
+    app: tauri::AppHandle,
+    download_url: String,
+    signature: String,
+    window: tauri::WebviewWindow,
+) -> Result<(), String> {
+    use crate::platform::windows::uipi as pu;
+    let emit_progress = |received: u64, total: Option<u64>| {
+        let _ = window.emit(
+            "update-progress",
+            serde_json::json!({ "received": received, "total": total }),
+        );
+    };
+
+    // 0. Resolve paths. Same directory = same volume = atomic rename.
+    let current_exe = std::env::current_exe()
+        .map_err(|e| pu::classify_portable_update_error("resolve-exe", &e.to_string()))?;
+    let (new_path, old_path) = pu::portable_swap_paths(&current_exe);
+
+    // 1. Download to `<exe>.new` (blocking WinHTTP off the async thread).
+    // Progress emits DURING the transfer via a window clone moved into the
+    // blocking task (`WebviewWindow` is `Clone`; the original stays here).
+    emit_progress(0, None);
+    let progress_window = window.clone();
+    let bytes = tauri::async_runtime::spawn_blocking(move || {
+        pu::winhttp_get(&download_url, &|received, total| {
+            let _ = progress_window.emit(
+                "update-progress",
+                serde_json::json!({ "received": received, "total": total }),
+            );
+        })
+    })
+    .await
+    .map_err(|e| pu::classify_portable_update_error("download-join", &e.to_string()))?
+    .map_err(|e| pu::classify_portable_update_error("download", &e))?;
+    emit_progress(bytes.len() as u64, Some(bytes.len() as u64));
+    std::fs::write(&new_path, &bytes)
+        .map_err(|e| pu::classify_portable_update_error("write-new", &e.to_string()))?;
+
+    // 2. Verify BEFORE touching the live binary. Same pubkey as NSIS.
+    if !pu::verify_portable_signature(&bytes, &signature, UPDATER_PUBKEY) {
+        let _ = std::fs::remove_file(&new_path);
+        return Err(pu::classify_portable_update_error(
+            "verify",
+            "minisign signature mismatch — update discarded",
+        ));
+    }
+
+    // 3. Teardown (tray/hooks/executor/scheduler/snapshot), then swap.
+    if let Some(state) = app.try_state::<crate::AppState>() {
+        state.scheduler.set_active(false, None);
+        let cfg = state.config_manager.load();
+        crate::defaults::refresh_last_good_snapshot(&state.config_manager.config_path(), &cfg);
+    }
+    crate::teardown_before_nsis_install();
+
+    std::fs::rename(&current_exe, &old_path)
+        .map_err(|e| pu::classify_portable_update_error("rename-old", &e.to_string()))?;
+    if let Err(e) = std::fs::rename(&new_path, &current_exe) {
+        // Roll back: put the old binary back, or the folder is left broken.
+        let _ = std::fs::rename(&old_path, &current_exe);
+        return Err(pu::classify_portable_update_error("rename-new", &e.to_string()));
+    }
+
+    // 4. Respawn the new image with the handover marker, then exit.
+    let my_pid = std::process::id();
+    std::process::Command::new(&current_exe)
+        .arg(format!("{}{}", pu::UPDATED_FROM_ARG_PREFIX, my_pid))
+        .spawn()
+        .map_err(|e| pu::classify_portable_update_error("respawn", &e.to_string()))?;
+    std::process::exit(0);
+}
+
+/// The minisign pubkey the NSIS updater trusts — single source of truth is
+/// `tauri.conf.json → plugins.updater.pubkey`; mirrored here so portable
+/// verification uses the identical key. Kept in sync by tripwire test.
+// NOTE: must match `src-tauri/tauri.conf.json` plugins.updater.pubkey.
+pub const UPDATER_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDJCOEYwMUYwNDE0REQwQzkKUldUSjBFMUI4QUdQSzRMOFRONUhLbmZhdHJoMVIwY28rRTNiYTZjSEcyT2QvaHcwVExETmc4c0YK";
+
 /// Smart Guard — identify the app the user has focused.
 ///
 /// Backs the "+ Capture active window" button: the UI counts down a few
@@ -142,7 +267,7 @@ use crate::persistence;
 use crate::platform;
 use crate::recorder::{RecorderHandle, RecordingMode};
 use std::sync::{Arc, Mutex};
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 
 /// App state for macro/recorder commands.
 pub struct MacroState {

@@ -390,15 +390,24 @@ onDomReady(() => {
 
 
 // ===== Update checker =====
-// Security: the Tauri updater plugin verifies the downloaded installer's
-// minisign signature against the public key embedded in tauri.conf.json
-// before installing. Downloads only happen from the configured endpoint
-// (GitHub Releases of this repository). Nothing is installed without a
-// valid signature.
+// Security: the Tauri updater plugin verifies the downloaded NSIS
+// installer's minisign signature against the public key embedded in
+// tauri.conf.json before installing. Portable binaries swap in place with
+// the SAME key verified in Rust (`verify_portable_signature`). Downloads
+// only happen from the configured endpoint (GitHub Releases of this
+// repository). Nothing is installed without a valid signature.
 const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000; // every 30 minutesurs
 const UPDATE_DISMISS_KEY = "nanoclick_update_dismissed_version";
 
-function showUpdateBar(version, notes) {
+// Portable branch: probe once per bar (cheap sync command, no network).
+async function isPortableRuntime() {
+  try {
+    const info = await invoke("get_portable_update_info");
+    return !!(info && info.is_portable);
+  } catch { return false; }
+}
+
+function showUpdateBar(version, notes, rawJson) {
   const bar = document.getElementById("updateBar");
   if (!bar) return;
   document.getElementById("updateBarText").textContent =
@@ -414,29 +423,16 @@ function showUpdateBar(version, notes) {
   btn.onclick = async () => {
     btn.disabled = true;
     try {
-      const update = await window.__TAURI__.updater.check();
-      if (!update) { btn.textContent = "No update"; return; }
-      // Signature is verified by the plugin before install completes.
-      let total = 0, received = 0;
-      await update.downloadAndInstall((event) => {
-        if (event.event === "Started") {
-          total = event.data.contentLength || 0;
-          btn.textContent = "Downloading… 0%";
-        } else if (event.event === "Progress") {
-          received += event.data.chunkLength;
-          if (total > 0) btn.textContent = `Downloading… ${Math.min(99, Math.round(received / total * 100))}%`;
-        } else if (event.event === "Finished") {
-          btn.textContent = "Installing…";
-        }
-      });
-      // Only reached on success; restart into the new version.
-      await invoke("relaunch_app");
+      const portable = await isPortableRuntime();
+      if (portable) { await installPortableUpdate(btn, rawJson); return; }
+      await installNsisUpdate(btn);
     } catch (e) {
       console.error("[updater] install failed:", e);
       btn.textContent = "Failed — retry";
       btn.disabled = false;
     }
   };
+
   // Same replacement-slot reasoning as the install button above, plus this closure
   // captures `version`: with addEventListener + a one-time guard it would keep the
   // FIRST version and store a stale dismissal key.
@@ -445,6 +441,56 @@ function showUpdateBar(version, notes) {
     bar.classList.add("hidden");
     try { localStorage.setItem(UPDATE_DISMISS_KEY, version); } catch {}
   };
+}
+
+// NSIS branch: split download/install so OUR teardown runs between them.
+//
+// The JS plugin one-shot helper builds its own UpdaterBuilder
+// inside the plugin — no Rust-registered `on_before_exit` survives there.
+// Splitting lets `prepare_nsis_update` (stop_tray, scheduler off, hooks
+// down) run while the windows still exist, before `install()` launches the
+// installer and exits the process. The dead restart-through-JS call is
+// gone: after a successful NSIS install the process is already gone.
+async function installNsisUpdate(btn) {
+  const update = await window.__TAURI__.updater.check();
+  if (!update) { btn.textContent = "No update"; return; }
+  // Signature is verified by the plugin before install completes.
+  let total = 0, received = 0;
+  await update.download((event) => {
+    if (event.event === "Started") {
+      total = event.data.contentLength || 0;
+      btn.textContent = "Downloading… 0%";
+    } else if (event.event === "Progress") {
+      received += event.data.chunkLength;
+      if (total > 0) btn.textContent = `Downloading… ${Math.min(99, Math.round(received / total * 100))}%`;
+    }
+  });
+  btn.textContent = "Installing…";
+  await invoke("prepare_nsis_update");
+  await update.install();
+}
+
+// Portable branch: in-place swap of the running .exe (no NSIS installer).
+// Manifest carries a `portable` section (see release.ps1); verify happens in
+// Rust with the same minisign key. Progress arrives as `update-progress`
+// events from the backend. On success the process respawns itself —
+// this function never returns.
+async function installPortableUpdate(btn, rawJson) {
+  const section = rawJson && rawJson.platforms && rawJson.platforms.portable;
+  if (!section || !section.url || !section.signature) {
+    throw new Error("release has no signed portable artifact");
+  }
+  btn.textContent = "Downloading… 0%";
+  const unlisten = await window.__TAURI__.event.listen("update-progress", (event) => {
+    const { received, total } = event.payload || {};
+    if (total > 0) btn.textContent = `Downloading… ${Math.min(99, Math.round(received / total * 100))}%`;
+  });
+  try {
+    btn.textContent = "Installing…";
+    await invoke("portable_self_update", { downloadUrl: section.url, signature: section.signature });
+  } finally {
+    try { unlisten(); } catch {}
+  }
 }
 
 async function checkForAppUpdates(manual = false) {
@@ -456,7 +502,7 @@ async function checkForAppUpdates(manual = false) {
       try { dismissed = localStorage.getItem(UPDATE_DISMISS_KEY); } catch {}
       console.log("[updater] latest:", info.version, "local:", "(see get_app_version)", "dismissed:", dismissed);
       if (manual || dismissed !== info.version) {
-        showUpdateBar(info.version, info.body);
+        showUpdateBar(info.version, info.body, info.rawJson);
         if (manual) console.log("[updater] update", info.version, "available");
       } else {
         console.log("[updater] update", info.version, "available but previously dismissed by user");

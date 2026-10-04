@@ -5,7 +5,7 @@ mod core;
 pub mod defaults;
 mod guard;
 mod persistence;
-mod platform;
+pub mod platform;
 mod recorder;
 mod scheduler;
 mod overlay;
@@ -531,9 +531,51 @@ fn get_debug_mode() -> bool {
     is_debug_mode()
 }
 
+/// Teardown that runs BEFORE the NSIS installer takes over (Mine 4).
+///
+/// The JS updater path (one-shot plugin helper) builds its own
+/// `UpdaterBuilder` inside the plugin (`commands.rs:51`), so a Rust-registered
+/// `Builder::on_before_exit` never applies to it — the only hook that runs
+/// there is Tauri's own `cleanup_before_exit()` (windows + webviews). Calling
+/// this command between `download()` and `install()` closes the gap:
+/// tray icon removed (no ghost), clicker stopped, LL hooks / recorder hooks /
+/// foreground patrol down — before the plugin's `process::exit(0)`.
+///
+/// Deliberately NOT `shutdown_application`: windows stay alive (the installer
+/// kills the process itself) and no `app.exit()` is issued. If the install
+/// fails after this ran, the session is over anyway — the user relaunches.
+pub(crate) fn teardown_before_nsis_install() {
+    // Latch first: nothing else may start work (tray restore, watcher save)
+    // while the installer owns the process image.
+    SHUTTING_DOWN.store(true, Ordering::Release);
+    stop_tray();
+    // NOTE: the scheduler stop needs the managed AppState, so it lives in
+    // the `prepare_nsis_update` command below; this helper owns only the
+    // handle-free parts.
+    crate::platform::default_input_backend_hotkey_stop();
+    crate::platform::stop_recorder_hooks();
+    crate::platform::windows::stop_foreground_watch();
+    if let Some(exec) = crate::core::global() {
+        exec.stop();
+    }
+    debug_log_internal("warn", "[Updater] pre-install teardown done (tray/hooks/executor down)");
+}
+
+/// JS-facing wrapper: stop the scheduler through the managed state, then run
+/// the handle-free teardown above. Call after `download()` finished,
+/// before `install()`.
 #[tauri::command]
-fn relaunch_app(app: AppHandle) {
-    app.restart();
+fn prepare_nsis_update(app: AppHandle) -> Result<(), String> {
+    if let Some(state) = app.try_state::<AppState>() {
+        state.scheduler.set_active(false, None);
+    }
+    // Best-effort final config flush so the new version boots from truth.
+    if let Some(state) = app.try_state::<AppState>() {
+        let cfg = state.config_manager.load();
+        crate::defaults::refresh_last_good_snapshot(&state.config_manager.config_path(), &cfg);
+    }
+    teardown_before_nsis_install();
+    Ok(())
 }
 
 /// Dump the input layer's diagnostic ring buffers into the log.
@@ -614,7 +656,9 @@ fn exit_app(app: AppHandle) {
 //    make the process impossible to terminate.
 //
 // `prevent_exit()` itself ignores the restart code (tauri 2 app.rs:89-93), so
-// `relaunch_app` / the updater keep working without a special case here.
+// `app.restart()` keeps working without a special case here. The NSIS update
+// path no longer restarts through JS at all — `install()` exits the process
+// itself after our `prepare_nsis_update` teardown ran.
 
 /// Set once a real shutdown started (tray Quit, `exit_app`, window close with
 /// "minimize to tray" off). Until then the process outlives its windows.
@@ -1037,7 +1081,7 @@ pub(crate) fn restart_app_from_tray(app: &AppHandle) {
     debug_log_internal("warn", "[Tray] restart requested from the menu");
     report_tray_action(app, "Restarting…");
     // Latch the shutdown flag for the teardown paths that consult it; tauri
-    // ignores the restart code in `prevent_exit`, so `relaunch_app` still works.
+    // ignores the restart code in `prevent_exit`, so the restart path works.
     SHUTTING_DOWN.store(true, Ordering::Release);
     stop_tray();
     app.restart();
@@ -1629,10 +1673,12 @@ fn hud_ready(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct UpdateInfo {
     version: String,
     date: Option<String>,
     body: Option<String>,
+    raw_json: serde_json::Value,
 }
 
 #[tauri::command]
@@ -1647,6 +1693,9 @@ async fn check_for_updates(app: AppHandle) -> Result<Option<UpdateInfo>, String>
         version: u.version,
         date: u.date.map(|date| date.to_string()),
         body: u.body,
+        // The portable branch reads `platforms.portable` from here, so the
+        // manifest extension rides along without a second network call.
+        raw_json: u.raw_json,
     }))
 }
 
@@ -2011,6 +2060,9 @@ pub fn run() {
             // (0% CPU between switches). Warns when automation is live and the
             // user lands on an elevated window; never resurrects the tray.
             platform::windows::start_foreground_watch();
+            // Radar ping: tray-aware update telemetry (Worker proxy + silent
+            // GitHub fallback). Own thread, own cadence, zero hot-path touch.
+            crate::platform::update_ping::start_radar_ping();
             // LAZY secondary WebViews: cold boot = main window ONLY.
             // Overlay is restored here (staggered, off the critical boot path)
             // so persisted visual_ripple=true keeps working without any
@@ -2132,7 +2184,9 @@ pub fn run() {
             set_debug_mode,
             get_debug_mode,
             check_for_updates,
-            relaunch_app,
+            prepare_nsis_update,
+            commands::get_portable_update_info,
+            commands::portable_self_update,
             commands::check_elevation,
             commands::restart_as_admin,
             commands::set_always_run_as_admin,

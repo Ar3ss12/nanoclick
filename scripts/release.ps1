@@ -424,6 +424,32 @@ if ($Action -in @("all", "build", "sign")) {
     $sigSize = (Get-Item $sigPath).Length
     Write-StepDone "Minisign signature verified" "$sigPath ($sigSize bytes)"
 
+    # Portable twin: sign the zero-install binary with the SAME key so the
+    # in-place updater can verify it with the same pubkey. The updater plugin
+    # ignores unknown manifest keys, so the extra `portable` section below
+    # never disturbs the NSIS path.
+    $portableSigContent = $null
+    $portableSigPath = "$portableExe.sig"
+    if (Test-Path -LiteralPath $portableExe) {
+        Write-StepLog "Signing portable binary with the same key" $portableExe
+        if (Test-Path -LiteralPath $portableSigPath) {
+            Remove-Item -LiteralPath $portableSigPath -Force
+        }
+        if ($KeyPassword) {
+            cargo tauri signer sign -f $KeyPath -p $KeyPassword $portableExe
+        } else {
+            cargo tauri signer sign -f $KeyPath $portableExe
+        }
+        if ($LASTEXITCODE -ne 0 -or (-not (Test-Path -LiteralPath $portableSigPath))) {
+            Write-StepError "Signing portable binary failed with exit code $LASTEXITCODE"
+            throw "Signing portable binary failed (exit code $LASTEXITCODE)"
+        }
+        $portableSigContent = (Get-Content -LiteralPath $portableSigPath -Raw).Trim()
+        Write-StepDone "Portable signature ready" "$portableSigPath"
+    } else {
+        Write-StepWarn "Portable binary not found; manifest will carry NSIS only."
+    }
+
     # Generate latest.json for Tauri updater v2
     Write-StepLog "Generating updater manifest" "latest.json"
     $sigContent = (Get-Content -LiteralPath $sigPath -Raw).Trim()
@@ -439,6 +465,12 @@ if ($Action -in @("all", "build", "sign")) {
                 signature = $sigContent
                 url       = $downloadUrl
             }
+        }
+    }
+    if ($portableSigContent) {
+        $manifest.platforms["portable"] = @{
+            signature = $portableSigContent
+            url       = "https://github.com/$Owner/$Repo/releases/download/$Tag/NanoClick-portable.exe"
         }
     }
 
@@ -566,6 +598,12 @@ if ($Action -in @("all", "upload")) {
     )
     if (Test-Path -LiteralPath $portableExe) {
         $filesToUpload += @{ Path = $portableExe; Name = "NanoClick-portable.exe"; Mime = "application/vnd.microsoft.portable-executable" }
+        # The in-place updater verifies this exact file against this exact sig.
+        if (Test-Path -LiteralPath "$portableExe.sig") {
+            $filesToUpload += @{ Path = "$portableExe.sig"; Name = "NanoClick-portable.exe.sig"; Mime = "text/plain" }
+        } else {
+            Write-StepWarn "Portable signature ($portableExe.sig) not found; portable self-update will refuse."
+        }
     } else {
         Write-StepWarn "Portable binary ($portableExe) not found; skipping."
     }

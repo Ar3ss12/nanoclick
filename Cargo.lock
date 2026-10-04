@@ -2135,6 +2135,7 @@ name = "nanoclick"
 version = "1.2.0"
 dependencies = [
  "directories",
+ "minisign-verify",
  "rand",
  "raw-window-handle",
  "serde",
