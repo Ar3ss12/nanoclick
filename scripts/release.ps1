@@ -124,7 +124,7 @@ if (-not $Notes) {
 Welcome to NanoClick $Tag.
 
 ### Key Highlights
-- **Ultra-lightweight & High Performance**: Built with Tauri 2 and pure Rust. Production setup is only ~3.7 MB and runs with ~15 MB RAM usage.
+- **Ultra-lightweight & High Performance**: Built with Tauri 2 and pure Rust. Production setup is only ~2.3 MB and runs with ~15 MB RAM usage.
 - **Smart Click Engine**: Single, double, and hold click modes with human jitter (timing & cursor randomization) and CPS telemetry up to 160 CPS.
 - **Smart Guard & Typing Protection**: Automatically stops clicking when you type text and handles Windows UIPI elevation seamlessly.
 - **Macro Recorder & Visual Editor**: Real-time recording with RDP (Ramer-Douglas-Peucker) curve compression and manual block sequencer.
@@ -134,9 +134,8 @@ Welcome to NanoClick $Tag.
 ### 📄 License
 Released under the **PolyForm Noncommercial License 1.0.0** with NanoClick Additional Terms. Free for personal gaming, streaming, and research. See [LICENSE.md](https://github.com/Ar3ss12/nanoclick/blob/main/LICENSE.md) for complete details.
 
-### 📦 Installation
-Download and run `NanoClick_${ver}_x64-setup.exe` below. No administrative privileges required.
-Or use `NanoClick-portable.exe` for zero-install portable execution.
+### 📦 Install
+Download `NanoClick_${ver}_x64-setup.exe` below (no admin rights required), or `NanoClick-portable.exe` (+ `.sig`) for a zero-install run that now updates itself in place. Existing installs update themselves through the built-in signed updater.
 "@
 }
 
