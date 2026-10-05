@@ -963,7 +963,7 @@ fn test_boot_guard_behaviour_on_node() {
 /// `applyTheme` / `updateSwatchActiveState` from main.js and fires the
 /// crash inputs at them (null document, null accent, missing swatch attr)
 /// inside a minimal DOM stub on Node (V8). Prints one JSON verdict line.
-const THEME_GUARD_HARNESS: &str = r#"
+const THEME_GUARD_HARNESS: &str = r##"
 const fs = require("fs");
 const vm = require("vm");
 const path = require("path");
@@ -1057,7 +1057,7 @@ try {
 }
 
 console.log(JSON.stringify(verdict));
-"#;
+"##;
 
 /// Behavioural verification of the theme null-guards on a real V8
 /// (Node + the minimal DOM stub from THEME_GUARD_HARNESS above):
