@@ -68,9 +68,8 @@ const SmartGuard = {
     const target = ["whitelist", "blacklist"].includes(mode) ? mode : "everywhere";
     document.querySelectorAll('input[name="appFilterMode"]').forEach((radio) => {
       radio.checked = radio.value === target;
-      const label = radio.closest(".radio-item");
-      if (label) label.classList.toggle("selected", radio.checked);
     });
+    this._paintMode();
   },
 
   /* ── lifecycle ─────────────────────────────────────────────── */
@@ -104,6 +103,13 @@ const SmartGuard = {
     this._wire();
   },
 
+  _paintMode() {
+    const current = this._mode();
+    document.querySelectorAll('input[name="appFilterMode"]').forEach((radio) => {
+      const label = radio.closest(".radio-item");
+      if (label) label.classList.toggle("selected", radio.value === current);
+    });
+  },
   _wire() {
     const typingCb = this._el("typingGuardCheckbox");
     if (typingCb) {
@@ -138,6 +144,14 @@ const SmartGuard = {
 
     this._wireSuggest();
 
+
+    const modeGroup = this._el("appFilterModeGroup");
+    if (modeGroup) {
+      modeGroup.addEventListener("change", () => {
+        this._paintMode();
+        this._changed();
+      });
+    }
     const captureBtn = this._el("captureAppBtn");
     if (captureBtn) captureBtn.addEventListener("click", () => this.startCapture());
 

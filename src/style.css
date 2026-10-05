@@ -885,6 +885,70 @@ input, textarea, [contenteditable="true"] {
   margin-bottom: 12px;
 }
 
+/* Row 1 after the split: Storage | System | Typing (equal thirds). */
+.two-col-cards.three-col-cards {
+  grid-template-columns: 1fr 1fr 1fr;
+}
+
+/* ── LANGUAGE SEGMENT ([EN|UA] instead of the dead 2-option <select>) ── */
+.lang-segment {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.lang-segment-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  padding: 6px 12px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+
+.lang-segment-btn:hover {
+  background: rgba(6, 182, 212, 0.12);
+  border-color: rgba(6, 182, 212, 0.4);
+}
+
+.lang-segment-btn.active {
+  background: rgba(6, 182, 212, 0.22);
+  border-color: var(--cyan);
+  color: #fff;
+  box-shadow: 0 0 12px rgba(6, 182, 212, 0.35);
+}
+
+/* ── APP-FILTER MODE SEGMENT (same shape, paint owned by SmartGuard) ── */
+.radio-group .radio-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+
+.radio-group .radio-item.selected {
+  background: rgba(6, 182, 212, 0.22);
+  border-color: var(--cyan);
+  color: #fff;
+  box-shadow: 0 0 12px rgba(6, 182, 212, 0.35);
+}
+
+.radio-group .radio-item input[type="radio"] {
+  accent-color: var(--cyan);
+}
+
 /* COLOR SWATCHES */
 .color-swatches {
   display: flex;

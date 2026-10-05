@@ -1202,8 +1202,29 @@ function wireUnitSelectors() {
 wireUnitSelectors();
 
 const themeSelect    = document.getElementById("themeSelect");
-const languageSelect = document.getElementById("languageSelect");
+const languageSegment = document.getElementById("languageSegment");
 const accentSwatches = document.querySelectorAll("#accentSwatches .swatch");
+
+// Sovereign pair segment: paint the active language button. The <select>
+// is gone — this is the single painter for the [EN|UA] segment.
+function paintLanguageSegment(lang) {
+  if (!languageSegment) return;
+  languageSegment.querySelectorAll(".lang-segment-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.getAttribute("data-lang") === lang);
+  });
+}
+
+async function switchLanguage(lang) {
+  const targetLang = ["ua", "en"].includes(lang) ? lang : "en";
+  if (window.I18nEngine) {
+    await window.I18nEngine.setLanguage(targetLang);
+  }
+  if (typeof currentConfig !== "undefined" && currentConfig && currentConfig.ui) {
+    currentConfig.ui.language = targetLang;
+  }
+  paintLanguageSegment(targetLang);
+  if (typeof saveConfigThrottled !== "undefined") saveConfigThrottled();
+}
 
 const emergencyRecordBtn = document.getElementById("emergencyRecordBtn");
 const speedUpRecordBtn   = document.getElementById("speedUpRecordBtn");
@@ -1529,9 +1550,7 @@ function updateUiFromConfig(config) {
   // Legacy configs may carry "ru" — the dictionary is gone, fall back to English.
   const rawLang = config.ui?.language || "ua";
   const targetLang = ["ua", "en"].includes(rawLang) ? rawLang : "en";
-  if (languageSelect) {
-    languageSelect.value = targetLang;
-  }
+  paintLanguageSegment(targetLang);
   if (window.I18nEngine) {
     window.I18nEngine.init(targetLang).then(() => {
       setModeDisplay(currentConfig.active_mode || "autoclicker", true);
@@ -2264,7 +2283,8 @@ async function saveConfig() {
       if (rememberPosCheckbox) currentConfig.ui.remember_window_position = rememberPosCheckbox.checked;
       if (window.SmartGuard) window.SmartGuard.collect(currentConfig);
       if (themeSelect) currentConfig.ui.theme = themeSelect.value;
-      if (languageSelect) currentConfig.ui.language = languageSelect.value;
+      // Language lives in the segment + I18nEngine now (switchLanguage already
+      // wrote currentConfig.ui.language); collect must not resurrect the select.
       const alwaysAdminCb = document.getElementById("alwaysRunAsAdminCheckbox");
       if (alwaysAdminCb) currentConfig.ui.always_run_as_admin = alwaysAdminCb.checked;
 
@@ -3095,19 +3115,24 @@ if (rememberPosCheckbox) rememberPosCheckbox.addEventListener("change", saveConf
 
 // ── DYNAMIC THEMES & ACCENT ENGINE ───────────────────────────
 function applyTheme(themeName, accentHex) {
+  if (typeof document === "undefined" || !document.documentElement) return;
   document.documentElement.setAttribute("data-theme", themeName || "cyberpunk");
-  if (accentHex) {
+  if (typeof accentHex === "string" && accentHex) {
     document.documentElement.style.setProperty("--cyan", accentHex);
     document.documentElement.style.setProperty("--border-cyan", accentHex + "4d");
-    if (!currentConfig.ui) currentConfig.ui = {};
-    currentConfig.ui.accent_color = accentHex;
+    if (typeof currentConfig !== "undefined") {
+      if (!currentConfig.ui) currentConfig.ui = {};
+      currentConfig.ui.accent_color = accentHex;
+    }
   }
 }
 
 function updateSwatchActiveState(accentHex) {
+  if (typeof accentHex !== "string" || !accentHex) return;
   if (accentSwatches && accentSwatches.forEach) {
     accentSwatches.forEach(swatch => {
-      if (swatch.getAttribute("data-accent").toLowerCase() === accentHex.toLowerCase()) {
+      const data = swatch.getAttribute("data-accent");
+      if (typeof data === "string" && data.toLowerCase() === accentHex.toLowerCase()) {
         swatch.classList.add("active");
       } else {
         swatch.classList.remove("active");
@@ -3126,16 +3151,11 @@ window.addEventListener("nanoclick-language-changed", () => {
 document.addEventListener("languageChanged", () => {
   updateTechniqueBadge(currentConfig?.engine?.target_cps);
 });
-if (languageSelect) {
-  languageSelect.addEventListener("change", async () => {
-    const chosenLang = languageSelect.value;
-    if (window.I18nEngine) {
-      await window.I18nEngine.setLanguage(chosenLang);
-    }
-    if (currentConfig && currentConfig.ui) {
-      currentConfig.ui.language = chosenLang;
-    }
-    saveConfigThrottled();
+if (languageSegment) {
+  languageSegment.addEventListener("click", async (e) => {
+    const btn = e.target && e.target.closest ? e.target.closest(".lang-segment-btn") : null;
+    if (!btn) return;
+    await switchLanguage(btn.getAttribute("data-lang"));
   });
 }
 
@@ -4002,7 +4022,29 @@ const presetEl = (id) => document.getElementById(id);
 // Shared paint helpers for the modal's inputs. Module-level on purpose: they
 // capture nothing but `presetEl`, so nesting them re-created the closures on
 // every call (oxlint: unicorn/consistent-function-scoping).
+// Preset-modal language segment: single reader/painter (the <select> is gone).
+function presetModalLanguage() {
+  const seg = presetEl("presetUiLanguageSegment");
+  if (!seg) return "ua";
+  const active = seg.querySelector(".lang-segment-btn.active");
+  const lang = active ? active.getAttribute("data-lang") : "ua";
+  return ["ua", "en"].includes(lang) ? lang : "en";
+}
+
+function paintPresetModalLanguage(lang) {
+  const seg = presetEl("presetUiLanguageSegment");
+  if (!seg) return;
+  const target = ["ua", "en"].includes(lang) ? lang : "en";
+  seg.querySelectorAll(".lang-segment-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.getAttribute("data-lang") === target);
+  });
+}
+
 function setPresetModalValue(id, value) {
+  if (id === "presetUiLanguage") {
+    paintPresetModalLanguage(value);
+    return;
+  }
   const el = presetEl(id);
   if (el && value != null) el.value = value;
 }
@@ -4117,7 +4159,7 @@ function readPresetModalUi() {
   return {
     theme: presetEl("presetUiTheme")?.value || "cyberpunk",
     accent_color: presetEl("presetUiAccent")?.value || "#06b6d4",
-    language: presetEl("presetUiLanguage")?.value || "ua",
+    language: presetModalLanguage(),
     always_on_top: !!presetEl("presetUiAlwaysOnTop")?.checked,
     visual_ripple: !!presetEl("presetUiRipple")?.checked,
     show_hud: !!presetEl("presetUiHud")?.checked,
@@ -4403,6 +4445,18 @@ function setupPresetListeners() {
   // Presets page toolbar: search + category filter rerender the grid.
   bindPresetControl("presetSearchInput", "input", () => renderPresetsGrid());
   bindPresetControl("presetCategoryFilter", "change", () => renderPresetsGrid());
+
+  // Preset-modal language segment: one delegated click paints the pair
+  // (the <select id="presetUiLanguage"> is gone; read goes via presetModalLanguage).
+  const presetLangSeg = document.getElementById("presetUiLanguageSegment");
+  if (presetLangSeg && !presetLangSeg.dataset.bound) {
+    presetLangSeg.dataset.bound = "1";
+    presetLangSeg.addEventListener("click", (e) => {
+      const btn = e.target && e.target.closest ? e.target.closest(".lang-segment-btn") : null;
+      if (!btn) return;
+      paintPresetModalLanguage(btn.getAttribute("data-lang"));
+    });
+  }
 
   const presetHotkeyBtn = document.getElementById("presetHotkeyBtn");
   if (presetHotkeyBtn && !presetHotkeyBtn.dataset.presetBound) {
@@ -4905,7 +4959,7 @@ function wireOnboardingModal() {
         if (!lang) return;
         selectedOnboardingLang = lang;
         updateOnboardingLangButtons(lang);
-        if (languageSelect) languageSelect.value = lang;
+        paintLanguageSegment(lang);
         if (currentConfig?.ui) currentConfig.ui.language = lang;
 
         const card = onboardingModal?.querySelector(".onboarding-matrix-card");

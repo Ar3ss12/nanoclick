@@ -215,7 +215,11 @@ fn test_i18n_assets_and_dictionary_keys() {
     let html_bytes = ctx.assets().get(&html_key).expect("index.html not embedded");
     let html = String::from_utf8_lossy(&html_bytes);
     assert!(html.contains("<script src=\"i18n.js\"></script>"), "index.html must include i18n.js");
-    assert!(html.contains("id=\"languageSelect\""), "index.html must have #languageSelect");
+    // Sovereign pair segment: the 2-option <select> is gone, [EN|UA] buttons rule.
+    assert!(html.contains("id=\"languageSegment\""), "index.html must have #languageSegment");
+    assert!(!html.contains("id=\"languageSelect\""), "dead languageSelect must be gone");
+    assert!(!html.contains("id=\"presetUiLanguage\""), "dead presetUiLanguage select must be gone");
+    assert!(html.contains("id=\"presetUiLanguageSegment\""), "preset modal must have its own segment");
     assert!(html.contains("data-i18n=\"settings_lang_label\""), "index.html must have data-i18n for language label");
     assert!(html.contains("data-i18n=\"dash_click_rate\""), "index.html must have dash_click_rate");
     assert!(html.contains("data-i18n=\"presets_header_title\""), "index.html must have presets_header_title");
@@ -4638,3 +4642,81 @@ fn test_updater_hardening_and_portable_self_update() {
     );
 }
 
+/// Settings redesign: 3-card Row 1, [EN|UA] segments, live filter highlight.
+/// Pins the 2026-10-05 surgery — the BEHAVIOR blob, the dead 2-option
+/// <select>, and the highlight that never followed the click must not return.
+#[test]
+fn test_settings_redesign_and_filter_highlight() {
+    let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
+    let html_key = tauri::utils::assets::AssetKey::from("index.html");
+    let html_binding = ctx.assets().get(&html_key).expect("index.html not embedded");
+    let html = String::from_utf8_lossy(&html_binding);
+
+    // 1. Row 1 is three cards: Storage | System | Typing. BEHAVIOR is dead.
+    for needle in [
+        "settings_group_system_window",
+        "settings_group_typing_safety",
+        "three-col-cards",
+    ] {
+        assert!(html.contains(needle), "index.html must contain `{needle}`");
+    }
+    assert!(
+        !html.contains("settings_group_behavior"),
+        "dead BEHAVIOR group must be gone"
+    );
+
+    // 2. Language segments, no selects.
+    for needle in [
+        "id=\"languageSegment\"",
+        "id=\"presetUiLanguageSegment\"",
+        "lang-segment-btn",
+    ] {
+        assert!(html.contains(needle), "index.html must contain `{needle}`");
+    }
+    assert!(
+        !html.contains("id=\"languageSelect\""),
+        "dead languageSelect must be gone"
+    );
+
+    // 3. main.js: segment painter + switcher, no select wiring.
+    let main_js = include_str!("../../src/main.js");
+    for needle in [
+        "paintLanguageSegment",
+        "switchLanguage",
+        "presetModalLanguage",
+        "paintPresetModalLanguage",
+    ] {
+        assert!(main_js.contains(needle), "main.js must contain `{needle}`");
+    }
+    assert!(
+        !main_js.contains("languageSelect"),
+        "main.js must not reference the dead select"
+    );
+
+    // 4. settings_guard.js: delegated highlight listener + painter.
+    let guard_js = include_str!("../../src/settings_guard.js");
+    for needle in ["_paintMode", "appFilterModeGroup", "addEventListener(\"change\""] {
+        assert!(guard_js.contains(needle), "settings_guard.js must contain `{needle}`");
+    }
+
+    // 5. style.css: 3-col grid + both segments.
+    let style_css = include_str!("../../src/style.css");
+    for needle in ["three-col-cards", ".lang-segment-btn", ".radio-item.selected"] {
+        assert!(style_css.contains(needle), "style.css must contain `{needle}`");
+    }
+
+    // 6. Dictionaries: the split keys exist in BOTH locales, the dead one in NEITHER.
+    for locale in ["ua.json", "en.json"] {
+        let dict = match locale {
+            "ua.json" => include_str!("../../src/locales/ua.json"),
+            _ => include_str!("../../src/locales/en.json"),
+        };
+        for key in ["settings_group_system_window", "settings_group_typing_safety"] {
+            assert!(dict.contains(key), "{locale} must translate {key}");
+        }
+        assert!(
+            !dict.contains("settings_group_behavior"),
+            "{locale} must not carry the dead BEHAVIOR key"
+        );
+    }
+}

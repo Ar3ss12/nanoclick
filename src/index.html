@@ -488,8 +488,8 @@
 
         <!-- SETTINGS -->
         <div id="viewSettings" class="view">
-          <!-- Row 1: Storage & Backup | Behavior & Safety -->
-          <div class="two-col-cards">
+          <!-- Row 1: Storage & Backup | System & Window | Typing & Safety (3-col) -->
+          <div class="two-col-cards three-col-cards">
             <!-- Card 1: Storage & Backup -->
             <div class="config-card">
               <div class="config-card-header">
@@ -517,7 +517,7 @@
             <div class="config-card">
               <div class="config-card-header">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
-                <span data-i18n="settings_group_behavior">BEHAVIOR</span>
+                <span data-i18n="settings_group_system_window">SYSTEM &amp; WINDOW</span>
               </div>
               <div class="checkbox-list">
                 <label class="checkbox-row">
@@ -542,15 +542,26 @@
                   <span data-i18n="settings_run_on_startup">Run on Windows Startup</span>
                 </label>
                 <label class="checkbox-row">
-                  <input type="checkbox" id="pauseFocusLossCheckbox" class="custom-checkbox">
-                  <span class="checkbox-box"></span>
-                  <span data-i18n="settings_pause_focus_loss">Auto-Pause on Focus Loss</span>
-                </label>
-                <label class="checkbox-row">
                   <input type="checkbox" id="rememberPosCheckbox" checked class="custom-checkbox">
                   <span class="checkbox-box"></span>
                   <span data-i18n="settings_remember_pos">Remember Window Position</span>
                 </label>
+              </div>
+            </div>
+
+            <!-- Card 2b: Typing & Safety Guard -->
+            <div class="config-card">
+              <div class="config-card-header">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                <span data-i18n="settings_group_typing_safety">TYPING &amp; SAFETY</span>
+              </div>
+              <div class="checkbox-list">
+                <label class="checkbox-row">
+                  <input type="checkbox" id="pauseFocusLossCheckbox" class="custom-checkbox">
+                  <span class="checkbox-box"></span>
+                  <span data-i18n="settings_pause_focus_loss">Auto-Pause on Focus Loss</span>
+                </label>
+
                 <div class="typing-guard-control-wrapper">
                   <label class="checkbox-row" id="typingGuardRow">
                     <input type="checkbox" id="typingGuardCheckbox" checked class="custom-checkbox">
@@ -631,10 +642,14 @@
               </div>
               <div class="settings-row">
                 <span class="settings-label" data-i18n="settings_lang_label">Interface Language</span>
-                <select id="languageSelect" class="dropdown-right">
-                  <option value="ua">🇺🇦 Українська</option>
-                  <option value="en">🇬🇧 English</option>
-                </select>
+                <div class="lang-segment" id="languageSegment" role="group" aria-label="Interface Language">
+                  <button type="button" class="lang-segment-btn" data-lang="en">
+                    <span class="lang-flag">🇬🇧</span><span>English</span>
+                  </button>
+                  <button type="button" class="lang-segment-btn" data-lang="ua">
+                    <span class="lang-flag">🇺🇦</span><span>Українська</span>
+                  </button>
+                </div>
               </div>
               <div class="settings-row">
                 <span class="settings-label" data-i18n="settings_theme_label">Theme</span>
@@ -1392,10 +1407,14 @@
               </div>
               <div class="preset-form-group">
                 <label data-i18n="settings_lang_label">Interface Language</label>
-                <select id="presetUiLanguage" class="select-input">
-                  <option value="ua">🇺🇦 Українська</option>
-                  <option value="en">🇬🇧 English</option>
-                </select>
+                <div class="lang-segment" id="presetUiLanguageSegment" role="group" aria-label="Interface Language">
+                  <button type="button" class="lang-segment-btn" data-lang="en">
+                    <span class="lang-flag">🇬🇧</span><span>English</span>
+                  </button>
+                  <button type="button" class="lang-segment-btn" data-lang="ua">
+                    <span class="lang-flag">🇺🇦</span><span>Українська</span>
+                  </button>
+                </div>
               </div>
               <div class="preset-form-group">
                 <label class="checkbox-row"><input type="checkbox" id="presetUiAlwaysOnTop" class="custom-checkbox"><span class="checkbox-box"></span><span data-i18n="settings_always_on_top">Always on Top (Keep window pinned)</span></label>
