@@ -959,6 +959,162 @@ fn test_boot_guard_behaviour_on_node() {
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
 
+/// Harness for `test_theme_null_guards_on_node`: extracts the real
+/// `applyTheme` / `updateSwatchActiveState` from main.js and fires the
+/// crash inputs at them (null document, null accent, missing swatch attr)
+/// inside a minimal DOM stub on Node (V8). Prints one JSON verdict line.
+const THEME_GUARD_HARNESS: &str = r#"
+const fs = require("fs");
+const vm = require("vm");
+const path = require("path");
+
+const src = fs.readFileSync(path.join(__dirname, "main.js"), "utf8");
+function sliceFn(name) {
+  const start = src.indexOf("function " + name + "(");
+  if (start < 0) throw new Error("missing " + name);
+  let depth = 0, i = src.indexOf("{", start);
+  const bodyStart = i;
+  for (; i < src.length; i++) {
+    if (src[i] === "{") depth++;
+    else if (src[i] === "}") { depth--; if (depth === 0) break; }
+  }
+  return src.slice(start, i + 1);
+}
+
+const verdict = { applyThemeFound: false, swatchFound: false, crashes: [] };
+
+// documentElement stub: records theme + CSS vars, never throws.
+const props = {};
+const documentStub = {
+  documentElement: {
+    setAttribute(k, v) { props[k] = v; },
+    style: { setProperty(k, v) { props[k] = v; } },
+  },
+};
+// One swatch WITHOUT data-accent (getAttribute -> null), one normal.
+const swatches = [
+  { getAttribute() { return null; }, classList: { add() {}, remove() {} } },
+  { getAttribute() { return "#06b6d4"; }, classList: { add() {}, remove() {} } },
+];
+
+const sandbox = {
+  document: documentStub,
+  currentConfig: {},
+  accentSwatches: swatches,
+  console: console,
+};
+sandbox.globalThis = sandbox;
+sandbox.window = sandbox;
+vm.createContext(sandbox);
+
+function run(name, code, args) {
+  try {
+    const fn = vm.runInContext("(" + code + ")", sandbox);
+    fn.apply(null, args);
+    return "ok";
+  } catch (e) {
+    return String((e && e.message) || e);
+  }
+}
+
+try {
+  const applySrc = sliceFn("applyTheme");
+  verdict.applyThemeFound = true;
+  const cases = [
+    ["theme-only-null-accent", [null, null]],
+    ["theme-only-undefined-accent", ["emerald", undefined]],
+    ["null-theme", [null, "#06b6d4"]],
+    ["empty-accent-string", ["slate", ""]],
+    ["full", ["dracula", "#ef4444"]],
+  ];
+  for (const [label, args] of cases) {
+    const r = run("applyTheme", applySrc, args);
+    if (r !== "ok") verdict.crashes.push("applyTheme:" + label + ":" + r);
+  }
+  // No-document path: applyTheme must bail, not throw.
+  sandbox.document = undefined;
+  const r = run("applyTheme", applySrc, ["midnight", "#3b82f6"]);
+  if (r !== "ok") verdict.crashes.push("applyTheme:no-document:" + r);
+  sandbox.document = documentStub;
+} catch (e) {
+  verdict.crashes.push("extract-applyTheme:" + String((e && e.message) || e));
+}
+
+try {
+  const swatchSrc = sliceFn("updateSwatchActiveState");
+  verdict.swatchFound = true;
+  for (const [label, args] of [
+    ["null", [null]],
+    ["undefined", [undefined]],
+    ["empty", [""]],
+    ["valid", ["#06b6d4"]],
+  ]) {
+    const r = run("updateSwatchActiveState", swatchSrc, args);
+    if (r !== "ok") verdict.crashes.push("swatch:" + label + ":" + r);
+  }
+} catch (e) {
+  verdict.crashes.push("extract-swatch:" + String((e && e.message) || e));
+}
+
+console.log(JSON.stringify(verdict));
+"#;
+
+/// Behavioural verification of the theme null-guards on a real V8
+/// (Node + the minimal DOM stub from THEME_GUARD_HARNESS above):
+/// `applyTheme(null, null)`, theme-only calls, empty strings, a missing
+/// document and swatches without `data-accent` must all be no-ops — never
+/// a `TypeError` (that was the treat that crashed theme switching).
+#[test]
+fn test_theme_null_guards_on_node() {
+    let strict = std::env::var("NANOCLICK_JS_SYNTAX_STRICT")
+        .map(|v| v != "0")
+        .unwrap_or(true);
+    let node_works = std::process::Command::new("node")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !node_works {
+        assert!(
+            !strict,
+            "Node.js is required for the theme-guard behavioural check. \
+             Install Node.js, or set NANOCLICK_JS_SYNTAX_STRICT=0 to skip it."
+        );
+        eprintln!("[theme-guard] Node.js not found — check skipped (strict mode off)");
+        return;
+    }
+
+    let main_js = {
+        let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
+        let key = tauri::utils::assets::AssetKey::from("main.js");
+        let bytes = ctx.assets().get(&key).expect("main.js must be embedded");
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+
+    let tmp_dir = std::env::temp_dir().join(format!("nanoclick_theme_guard_{}", std::process::id()));
+    std::fs::create_dir_all(&tmp_dir).expect("temp dir for the theme-guard harness");
+    std::fs::write(tmp_dir.join("main.js"), &main_js).expect("write main.js copy");
+    std::fs::write(tmp_dir.join("harness.js"), THEME_GUARD_HARNESS).expect("write the harness");
+
+    let out = std::process::Command::new("node")
+        .arg(tmp_dir.join("harness.js"))
+        .output()
+        .expect("run the theme-guard harness");
+    assert!(
+        out.status.success(),
+        "theme-guard harness failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let verdict: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim())
+            .unwrap_or_else(|e| panic!("harness must print one JSON line: {e}"));
+    assert_eq!(verdict["applyThemeFound"], serde_json::Value::Bool(true), "applyTheme must exist: {verdict}");
+    assert_eq!(verdict["swatchFound"], serde_json::Value::Bool(true), "updateSwatchActiveState must exist: {verdict}");
+    assert_eq!(verdict["crashes"], serde_json::json!([]), "null-guard inputs must never throw: {verdict}");
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
 /// i18n symmetry: every notice key used by Rust/JS must exist in both locales.
 #[test]
 fn test_notice_i18n_symmetry() {
@@ -4699,11 +4855,21 @@ fn test_settings_redesign_and_filter_highlight() {
         assert!(guard_js.contains(needle), "settings_guard.js must contain `{needle}`");
     }
 
-    // 5. style.css: 3-col grid + both segments.
+    // 5. style.css: 3-col grid + both segments + toggle switches.
     let style_css = include_str!("../../src/style.css");
-    for needle in ["three-col-cards", ".lang-segment-btn", ".radio-item.selected"] {
+    for needle in [
+        "three-col-cards",
+        ".lang-segment-btn",
+        ".radio-item.selected",
+        ".custom-checkbox:checked + .checkbox-box::before",
+        ".checkbox-row.confirm-ready .checkbox-box",
+    ] {
         assert!(style_css.contains(needle), "style.css must contain `{needle}`");
     }
+    assert!(
+        !style_css.contains("content: '✓'"),
+        "the square-checkbox checkmark must be gone (switch shape rules)"
+    );
 
     // 6. Dictionaries: the split keys exist in BOTH locales, the dead one in NEITHER.
     for locale in ["ua.json", "en.json"] {

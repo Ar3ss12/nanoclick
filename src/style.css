@@ -837,7 +837,8 @@ input, textarea, [contenteditable="true"] {
 
 .num-input-right:focus { border-color: var(--cyan); }
 
-/* CHECKBOX */
+/* CHECKBOX → TOGGLE SWITCH (pure CSS; the <input> stays in the DOM,
+   so saves, presets and SmartGuard wiring are untouched). */
 .checkbox-row {
   display: flex;
   align-items: center;
@@ -849,30 +850,48 @@ input, textarea, [contenteditable="true"] {
 .custom-checkbox { display: none; }
 
 .checkbox-box {
-  width: 16px;
-  height: 16px;
+  width: 34px;
+  height: 18px;
   border: 1px solid var(--border);
-  border-radius: 3px;
+  border-radius: 999px;
   background: rgba(0,0,0,0.3);
   flex-shrink: 0;
   position: relative;
   transition: all 0.2s;
 }
 
+.checkbox-box::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 2px;
+  transform: translateY(-50%);
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  transition: all 0.2s;
+}
+
 .custom-checkbox:checked + .checkbox-box {
-  background: var(--cyan);
+  background: rgba(6, 182, 212, 0.35);
   border-color: var(--cyan);
 }
 
+.custom-checkbox:checked + .checkbox-box::before {
+  left: 18px;
+  background: var(--cyan);
+  box-shadow: 0 0 8px rgba(6, 182, 212, 0.8);
+}
+
 .custom-checkbox:checked + .checkbox-box::after {
-  content: '✓';
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  color: #fff;
-  font-size: 10px;
-  font-weight: 700;
+  content: none;
+}
+
+/* Amber confirm state (typing-guard 2s popover) survives the switch shape. */
+.checkbox-row.confirm-ready .checkbox-box {
+  border-color: #f59e0b !important;
+  box-shadow: 0 0 10px rgba(245, 158, 11, 0.6) !important;
 }
 
 .checkbox-list { display: flex; flex-direction: column; gap: 4px; }
