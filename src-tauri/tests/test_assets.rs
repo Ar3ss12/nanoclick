@@ -181,7 +181,7 @@ fn test_i18n_assets_and_dictionary_keys() {
     assert!(i18n_code.contains("applyTranslations"), "i18n.js must have applyTranslations");
     assert!(i18n_code.contains("setLanguage"), "i18n.js must have setLanguage");
 
-    // 2. ua.json, en.json, and ru.json must be embedded
+    // 2. ua.json and en.json must be embedded; ru.json must be GONE
     let ua_key = tauri::utils::assets::AssetKey::from("locales/ua.json");
     let ua_bytes = ctx.assets().get(&ua_key).expect("locales/ua.json must be embedded");
     let ua_val: serde_json::Value = serde_json::from_slice(&ua_bytes).expect("ua.json must be valid JSON");
@@ -191,25 +191,20 @@ fn test_i18n_assets_and_dictionary_keys() {
     let en_val: serde_json::Value = serde_json::from_slice(&en_bytes).expect("en.json must be valid JSON");
 
     let ru_key = tauri::utils::assets::AssetKey::from("locales/ru.json");
-    let ru_bytes = ctx.assets().get(&ru_key).expect("locales/ru.json must be embedded");
-    let ru_val: serde_json::Value = serde_json::from_slice(&ru_bytes).expect("ru.json must be valid JSON");
+    assert!(
+        ctx.assets().get(&ru_key).is_none(),
+        "locales/ru.json must NOT be embedded (legacy locale removed)"
+    );
 
     let ua_map = ua_val.as_object().expect("ua.json must be an object");
     let en_map = en_val.as_object().expect("en.json must be an object");
-    let ru_map = ru_val.as_object().expect("ru.json must be an object");
 
-    // 3. Perfect dictionary key symmetry across all three languages (UA, EN, RU)
+    // 3. Perfect dictionary key symmetry across the sovereign pair (UA, EN)
     for k in ua_map.keys() {
         assert!(en_map.contains_key(k), "en.json is missing key '{}' present in ua.json", k);
-        assert!(ru_map.contains_key(k), "ru.json is missing key '{}' present in ua.json", k);
     }
     for k in en_map.keys() {
         assert!(ua_map.contains_key(k), "ua.json is missing key '{}' present in en.json", k);
-        assert!(ru_map.contains_key(k), "ru.json is missing key '{}' present in en.json", k);
-    }
-    for k in ru_map.keys() {
-        assert!(ua_map.contains_key(k), "ua.json is missing key '{}' present in ru.json", k);
-        assert!(en_map.contains_key(k), "en.json is missing key '{}' present in ru.json", k);
     }
 
     // 4. Dictionary volume must exceed 150 keys (comprehensive coverage)
@@ -229,6 +224,13 @@ fn test_i18n_assets_and_dictionary_keys() {
     assert!(html.contains("data-i18n=\"stats_header\""), "index.html must have stats_header");
     assert!(html.contains("data-i18n=\"about_header\""), "index.html must have about_header");
     assert!(html.contains("data-i18n=\"uipi_modal_title\""), "index.html must have uipi_modal_title");
+    // Sovereign pair: no Russian option or onboarding button may survive.
+    assert!(!html.contains("value=\"ru\""), "index.html must not offer a ru locale");
+    assert!(!html.contains("data-lang=\"ru\""), "onboarding must not offer a ru button");
+    assert!(
+        !i18n_code.contains("\"ru\""),
+        "i18n.js whitelist must not mention ru"
+    );
 }
 
 #[test]
@@ -953,7 +955,7 @@ fn test_boot_guard_behaviour_on_node() {
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
 
-/// i18n symmetry: every notice key used by Rust/JS must exist in all 3 locales.
+/// i18n symmetry: every notice key used by Rust/JS must exist in both locales.
 #[test]
 fn test_notice_i18n_symmetry() {
     let keys = [
@@ -979,7 +981,7 @@ fn test_notice_i18n_symmetry() {
         "settings_remember_pos",
         "focus_loss_paused_notify",
     ];
-    for locale in ["en", "ua", "ru"] {
+    for locale in ["en", "ua"] {
         let asset = format!("locales/{locale}.json");
         let key = tauri::utils::assets::AssetKey::from(asset.as_str());
         let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
@@ -1273,11 +1275,10 @@ fn test_deep_sleep_and_frontend_watchdog_wiring() {
         main_js.contains("__nanoclick_tray_flush__") && main_js.contains("tray_flush_done"),
         "main.js must expose the flush hook and acknowledge it"
     );
-    for locale in ["ua.json", "ru.json", "en.json"] {
+    for locale in ["ua.json", "en.json"] {
         let dict = match locale {
             "ua.json" => include_str!("../../src/locales/ua.json"),
-            "ru.json" => include_str!("../../src/locales/ru.json"),
-            _ => include_str!("../../src/locales/en.json"),
+                        _ => include_str!("../../src/locales/en.json"),
         };
         assert!(
             dict.contains("settings_tray_life"),
@@ -1414,11 +1415,10 @@ fn test_tray_ui_state_sync_wiring() {
         "mirroring tray state must not save — it would undo the tray's own write"
     );
 
-    for locale in ["ua.json", "ru.json", "en.json"] {
+    for locale in ["ua.json", "en.json"] {
         let dict = match locale {
             "ua.json" => include_str!("../../src/locales/ua.json"),
-            "ru.json" => include_str!("../../src/locales/ru.json"),
-            _ => include_str!("../../src/locales/en.json"),
+                        _ => include_str!("../../src/locales/en.json"),
         };
         assert!(
             dict.contains("tray_blocked_work_mode") && dict.contains("tray_blocked_typing"),
@@ -1639,11 +1639,10 @@ fn test_tray_hardening_and_input_diagnostics_wiring() {
         "the two old tray checkboxes must be gone (merged into the master)"
     );
 
-    for locale in ["ua.json", "ru.json", "en.json"] {
+    for locale in ["ua.json", "en.json"] {
         let dict = match locale {
             "ua.json" => include_str!("../../src/locales/ua.json"),
-            "ru.json" => include_str!("../../src/locales/ru.json"),
-            _ => include_str!("../../src/locales/en.json"),
+                        _ => include_str!("../../src/locales/en.json"),
         };
         for key in [
             "settings_tray_life",
@@ -1901,11 +1900,10 @@ fn test_auto_stop_timer_has_one_owner() {
             "the duration unit picker must offer `{unit}`"
         );
     }
-    for locale in ["ua.json", "ru.json", "en.json"] {
+    for locale in ["ua.json", "en.json"] {
         let dict = match locale {
             "ua.json" => include_str!("../../src/locales/ua.json"),
-            "ru.json" => include_str!("../../src/locales/ru.json"),
-            _ => include_str!("../../src/locales/en.json"),
+                        _ => include_str!("../../src/locales/en.json"),
         };
         for key in [
             "unit_dur_ms_short",
@@ -2165,12 +2163,11 @@ fn test_biometric_outlier_and_technique_wiring() {
         "the badge needs its own rule (it is not a unit-badge)"
     );
 
-    // ── 3. i18n symmetry (the gate checks 3 locales) ────────────────────
-    for locale in ["ua.json", "ru.json", "en.json"] {
+    // ── 3. i18n symmetry (the gate checks both locales) ────────────────────
+    for locale in ["ua.json", "en.json"] {
         let dict = match locale {
             "ua.json" => include_str!("../../src/locales/ua.json"),
-            "ru.json" => include_str!("../../src/locales/ru.json"),
-            _ => include_str!("../../src/locales/en.json"),
+                        _ => include_str!("../../src/locales/en.json"),
         };
         for key in [
             "dash_outlier_prob",
@@ -2728,11 +2725,10 @@ fn test_remember_window_state_wiring() {
             && !painter.contains("pointerEvents"),
         "the overridden row is dimmed, not dead-ended"
     );
-    for locale in ["ua.json", "ru.json", "en.json"] {
+    for locale in ["ua.json", "en.json"] {
         let dict = match locale {
             "ua.json" => include_str!("../../src/locales/ua.json"),
-            "ru.json" => include_str!("../../src/locales/ru.json"),
-            _ => include_str!("../../src/locales/en.json"),
+                        _ => include_str!("../../src/locales/en.json"),
         };
         for key in ["settings_remember_state", "settings_remember_state_tip"] {
             assert!(dict.contains(key), "{locale} must translate {key}");
@@ -3044,11 +3040,10 @@ fn test_tray_switch_reports_both_flags() {
         include_str!("../../src/style.css").contains(".settings-hint {"),
         "the hint needs its own rule, or it renders as body text"
     );
-    for locale in ["ua.json", "ru.json", "en.json"] {
+    for locale in ["ua.json", "en.json"] {
         let dict = match locale {
             "ua.json" => include_str!("../../src/locales/ua.json"),
-            "ru.json" => include_str!("../../src/locales/ru.json"),
-            _ => include_str!("../../src/locales/en.json"),
+                        _ => include_str!("../../src/locales/en.json"),
         };
         assert!(
             dict.contains("settings_tray_life_mixed_hint"),
@@ -3169,11 +3164,10 @@ fn test_config_snapshot_before_the_first_save() {
         "the snapshot must be announced, not silent"
     );
 
-    for locale in ["ua.json", "ru.json", "en.json"] {
+    for locale in ["ua.json", "en.json"] {
         let dict = match locale {
             "ua.json" => include_str!("../../src/locales/ua.json"),
-            "ru.json" => include_str!("../../src/locales/ru.json"),
-            _ => include_str!("../../src/locales/en.json"),
+                        _ => include_str!("../../src/locales/en.json"),
         };
         for key in [
             "notice_cfg_backup_title",
@@ -3253,11 +3247,10 @@ fn test_recorded_macro_is_persisted_without_a_host_prompt() {
     );
 
     // 5. The announcement is localized in all three dictionaries.
-    for locale in ["ua.json", "ru.json", "en.json"] {
+    for locale in ["ua.json", "en.json"] {
         let dict = match locale {
             "ua.json" => include_str!("../../src/locales/ua.json"),
-            "ru.json" => include_str!("../../src/locales/ru.json"),
-            _ => include_str!("../../src/locales/en.json"),
+                        _ => include_str!("../../src/locales/en.json"),
         };
         assert!(
             dict.contains("toast_macro_recorded"),
@@ -3390,11 +3383,10 @@ fn test_preset_writes_are_verified_and_cannot_be_silent() {
         "the empty-tolerant accessor must still exist"
     );
 
-    for locale in ["ua.json", "ru.json", "en.json"] {
+    for locale in ["ua.json", "en.json"] {
         let dict = match locale {
             "ua.json" => include_str!("../../src/locales/ua.json"),
-            "ru.json" => include_str!("../../src/locales/ru.json"),
-            _ => include_str!("../../src/locales/en.json"),
+                        _ => include_str!("../../src/locales/en.json"),
         };
         for key in [
             "save_failed",
@@ -4463,7 +4455,7 @@ fn test_foreground_patrol_wiring_and_tray_invariant() {
         "the new commands must be registered in the invoke handler"
     );
 
-    // 4. Frontend: the opt-in checkbox + all three locales.
+    // 4. Frontend: the opt-in checkbox + both locales.
     let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
     let html_key = tauri::utils::assets::AssetKey::from("index.html");
     let html_binding = ctx.assets().get(&html_key).expect("index.html not embedded");
@@ -4486,7 +4478,7 @@ fn test_foreground_patrol_wiring_and_tray_invariant() {
     ] {
         assert!(uipi_js.contains(needle), "uipi_manager.js must contain `{needle}`");
     }
-    for locale in ["en", "ua", "ru"] {
+    for locale in ["en", "ua"] {
         let asset = format!("locales/{locale}.json");
         let key = tauri::utils::assets::AssetKey::from(asset.as_str());
         let bytes = ctx

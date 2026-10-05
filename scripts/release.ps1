@@ -128,7 +128,7 @@ Welcome to NanoClick $Tag.
 - **Smart Click Engine**: Single, double, and hold click modes with human jitter (timing & cursor randomization) and CPS telemetry up to 160 CPS.
 - **Smart Guard & Typing Protection**: Automatically stops clicking when you type text and handles Windows UIPI elevation seamlessly.
 - **Macro Recorder & Visual Editor**: Real-time recording with RDP (Ramer-Douglas-Peucker) curve compression and manual block sequencer.
-- **Tri-Lingual Interface**: Full Ukrainian, English, and Russian localization.
+- **Bi-Lingual Interface**: Full Ukrainian and English localization.
 - **Built-in Auto-Updater**: Cryptographically verified updates via Minisign.
 
 ### 📄 License

@@ -602,11 +602,20 @@ pub fn repair_and_patch_value(user_val: &Value) -> Result<(AppConfig, Vec<String
         if let Some(afl) = user_ui.get("app_filter_list").and_then(Value::as_array) {
             default_ui.insert("app_filter_list".into(), Value::Array(afl.clone()));
         }
-        for k in ["theme", "accent_color", "language"] {
+        for k in ["theme", "accent_color"] {
             if let Some(s) = user_ui.get(k).and_then(Value::as_str) {
                 if !s.trim().is_empty() {
                     default_ui.insert(k.into(), Value::from(s));
                 }
+            }
+        }
+        // Sovereign pair only: legacy "ru" (and any garbage) falls back to the
+        // default with a repair note instead of surviving the repair forever.
+        if let Some(s) = user_ui.get("language").and_then(Value::as_str) {
+            if matches!(s, "ua" | "en") {
+                default_ui.insert("language".into(), Value::from(s));
+            } else if !s.trim().is_empty() {
+                details.push(format!("ui.language {s} unsupported; reset to default"));
             }
         }
         // Window position: two Option<i32> scalars, NOT a tuple/array.

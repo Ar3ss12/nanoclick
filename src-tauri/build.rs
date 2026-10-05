@@ -11,7 +11,6 @@ fn main() {
     println!("cargo:rerun-if-changed=../src/uipi_manager.js");
     println!("cargo:rerun-if-changed=../src/i18n.js");
     println!("cargo:rerun-if-changed=../src/locales/ua.json");
-    println!("cargo:rerun-if-changed=../src/locales/ru.json");
     println!("cargo:rerun-if-changed=../src/locales/en.json");
     println!("cargo:rerun-if-changed=../src/style.css");
     println!("cargo:rerun-if-changed=../src/sequence_editor.js");

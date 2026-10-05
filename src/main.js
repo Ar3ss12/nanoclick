@@ -1526,7 +1526,9 @@ function updateUiFromConfig(config) {
   if (themeSelect && config.ui.theme) {
     themeSelect.value = config.ui.theme;
   }
-  const targetLang = config.ui?.language || "ua";
+  // Legacy configs may carry "ru" — the dictionary is gone, fall back to English.
+  const rawLang = config.ui?.language || "ua";
+  const targetLang = ["ua", "en"].includes(rawLang) ? rawLang : "en";
   if (languageSelect) {
     languageSelect.value = targetLang;
   }
@@ -4830,7 +4832,6 @@ let onboardingCountdown = 2;
 function detectSystemLanguage() {
   const navLang = (typeof navigator !== "undefined" && (navigator.language || navigator.userLanguage || "en")).toLowerCase();
   if (navLang.startsWith("uk") || navLang.startsWith("ua")) return "ua";
-  if (navLang.startsWith("ru")) return "ru";
   return "en";
 }
 

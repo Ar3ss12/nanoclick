@@ -12,7 +12,7 @@ const I18nEngine = {
    * @param {string} initialLang - "ua" or "en"
    */
   async init(initialLang = "ua") {
-    const lang = ["ua", "en", "ru"].includes(initialLang) ? initialLang : "ua";
+    const lang = ["ua", "en"].includes(initialLang) ? initialLang : "ua";
     await this.setLanguage(lang);
     this._initialized = true;
   },
@@ -20,10 +20,10 @@ const I18nEngine = {
   /**
    * Loads the language dictionary and applies it to the DOM.
    * Replaces any previous dictionary so old data is immediately garbage-collected.
-   * @param {string} lang - "ua", "en", or "ru"
+   * @param {string} lang - "ua" or "en"
    */
   async setLanguage(lang) {
-    const targetLang = ["ua", "en", "ru"].includes(lang) ? lang : "ua";
+    const targetLang = ["ua", "en"].includes(lang) ? lang : "ua";
     try {
       const resp = await fetch(`locales/${targetLang}.json`);
       if (!resp.ok) {
