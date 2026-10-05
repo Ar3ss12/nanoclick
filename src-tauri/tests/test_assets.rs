@@ -4821,11 +4821,14 @@ fn test_settings_redesign_and_filter_highlight() {
         "dead BEHAVIOR group must be gone"
     );
 
-    // 2. Language segments, no selects.
+    // 2. Language segments + custom theme dropdown, no native selects.
     for needle in [
         "id=\"languageSegment\"",
         "id=\"presetUiLanguageSegment\"",
         "lang-segment-btn",
+        "id=\"themeDropdown\"",
+        "id=\"themeDropdownMenu\"",
+        "theme-option",
     ] {
         assert!(html.contains(needle), "index.html must contain `{needle}`");
     }
@@ -4833,20 +4836,31 @@ fn test_settings_redesign_and_filter_highlight() {
         !html.contains("id=\"languageSelect\""),
         "dead languageSelect must be gone"
     );
+    assert!(
+        !html.contains("id=\"themeSelect\""),
+        "dead themeSelect must be gone (native popup ignores CSS)"
+    );
 
-    // 3. main.js: segment painter + switcher, no select wiring.
+    // 3. main.js: segment painters + theme dropdown, no select wiring.
     let main_js = include_str!("../../src/main.js");
     for needle in [
         "paintLanguageSegment",
         "switchLanguage",
         "presetModalLanguage",
         "paintPresetModalLanguage",
+        "paintThemeDropdown",
+        "chooseTheme",
+        "THEME_ACCENTS",
     ] {
         assert!(main_js.contains(needle), "main.js must contain `{needle}`");
     }
     assert!(
         !main_js.contains("languageSelect"),
         "main.js must not reference the dead select"
+    );
+    assert!(
+        !main_js.contains("themeSelect"),
+        "main.js must not reference the dead theme select"
     );
 
     // 4. settings_guard.js: delegated highlight listener + painter.
@@ -4855,7 +4869,7 @@ fn test_settings_redesign_and_filter_highlight() {
         assert!(guard_js.contains(needle), "settings_guard.js must contain `{needle}`");
     }
 
-    // 5. style.css: 3-col grid + both segments + toggle switches.
+    // 5. style.css: 3-col grid + both segments + toggle switches + theme menu.
     let style_css = include_str!("../../src/style.css");
     for needle in [
         "three-col-cards",
@@ -4863,6 +4877,9 @@ fn test_settings_redesign_and_filter_highlight() {
         ".radio-item.selected",
         ".custom-checkbox:checked + .checkbox-box::before",
         ".checkbox-row.confirm-ready .checkbox-box",
+        ".theme-dropdown",
+        ".theme-option",
+        ".theme-dot",
     ] {
         assert!(style_css.contains(needle), "style.css must contain `{needle}`");
     }

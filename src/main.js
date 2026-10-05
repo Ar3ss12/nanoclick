@@ -1201,9 +1201,50 @@ function wireUnitSelectors() {
 }
 wireUnitSelectors();
 
-const themeSelect    = document.getElementById("themeSelect");
+const themeDropdown = document.getElementById("themeDropdown");
+const themeDropdownBtn = document.getElementById("themeDropdownBtn");
+const themeDropdownMenu = document.getElementById("themeDropdownMenu");
+const themeDropdownLabel = document.getElementById("themeDropdownLabel");
+const themeDropdownDot = document.getElementById("themeDropdownDot");
 const languageSegment = document.getElementById("languageSegment");
 const accentSwatches = document.querySelectorAll("#accentSwatches .swatch");
+
+// Theme accent preview dots (must match style.css [data-theme] --cyan).
+const THEME_ACCENTS = {
+  cyberpunk: "#06b6d4",
+  emerald: "#10b981",
+  slate: "#94a3b8",
+  midnight: "#3b82f6",
+  dracula: "#ef4444",
+  amethyst: "#8b5cf6",
+};
+
+// Single painter for the custom theme dropdown (the native <select> is gone:
+// its popup is drawn by Chromium outside the DOM and ignores our CSS).
+function paintThemeDropdown(themeName) {
+  const theme = THEME_ACCENTS[themeName] ? themeName : "cyberpunk";
+  if (themeDropdownBtn) themeDropdownBtn.setAttribute("aria-expanded", "false");
+  if (themeDropdownMenu) themeDropdownMenu.classList.add("hidden");
+  if (themeDropdownLabel) {
+    const opt = themeDropdownMenu
+      ? themeDropdownMenu.querySelector(`.theme-option[data-theme="${theme}"]`)
+      : null;
+    themeDropdownLabel.textContent = opt ? opt.textContent.trim() : theme;
+  }
+  if (themeDropdownDot) themeDropdownDot.style.background = THEME_ACCENTS[theme];
+  if (themeDropdownMenu) {
+    themeDropdownMenu.querySelectorAll(".theme-option").forEach((opt) => {
+      opt.classList.toggle("active", opt.getAttribute("data-theme") === theme);
+    });
+  }
+}
+
+function chooseTheme(themeName) {
+  const theme = THEME_ACCENTS[themeName] ? themeName : "cyberpunk";
+  paintThemeDropdown(theme);
+  applyTheme(theme, typeof currentConfig !== "undefined" ? currentConfig.ui?.accent_color : undefined);
+  if (typeof saveConfig !== "undefined") saveConfig();
+}
 
 // Sovereign pair segment: paint the active language button. The <select>
 // is gone — this is the single painter for the [EN|UA] segment.
@@ -1544,9 +1585,7 @@ function updateUiFromConfig(config) {
   if (rememberPosCheckbox) rememberPosCheckbox.checked = config.ui.remember_window_position !== false;
   if (window.SmartGuard) window.SmartGuard.hydrate(config);
 
-  if (themeSelect && config.ui.theme) {
-    themeSelect.value = config.ui.theme;
-  }
+  if (themeDropdownMenu) paintThemeDropdown(config.ui.theme || "cyberpunk");
   // Legacy configs may carry "ru" — the dictionary is gone, fall back to English.
   const rawLang = config.ui?.language || "ua";
   const targetLang = ["ua", "en"].includes(rawLang) ? rawLang : "en";
@@ -2282,7 +2321,8 @@ async function saveConfig() {
       if (pauseFocusLossCheckbox) currentConfig.ui.pause_on_focus_loss = pauseFocusLossCheckbox.checked;
       if (rememberPosCheckbox) currentConfig.ui.remember_window_position = rememberPosCheckbox.checked;
       if (window.SmartGuard) window.SmartGuard.collect(currentConfig);
-      if (themeSelect) currentConfig.ui.theme = themeSelect.value;
+      // Theme lives in the custom dropdown now (chooseTheme already wrote
+      // currentConfig via applyTheme); collect must not resurrect the select.
       // Language lives in the segment + I18nEngine now (switchLanguage already
       // wrote currentConfig.ui.language); collect must not resurrect the select.
       const alwaysAdminCb = document.getElementById("alwaysRunAsAdminCheckbox");
@@ -3159,17 +3199,45 @@ if (languageSegment) {
   });
 }
 
-if (themeSelect) {
-  themeSelect.addEventListener("change", () => {
-    applyTheme(themeSelect.value, currentConfig.ui?.accent_color);
-    saveConfig();
+if (themeDropdownBtn && themeDropdownMenu) {
+  themeDropdownBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const open = !themeDropdownMenu.classList.contains("hidden");
+    if (open) {
+      themeDropdownMenu.classList.add("hidden");
+      themeDropdownBtn.setAttribute("aria-expanded", "false");
+    } else {
+      themeDropdownMenu.classList.remove("hidden");
+      themeDropdownBtn.setAttribute("aria-expanded", "true");
+    }
+  });
+  themeDropdownMenu.addEventListener("click", (e) => {
+    const opt = e.target && e.target.closest ? e.target.closest(".theme-option") : null;
+    if (!opt) return;
+    chooseTheme(opt.getAttribute("data-theme"));
+  });
+  document.addEventListener("click", (e) => {
+    if (themeDropdown && !themeDropdown.contains(e.target)) {
+      themeDropdownMenu.classList.add("hidden");
+      themeDropdownBtn.setAttribute("aria-expanded", "false");
+    }
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !themeDropdownMenu.classList.contains("hidden")) {
+      themeDropdownMenu.classList.add("hidden");
+      themeDropdownBtn.setAttribute("aria-expanded", "false");
+    }
   });
 }
+// Repaint the dropdown label after a locale switch rewrites option strings.
+window.addEventListener("nanoclick-language-changed", () => {
+  if (typeof currentConfig !== "undefined") paintThemeDropdown(currentConfig.ui?.theme || "cyberpunk");
+});
 accentSwatches.forEach(swatch => {
   swatch.addEventListener("click", () => {
     const color = swatch.getAttribute("data-accent");
     updateSwatchActiveState(color);
-    applyTheme(themeSelect?.value || "cyberpunk", color);
+    applyTheme(typeof currentConfig !== "undefined" ? currentConfig.ui?.theme || "cyberpunk" : "cyberpunk", color);
     saveConfig();
   });
 });

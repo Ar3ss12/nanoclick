@@ -653,14 +653,21 @@
               </div>
               <div class="settings-row">
                 <span class="settings-label" data-i18n="settings_theme_label">Theme</span>
-                <select id="themeSelect" class="dropdown-right">
-                  <option value="cyberpunk" data-i18n="settings_theme_cyberpunk">Dark Cyberpunk</option>
-                  <option value="emerald" data-i18n="settings_theme_emerald">Neon Grass</option>
-                  <option value="slate" data-i18n="settings_theme_slate">Dark Slate</option>
-                  <option value="midnight" data-i18n="settings_theme_midnight">Midnight Blue</option>
-                  <option value="dracula" data-i18n="settings_theme_dracula">Dracula Crimson</option>
-                  <option value="amethyst" data-i18n="settings_theme_amethyst">Amethyst Purple</option>
-                </select>
+                <div class="theme-dropdown" id="themeDropdown">
+                  <button type="button" class="theme-dropdown-btn" id="themeDropdownBtn" aria-haspopup="listbox" aria-expanded="false">
+                    <span class="theme-dot" id="themeDropdownDot"></span>
+                    <span id="themeDropdownLabel">Dark Cyberpunk</span>
+                    <span class="theme-chevron">▾</span>
+                  </button>
+                  <div class="theme-menu hidden" id="themeDropdownMenu" role="listbox">
+                    <button type="button" class="theme-option" data-theme="cyberpunk" data-i18n="settings_theme_cyberpunk" role="option"><span class="theme-dot" style="background:#06b6d4;"></span>Dark Cyberpunk</button>
+                    <button type="button" class="theme-option" data-theme="emerald" data-i18n="settings_theme_emerald" role="option"><span class="theme-dot" style="background:#10b981;"></span>Neon Grass</button>
+                    <button type="button" class="theme-option" data-theme="slate" data-i18n="settings_theme_slate" role="option"><span class="theme-dot" style="background:#94a3b8;"></span>Dark Slate</button>
+                    <button type="button" class="theme-option" data-theme="midnight" data-i18n="settings_theme_midnight" role="option"><span class="theme-dot" style="background:#3b82f6;"></span>Midnight Blue</button>
+                    <button type="button" class="theme-option" data-theme="dracula" data-i18n="settings_theme_dracula" role="option"><span class="theme-dot" style="background:#ef4444;"></span>Dracula Crimson</button>
+                    <button type="button" class="theme-option" data-theme="amethyst" data-i18n="settings_theme_amethyst" role="option"><span class="theme-dot" style="background:#8b5cf6;"></span>Amethyst Purple</button>
+                  </div>
+                </div>
               </div>
               <div class="settings-label" style="margin-top:8px;margin-bottom:6px;" data-i18n="settings_accent_label">Accent Color</div>
               <div class="color-swatches" id="accentSwatches" style="margin-bottom:10px;">

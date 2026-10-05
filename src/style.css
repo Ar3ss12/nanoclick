@@ -820,7 +820,100 @@ input, textarea, [contenteditable="true"] {
   text-align: right;
 }
 
+/* Closed select only: the open popup is a native Chromium window and
+   ignores page CSS — that is why #themeSelect became a custom dropdown
+   (see .theme-dropdown above). Keep the closed state readable. */
 .dropdown-right:focus { border-color: var(--cyan); }
+
+/* ── CUSTOM THEME DROPDOWN (native <select> popup is drawn by Chromium
+   outside the DOM and ignores our CSS — so the list is ours, fully styled) ── */
+.theme-dropdown {
+  position: relative;
+  min-width: 200px;
+}
+
+.theme-dropdown-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: rgba(0,0,0,0.35);
+  border: 1px solid rgba(6,182,212,0.3);
+  border-radius: 6px;
+  color: var(--cyan);
+  font-family: 'Fira Code', monospace;
+  font-size: 12px;
+  padding: 5px 10px;
+  outline: none;
+  cursor: pointer;
+  text-align: left;
+}
+
+.theme-dropdown-btn:hover,
+.theme-dropdown-btn[aria-expanded="true"] {
+  border-color: var(--cyan);
+}
+
+.theme-chevron {
+  margin-left: auto;
+  opacity: 0.7;
+  font-size: 11px;
+}
+
+.theme-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--bg-card2);
+  border: 1px solid var(--border-cyan);
+  border-radius: 8px;
+  padding: 4px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+}
+
+.theme-menu.hidden {
+  display: none;
+}
+
+.theme-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12px;
+  padding: 6px 8px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.theme-option:hover {
+  background: rgba(6, 182, 212, 0.12);
+  border-color: rgba(6, 182, 212, 0.4);
+}
+
+.theme-option.active {
+  background: rgba(6, 182, 212, 0.22);
+  border-color: var(--cyan);
+  color: #fff;
+}
+
+.theme-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  box-shadow: 0 0 6px currentColor;
+}
 
 .num-input-right {
   width: 80px;
