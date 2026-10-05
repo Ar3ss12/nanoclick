@@ -6,6 +6,12 @@ const I18nEngine = {
   currentLang: "ua",
   dict: null,
   _initialized: false,
+  // One in-flight fetch per language: rapid EN↔UA clicks share the pending
+  // promise instead of stacking duplicate downloads (the JS "memory leak").
+  _pending: {},
+  // Loaded dictionaries stay cached: a language visited once never
+  // re-downloads (~12 KB saved per revisit, zero stale-promises pileup).
+  _cache: {},
 
   /**
    * Initializes i18n engine with the specified language.
@@ -24,13 +30,36 @@ const I18nEngine = {
    */
   async setLanguage(lang) {
     const targetLang = ["ua", "en"].includes(lang) ? lang : "ua";
-    try {
-      const resp = await fetch(`locales/${targetLang}.json`);
-      if (!resp.ok) {
-        throw new Error(`HTTP error ${resp.status} fetching locales/${targetLang}.json`);
+    // Same language, dictionary already live: repaint is a no-op, skip fetch.
+    // (The segment paint is owned by main.js paintLanguageSegment.)
+    if (targetLang === this.currentLang && this.dict) return;
+    // A fetch for this language is already in flight: piggyback on it
+    // instead of firing a duplicate download.
+    if (this._pending[targetLang]) {
+      try { await this._pending[targetLang]; } catch (_) { /* reported below */ }
+      if (this.currentLang === targetLang && this.dict) return;
+    }
+    // Smooth swap: fade the settings view out, swap strings, fade back in.
+    // One rAF-driven class — no timers to leak, no layout thrash.
+    const view = typeof document !== "undefined"
+      ? document.getElementById("viewSettings")
+      : null;
+    if (view) view.classList.add("lang-swapping");
+    const job = (async () => {
+      // Cache hit: no network at all.
+      if (this._cache[targetLang]) {
+        this.dict = this._cache[targetLang];
+      } else {
+        const resp = await fetch(`locales/${targetLang}.json`);
+        if (!resp.ok) {
+          throw new Error(`HTTP error ${resp.status} fetching locales/${targetLang}.json`);
+        }
+        // Cache BEFORE publish: concurrent waiters read the same object.
+        this._cache[targetLang] = await resp.json();
+        this.dict = this._cache[targetLang];
       }
-      // Overwrite dictionary: previous dictionary has no references left and will be GC-ed
-      this.dict = await resp.json();
+      // Overwrite dictionary: the previous dict object stays cached under its
+      // own key (revisit = free), nothing dangles for the GC to chase.
       this.currentLang = targetLang;
       document.documentElement.lang = targetLang;
       this.applyTranslations();
@@ -39,8 +68,24 @@ const I18nEngine = {
       const evt = { detail: { lang: targetLang } };
       window.dispatchEvent(new CustomEvent("nanoclick-language-changed", evt));
       document.dispatchEvent(new CustomEvent("languageChanged", evt));
+    })();
+    this._pending[targetLang] = job;
+    try {
+      await job;
     } catch (err) {
       console.warn(`[i18n] Failed to load locale "${targetLang}":`, err);
+    } finally {
+      delete this._pending[targetLang];
+      // Paint the swap on the next frame so the fade-out is actually visible,
+      // then release the class — a second rapid switch re-arms cleanly.
+      if (view) {
+        const release = () => view.classList.remove("lang-swapping");
+        if (typeof requestAnimationFrame !== "undefined") {
+          requestAnimationFrame(() => requestAnimationFrame(release));
+        } else {
+          release();
+        }
+      }
     }
   },
 

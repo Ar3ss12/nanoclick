@@ -4885,4 +4885,12 @@ fn test_settings_redesign_and_filter_highlight() {
             "{locale} must not carry the dead BEHAVIOR key"
         );
     }
+
+    // 7. i18n engine: cached dictionaries, no duplicate fetch, smooth swap.
+    // Rapid EN<->UA clicks used to stack one fetch per click (~12 KB each);
+    // now revisits are cache hits and in-flight fetches are shared.
+    let i18n_js = include_str!("../../src/i18n.js");
+    for needle in ["_cache", "_pending", "lang-swapping", "requestAnimationFrame"] {
+        assert!(i18n_js.contains(needle), "i18n.js must contain `{needle}`");
+    }
 }

@@ -906,7 +906,45 @@ input, textarea, [contenteditable="true"] {
 
 /* Row 1 after the split: Storage | System | Typing (equal thirds). */
 .two-col-cards.three-col-cards {
-  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+/* Narrow window: 3-col collapses to 1-col instead of squeezing text out. */
+@media (max-width: 900px) {
+  .two-col-cards,
+  .two-col-cards.three-col-cards {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Smooth language swap: fade the settings view while strings repaint. */
+#viewSettings {
+  transition: opacity 0.16s ease;
+}
+
+#viewSettings.lang-swapping {
+  opacity: 0.25;
+}
+
+/* Long Ukrainian strings must wrap, never push cards off-screen. */
+.config-card {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.settings-label,
+.checkbox-row span:last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.num-input-right {
+  flex-shrink: 0;
+}
+
+#typingKeyEntryRow,
+#typingKeyEntryRow input {
+  min-width: 0;
 }
 
 /* ── LANGUAGE SEGMENT ([EN|UA] instead of the dead 2-option <select>) ── */
