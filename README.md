@@ -144,7 +144,8 @@ left alone. The new JSON is parsed *before* it is written, because a malformed
 ```bash
 cd src-tauri
 cargo test --release -j 1 -- --skip physical_
-# → 380 passed; 0 failed (287 unit + 93 integration; 7 `physical_` tests filtered out; measured 2026-10-05)
+# → 380 passed; 0 failed (287 unit + 93 integration; 7 `physical_` tests filtered out; measured 2026-10-05;
+#    the 2026-10-06 lag/leak pass adds 7 asserts inside suggest_reads_from_ram, no new test count)
 ```
 
 The test suite covers:

@@ -178,7 +178,10 @@ pub fn recorder_backend_stop() {
 // `search_apps` in microseconds. No lock on any hot path — the catalogue is
 // UI-thread-only; the click loop never touches it.
 
-use std::sync::{OnceLock, RwLock};
+use std::sync::{
+    OnceLock, RwLock,
+    atomic::{AtomicBool, Ordering},
+};
 
 /// One selectable application for the Smart Guard app filter.
 ///
@@ -193,13 +196,30 @@ pub struct AppEntry {
     pub source: &'static str,
 }
 
+struct CatalogRow {
+    entry: AppEntry,
+    /// Lowercase label, computed ONCE at warm-up. The hot `search_apps` path
+    /// only compares — zero `String` allocations per keystroke.
+    label_lc: String,
+}
+
 struct CatalogInner {
-    running: Vec<AppEntry>,
-    installed: Vec<AppEntry>,
+    running: Vec<CatalogRow>,
+    installed: Vec<CatalogRow>,
     ready: bool,
 }
 
+impl CatalogRow {
+    fn new(entry: AppEntry) -> Self {
+        let label_lc = entry.label.to_ascii_lowercase();
+        Self { entry, label_lc }
+    }
+}
+
 static APP_CATALOG: OnceLock<RwLock<CatalogInner>> = OnceLock::new();
+/// Second warm-up call is a real no-op (the old doc comment promised this
+/// but the code spawned a duplicate EnumProcesses + registry walk).
+static CATALOG_WARM_STARTED: AtomicBool = AtomicBool::new(false);
 
 fn catalog_lock() -> &'static RwLock<CatalogInner> {
     APP_CATALOG.get_or_init(|| {
@@ -215,12 +235,17 @@ fn catalog_lock() -> &'static RwLock<CatalogInner> {
 /// off the startup critical path. Safe to call multiple times (second call
 /// is a no-op while the first is in flight or done).
 pub fn warm_up_catalog_async() {
+    // Real once-guard: a window rebuild must never spawn a second
+    // EnumProcesses + registry walk while the first is in flight.
+    if CATALOG_WARM_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
     std::thread::spawn(|| {
         let running = list_running_apps();
         let installed = list_installed_apps();
         if let Ok(mut guard) = catalog_lock().write() {
-            guard.running = running;
-            guard.installed = installed;
+            guard.running = running.into_iter().map(CatalogRow::new).collect();
+            guard.installed = installed.into_iter().map(CatalogRow::new).collect();
             guard.ready = true;
         }
     });
@@ -229,7 +254,10 @@ pub fn warm_up_catalog_async() {
 /// Search the warmed catalogue. Pure RAM read, no syscalls.
 /// Returns `(ready, items)`: `ready == false` means the background warm-up
 /// has not finished yet — the UI must paint "Loading…", NOT "Nothing found".
+/// Hot path: compares against the precomputed `label_lc` — zero `String`
+/// allocations per keystroke; dedup via `HashSet`, not an O(n²) scan.
 pub fn search_apps(query: &str, limit: usize) -> (bool, Vec<AppEntry>) {
+    use std::collections::HashSet;
     let limit = limit.clamp(1, 100);
     let guard = match catalog_lock().read() {
         Ok(g) => g,
@@ -240,22 +268,22 @@ pub fn search_apps(query: &str, limit: usize) -> (bool, Vec<AppEntry>) {
     }
     let q = query.trim().to_ascii_lowercase();
     let mut out: Vec<AppEntry> = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
     // Priority 1: running processes (what the user most likely wants).
-    for app in guard.running.iter() {
-        if q.is_empty() || app.label.to_ascii_lowercase().contains(&q) {
-            out.push(app.clone());
+    for row in guard.running.iter() {
+        if q.is_empty() || row.label_lc.contains(&q) {
+            seen.insert(row.label_lc.as_str());
+            out.push(row.entry.clone());
             if out.len() >= limit {
                 return (true, out);
             }
         }
     }
     // Priority 2: installed apps, deduped against running hits.
-    for app in guard.installed.iter() {
-        let label_lc = app.label.to_ascii_lowercase();
-        if (q.is_empty() || label_lc.contains(&q))
-            && !out.iter().any(|e| e.label.eq_ignore_ascii_case(&app.label))
-        {
-            out.push(app.clone());
+    for row in guard.installed.iter() {
+        if (q.is_empty() || row.label_lc.contains(&q)) && !seen.contains(row.label_lc.as_str()) {
+            seen.insert(row.label_lc.as_str());
+            out.push(row.entry.clone());
             if out.len() >= limit {
                 return (true, out);
             }

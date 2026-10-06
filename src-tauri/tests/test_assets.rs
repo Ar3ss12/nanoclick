@@ -4612,6 +4612,15 @@ fn test_suggest_reads_from_ram() {
     // Defect 5.1 (status poll): visibility-gated, 1 s — not a blind 400 ms burn.
     assert!(guard_js.contains("document.hidden"), "status poll must skip IPC while the page is hidden");
     assert!(!guard_js.contains("_renderStatus(), 400"), "400 ms status poll must stay deleted");
+    // Lag/leak pass: debounced keystrokes, generation token, precomputed keys.
+    assert!(guard_js.contains("_scheduleSuggest"), "keystrokes must go through a debounced scheduler");
+    assert!(guard_js.contains("_suggestSeq"), "stale suggest replies must die on a generation token");
+    assert!(guard_js.contains("_suggestInflight"), "parallel search_apps bursts must be single-flight");
+    assert!(platform_rs.contains("CATALOG_WARM_STARTED"), "warm-up must be once-guarded, not just documented");
+    assert!(platform_rs.contains("label_lc"), "search must compare precomputed lowercase, not allocate per keystroke");
+    assert!(!platform_rs.contains("out.iter().any(|e| e.label.eq_ignore_ascii_case"), "O(n²) page-side-style dedup must stay deleted");
+    let main_js_pp = include_str!("../../src/main.js");
+    assert!(main_js_pp.contains("document.hidden && isPickingPos"), "picker stream must die when the page hides");
     assert!(platform_rs.contains("OnceLock"), "catalogue must live in a std OnceLock (no new crates)");
     assert!(platform_rs.contains("fn warm_up_catalog_async"), "platform must expose warm_up_catalog_async");
     assert!(platform_rs.contains("fn search_apps"), "platform must expose search_apps");

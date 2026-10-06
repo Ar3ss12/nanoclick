@@ -27,6 +27,12 @@ const SmartGuard = {
   _captureUnsubs: null,
   _suggestItems: [],
   _suggestIndex: -1,
+  // Suggest request hygiene: debounced keystrokes, single flight, generation
+  // token. Without this a fast `discord.exe` burst fired ~11 parallel
+  // search_apps IPC calls and a slow `d` reply repainted over `discord`.
+  _suggestTimer: null,
+  _suggestSeq: 0,
+  _suggestInflight: false,
   _statusTimer: null,
   _statusBusy: false,
   _isTypingGuardEnabled: true,
@@ -390,8 +396,10 @@ const SmartGuard = {
     const entry = this._el("appFilterEntry");
     if (!entry) return;
 
+    // Focus paints immediately (single IPC); typing is debounced + single
+    // flight so a fast burst never fires parallel search_apps calls.
     entry.addEventListener("focus", () => this._showSuggest());
-    entry.addEventListener("input", () => this._showSuggest());
+    entry.addEventListener("input", () => this._scheduleSuggest());
 
     entry.addEventListener("keydown", (e) => {
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
@@ -478,11 +486,36 @@ const SmartGuard = {
       }));
   },
 
+  /** Debounced keystroke entry: 120 ms quiet window, single flight. */
+  _scheduleSuggest() {
+    if (this._suggestTimer) clearTimeout(this._suggestTimer);
+    this._suggestTimer = setTimeout(() => {
+      this._suggestTimer = null;
+      if (this._suggestInflight) {
+        // One trailing retry: the in-flight reply repaints, then we re-read
+        // the (possibly newer) input value. No queue, no pile-up.
+        this._scheduleSuggest();
+        return;
+      }
+      this._showSuggest();
+    }, 120);
+  },
+
   async _showSuggest() {
     const box = this._el("appFilterSuggest");
     if (!box) return;
 
-    this._suggestItems = await this._computeSuggest();
+    // Generation token: a slow reply for `d` must never repaint over `discord`.
+    const seq = ++this._suggestSeq;
+    this._suggestInflight = true;
+    let items;
+    try {
+      items = await this._computeSuggest();
+    } finally {
+      this._suggestInflight = false;
+    }
+    if (seq !== this._suggestSeq) return; // stale reply — drop silently.
+    this._suggestItems = items;
     this._suggestIndex = -1;
 
     // Catalogue still warming: _computeSuggest already painted "Loading…",
@@ -514,6 +547,12 @@ const SmartGuard = {
   },
 
   _hideSuggest() {
+    // Cancel a pending debounced show: hiding then typing must not resurrect
+    // a stale box from the old timer.
+    if (this._suggestTimer) {
+      clearTimeout(this._suggestTimer);
+      this._suggestTimer = null;
+    }
     const box = this._el("appFilterSuggest");
     if (box) box.style.display = "none";
     this._suggestIndex = -1;

@@ -2577,6 +2577,7 @@ let pickPosStreamId = null;
 let pickPosUnlisten = null;
 
 async function stopPositionPicker() {
+  if (!isPickingPos && !pickPosUnlisten && pickPosStreamId == null) return;
   isPickingPos = false;
   try {
     if (pickPosUnlisten) { pickPosUnlisten(); }
@@ -2595,6 +2596,12 @@ async function stopPositionPicker() {
   if (pickPosStatus) pickPosStatus.classList.add("hidden");
   window.removeEventListener("keydown", handlePickPosKeyDown);
 }
+
+// A picker left running keeps a Rust thread emitting 20 IPC events/sec into
+// a hidden page. Kill it on hide: the user re-arms with one click on return.
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden && isPickingPos) stopPositionPicker();
+});
 
 function handlePickPosKeyDown(e) {
   if (e.key === "Enter" || e.code === "Enter") {
