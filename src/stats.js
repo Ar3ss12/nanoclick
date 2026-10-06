@@ -1,26 +1,21 @@
-// ── nanoclick Statistics & Analytics Engine ────────────────────────
-// Independent module for tracking runtime clicks, session durations,
-// real-time CPS graphing, and persistent storage across reinstalls.
+// ── nanoclick Statistics & Analytics Engine (thin client) ─────────
+// Counting lives in Rust now (`src-tauri/src/stats_agg.rs`): the 66 ms
+// telemetry tick folds into `SessionStats` via the `stats_tick` command and
+// the backend persists totals itself. This module keeps ONLY what must live
+// in the DOM: the live CPS ring for the Canvas chart, the DOM paint, and the
+// localStorage backup (offline fallback when IPC is unavailable).
 
 const LOCAL_STORAGE_KEY = "nanoclick_stats_backup";
 
 const StatsEngine = {
-  // Runtime in-memory metrics for the current application session
+  // Session counters mirrored from the backend (get_session_stats).
+  // Never computed here — only painted.
   state: {
-    sessionClicks: 0,    // Total clicks accumulated across ALL runs this app session
-    runClicks: 0,        // Clicks in the CURRENT run only (resets on each START)
+    sessionClicks: 0,
+    runClicks: 0,
     sessionActiveMs: 0,
-    lastUpdate: null,
     activeNow: false,
-    lastClicksDone: 0,   // Last known clicks_done value; reset to 0 on STOP
-    lastDiskSave: 0,
     liveCpsHistory: [], // Max 60 rolling points for live Canvas chart
-    // ── Idempotent finalization (double-flush guard) ──
-    // Zapiznilyi 66ms worker tick after STOP must be a no-op, never a 2nd push.
-    lastFinalizedAt: 0,      // nowMs of the last history.push
-    lastFinalizedClicks: -1, // clicks value that was finalized
-    // ── Dirty flag: disk writes only when clicks actually happened ──
-    statsDirty: false,
   },
 
   _lastCpsRecordMs: 0,
@@ -66,101 +61,40 @@ const StatsEngine = {
     }
   },
 
-  // Called on each IPC state tick from the Rust scheduler
-  // saveConfigCallback is called ONLY on: START, STOP-finalize, and the
-  // 5s dirty-flush (when statsDirty). Never in idle — disk sleeps.
-  recordSessionTick(active, clicks_done, cps, config, saveConfigCallback) {
+  // Called on each IPC state tick from the Rust scheduler.
+  // Counting + persistence live in the backend (stats_tick): this only
+  // mirrors session counters for paint, keeps the CPS ring for Canvas,
+  // and throttles the DOM render. saveConfigCallback stays as a fallback
+  // for the offline path (no IPC — file:// preview, tests).
+  async recordSessionTick(active, clicks_done, cps, config, _saveConfigCallback) {
     const nowMs = Date.now();
-    const clicks = Math.max(0, Number(clicks_done) || 0);
-    const st = this.ensureStatsConfig(config);
     const curCps = Math.max(0, Number(cps) || 0);
-    const markDirty = () => { this.state.statsDirty = true; };
-
-    if (active) {
-      if (!this.state.activeNow) {
-        // ── New run started: reset per-run baseline ──
-        this.state.activeNow = true;
-        this.state.runClicks = 0;       // Reset per-run counter on each START
-        this.state.lastClicksDone = 0;  // Always count from 0 so deltas are correct
-        this.state.lastUpdate = nowMs;
-        st.total_sessions = (Number(st.total_sessions) || 0) + 1;
-        this.saveToLocalStorage(st);
-        if (typeof saveConfigCallback === "function") saveConfigCallback();
-      }
-
-      // ── Always accumulate delta for active ticks (including the first tick!) ──
-      const deltaClicks = clicks > this.state.lastClicksDone ? (clicks - this.state.lastClicksDone) : 0;
-      this.state.lastClicksDone = clicks;
-      if (deltaClicks > 0) {
-        this.state.runClicks += deltaClicks;      // Per-run accumulator
-        this.state.sessionClicks += deltaClicks;  // Session-wide accumulator
-        st.total_clicks = (Number(st.total_clicks) || 0) + deltaClicks;
-        markDirty();
-      }
-
-      if (this.state.lastUpdate) {
-        const deltaMs = nowMs - this.state.lastUpdate;
-        if (deltaMs > 0 && deltaMs < 5000) {
-          this.state.sessionActiveMs += deltaMs;
-          st.total_active_ms = (Number(st.total_active_ms) || 0) + deltaMs;
-        }
-      }
-      this.state.lastUpdate = nowMs;
-
-      if (curCps > (Number(st.max_cps) || 0)) {
-        st.max_cps = Number(curCps.toFixed(1));
-      }
-
-      // ── 5s dirty-flush: ONE disk write per 5s of clicking, ZERO in idle ──
-      if (nowMs - (this.state.lastDiskSave || 0) > 5000) {
-        this.state.lastDiskSave = nowMs;
-        if (this.state.statsDirty) {
-          this.state.statsDirty = false;
-          this.saveToLocalStorage(st);
-          if (typeof saveConfigCallback === "function") saveConfigCallback();
-        }
-      }
-    } else {
-      // Late echo AFTER finalize: activeNow is already false — pure no-op.
-      // (The twin tick 550 -> 551 lands here, not in the branch below.)
-      if (!this.state.activeNow) {
-        return;
-      }
-      // ── Run ended: EXACTLY-ONCE finalize (single entry point) ──
-      // Reached only on the true active->idle transition.
-      // ── Capture final click delta, log it, and reset lastClicksDone ──
-      const deltaClicks = clicks > this.state.lastClicksDone ? (clicks - this.state.lastClicksDone) : 0;
-      if (deltaClicks > 0) {
-        this.state.runClicks += deltaClicks;
-        this.state.sessionClicks += deltaClicks;
-        st.total_clicks = (Number(st.total_clicks) || 0) + deltaClicks;
-      }
-
-      this.state.activeNow = false;
-      this.state.lastUpdate = null;
-      this.state.lastClicksDone = 0; // Critical: reset so next START doesn't skip clicks
-      // ── Junk filter: skip noise runs (accidental hotkey taps) ──
-      // Counters above still grow; only the history chart stays clean.
-      const isJunk = this.state.runClicks < 5 && this.state.sessionActiveMs < 1000;
-      if (!isJunk && (this.state.runClicks > 0 || this.state.sessionActiveMs > 1000)) {
-        const avgVal = this.state.sessionActiveMs > 0
-          ? (this.state.runClicks / (this.state.sessionActiveMs / 1000))
-          : 0;
-        if (!Array.isArray(st.history)) st.history = [];
-        st.history.push({
-          timestamp: nowMs,
-          clicks: this.state.runClicks,         // Log per-run clicks in history
-          active_ms: this.state.sessionActiveMs,
-          avg_cps: Number(avgVal.toFixed(1)),
+    const inv = window.__TAURI__?.core?.invoke;
+    if (inv) {
+      try {
+        const res = await inv("stats_tick", {
+          active: !!active,
+          clicksDone: Math.max(0, Number(clicks_done) || 0),
+          cps: curCps,
+          nowMs,
         });
-        // Ring buffer cap: stats.json never grows past ~6 KB.
-        if (st.history.length > 50) st.history.shift();
-        this.state.lastFinalizedAt = nowMs;
-        this.state.lastFinalizedClicks = clicks;
+        if (res && typeof res === "object") {
+          if (res.totals && config && typeof config === "object") {
+            config.stats = res.totals;
+          }
+          try {
+            const sess = await inv("get_session_stats");
+            if (sess && typeof sess === "object") {
+              this.state.sessionClicks = Number(sess.session_clicks) || 0;
+              this.state.runClicks = Number(sess.run_clicks) || 0;
+              this.state.sessionActiveMs = Number(sess.session_active_ms) || 0;
+              this.state.activeNow = !!sess.active_now;
+            }
+          } catch (_) {}
+        }
+      } catch (_) {
+        // IPC hiccup — fall through to paint with the last known state.
       }
-      this.state.statsDirty = false; // STOP always flushes synchronously below
-      this.saveToLocalStorage(st);
-      if (typeof saveConfigCallback === "function") saveConfigCallback();
     }
 
     this.recordCpsHistoryPoint(curCps, active);

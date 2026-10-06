@@ -4,7 +4,7 @@
 
 Built with **Tauri 2 + Rust + vanilla JS**. No Electron, no bundler, no bloat: the production installer is **~2.3 MB**, the portable binary **~5.2 MB**.
 
-![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue) ![Version](https://img.shields.io/badge/version-1.3.0-brightgreen) ![Tests](https://img.shields.io/badge/tests-358%2F358-brightgreen) ![i18n](https://img.shields.io/badge/i18n-UA%20%7C%20RU%20%7C%20EN-blue) ![Tauri](https://img.shields.io/badge/Tauri-2.x-FFC131) ![Rust](https://img.shields.io/badge/rust-stable--msvc-DEA584)
+![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue) ![Version](https://img.shields.io/badge/version-1.3.0-brightgreen) ![Tests](https://img.shields.io/badge/tests-380%2F380-brightgreen) ![i18n](https://img.shields.io/badge/i18n-UA%20%7C%20RU%20%7C%20EN-blue) ![Tauri](https://img.shields.io/badge/Tauri-2.x-FFC131) ![Rust](https://img.shields.io/badge/rust-stable--msvc-DEA584)
 
 ---
 
@@ -144,14 +144,14 @@ left alone. The new JSON is parsed *before* it is written, because a malformed
 ```bash
 cd src-tauri
 cargo test --release -j 1 -- --skip physical_
-# → 358 passed; 0 failed (274 unit + 84 integration; 7 `physical_` tests filtered out; measured 2026-10-04)
+# → 380 passed; 0 failed (287 unit + 93 integration; 7 `physical_` tests filtered out; measured 2026-10-05)
 ```
 
 The test suite covers:
 - **i18n Key Symmetry & DOM Validation** — 100% 2-way synchronization across UA and EN (493 keys × 2 locales, 15 of them notice keys)
 - **Windows UIPI & Elevation Integration** — token privilege checks and app manifests
 - **Stats Triple-Redundancy** — `config.json` + `stats.json` + `localStorage` fallback
-- **Stats Session Lifecycle** — exactly-once finalize (no double-flush twins), junk-run filter (`<5 clicks & <1s` skipped from chart), dirty-flag 5s flush (zero disk writes in idle), ring-capped history (50 entries, ~6 KB ceiling)
+- **Stats Session Lifecycle** — Rust-owned aggregator (`stats_agg.rs`): exactly-once finalize (no double-flush twins), junk-run filter (`<5 clicks & <1s` skipped from chart), ring-capped history (50 entries, ~6 KB ceiling); the page keeps only Canvas paint
 - **Modal Scrollability & Trap Immunity** — Escape handlers and backdrop closes across all overlays
 - **Win32 Hook routing** & physical input matching (`SendInput`, Numpad, Mouse X-Buttons)
 - **Normalizer 5-phase pipeline** & RDP mouse trajectory simplification

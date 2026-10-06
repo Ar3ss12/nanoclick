@@ -397,7 +397,10 @@ onDomReady(() => {
 // only happen from the configured endpoint (GitHub Releases of this
 // repository). Nothing is installed without a valid signature.
 const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000; // every 30 minutesurs
-const UPDATE_DISMISS_KEY = "nanoclick_update_dismissed_version";
+// Dismissal is backend-owned (config.ui.update_dismissed_version): localStorage
+// was wiped on reinstall and invisible to a rebuilt page after deep sleep.
+// Sync fallback keeps the banner usable when IPC is unavailable.
+let updateDismissedSync = null;
 
 // Portable branch: probe once per bar (cheap sync command, no network).
 async function isPortableRuntime() {
@@ -437,9 +440,13 @@ function showUpdateBar(version, notes, rawJson) {
   // captures `version`: with addEventListener + a one-time guard it would keep the
   // FIRST version and store a stale dismissal key.
   // oxlint-disable-next-line unicorn/prefer-add-event-listener
-  document.getElementById("updateDismissBtn").onclick = () => {
+  document.getElementById("updateDismissBtn").onclick = async () => {
     bar.classList.add("hidden");
-    try { localStorage.setItem(UPDATE_DISMISS_KEY, version); } catch {}
+    try {
+      await invoke("dismiss_update_version", { version });
+    } catch (_) {
+      updateDismissedSync = version;
+    }
   };
 }
 
@@ -498,8 +505,8 @@ async function checkForAppUpdates(manual = false) {
   try {
     const info = await invoke("check_for_updates");
     if (info) {
-      let dismissed = null;
-      try { dismissed = localStorage.getItem(UPDATE_DISMISS_KEY); } catch {}
+      let dismissed = updateDismissedSync;
+      try { dismissed = await invoke("get_update_dismissed_version"); } catch (_) {}
       console.log("[updater] latest:", info.version, "local:", "(see get_app_version)", "dismissed:", dismissed);
       if (manual || dismissed !== info.version) {
         showUpdateBar(info.version, info.body, info.rawJson);
@@ -2563,15 +2570,24 @@ document.querySelectorAll('input[type="radio"]').forEach(r => {
 });
 
 // ── CURSOR POSITION PICKER (🔍 BUTTON) ──────────────────────────
+// The live position comes from a Rust stream (position-picker-tick @ ~20 Hz),
+// not from a page setInterval: the page only paints, Rust owns the cadence.
 let isPickingPos = false;
-let pickPosInterval = null;
+let pickPosStreamId = null;
+let pickPosUnlisten = null;
 
-function stopPositionPicker() {
+async function stopPositionPicker() {
   isPickingPos = false;
-  if (pickPosInterval) {
-    clearInterval(pickPosInterval);
-    pickPosInterval = null;
-  }
+  try {
+    if (pickPosUnlisten) { pickPosUnlisten(); }
+  } catch (_) {}
+  pickPosUnlisten = null;
+  try {
+    if (window.__TAURI__?.core?.invoke && pickPosStreamId != null) {
+      await window.__TAURI__.core.invoke("stop_position_picker_stream", { id: pickPosStreamId });
+    }
+  } catch (_) {}
+  pickPosStreamId = null;
   if (pickPosBtn) {
     pickPosBtn.classList.remove("picking");
     pickPosBtn.textContent = "🔍";
@@ -2593,7 +2609,7 @@ function handlePickPosKeyDown(e) {
 }
 
 if (pickPosBtn) {
-  pickPosBtn.addEventListener("click", () => {
+  pickPosBtn.addEventListener("click", async () => {
     if (isPickingPos) {
       stopPositionPicker();
       return;
@@ -2606,16 +2622,23 @@ if (pickPosBtn) {
 
     window.addEventListener("keydown", handlePickPosKeyDown);
 
-    pickPosInterval = setInterval(async () => {
-      if (!isPickingPos) return;
-      try {
-        const [x, y] = await invoke("get_current_mouse_pos");
-        if (posXInput) posXInput.value = x;
-        if (posYInput) posYInput.value = y;
-      } catch (err) {
-        console.error("Failed to poll mouse position:", err);
-      }
-    }, 50);
+    try {
+      const listenEv = window.__TAURI__?.event?.listen;
+      if (!window.__TAURI__?.core?.invoke || !listenEv) throw new Error("no-ipc");
+      pickPosUnlisten = await listenEv("position-picker-tick", (e) => {
+        if (!isPickingPos) return;
+        const p = e?.payload || {};
+        if (p.id !== pickPosStreamId) return;
+        if (posXInput && Number.isFinite(Number(p.x))) posXInput.value = p.x;
+        if (posYInput && Number.isFinite(Number(p.y))) posYInput.value = p.y;
+      });
+      const res = await window.__TAURI__.core.invoke("start_position_picker_stream");
+      pickPosStreamId = res?.id ?? null;
+      if (pickPosStreamId == null) throw new Error("no-id");
+    } catch (err) {
+      try { console.error("Position picker stream failed:", err); } catch (_) {}
+      stopPositionPicker();
+    }
   });
 }
 
@@ -3620,7 +3643,7 @@ async function duplicatePreset(presetId) {
   const source = presetLibrary().find(x => x.id === presetId);
   if (!source) return;
   const copy = JSON.parse(JSON.stringify(withPresetDefaults(source)));
-  copy.id = "preset_" + Date.now();
+  copy.id = await mintId("preset");
   copy.name = `${copy.name} (copy)`;
   copy.is_default = false;
   // Two presets must never fight over one global hotkey.
@@ -4405,7 +4428,7 @@ async function savePresetFromModal() {
   const existing = editId ? library.find((x) => x.id === editId) : null;
   const entry = {
     ...record,
-    id: existing ? existing.id : "preset_" + Date.now(),
+    id: existing ? existing.id : await mintId("preset"),
     is_default: existing ? !!existing.is_default : false,
   };
   try {
@@ -4609,18 +4632,18 @@ function setupPresetListeners() {
         // has neither, and `withPresetDefaults` fills the engine-only default —
         // so an old file can never arrive with two timers looking armed or with a
         // 30 % jitter silently rewritten.
-        const imported = list
-          .filter(p => p && typeof p === "object" && String(p.name || "").trim() && Number.isFinite(Number(p.target_cps)))
-          .map((p, i) => {
-            const full = withPresetDefaults(p);
-            return {
-              ...full,
-              id: `preset_${Date.now()}_${i}`,
-              name: String(p.name).trim(),
-              description: String(p.description || `${full.target_cps} CPS`),
-              is_default: false,
-            };
+        const valid = list.filter((v) => v && typeof v === "object" && String(v.name || "").trim() && Number.isFinite(Number(v.target_cps)));
+        const imported = [];
+        for (let idx = 0; idx < valid.length; idx++) {
+          const full = withPresetDefaults(valid[idx]);
+          imported.push({
+            ...full,
+            id: await mintId("preset"),
+            name: String(valid[idx].name).trim(),
+            description: String(valid[idx].description || `${full.target_cps} CPS`),
+            is_default: false,
           });
+        }
 
         if (imported.length === 0) throw new Error("no valid presets");
         // Bulk write through the store, not through a config save: the library file is the
@@ -5466,44 +5489,19 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 
-// ── IN-WINDOW HOTKEY DISPATCHER ─────────────────────────────────
+// ── IN-WINDOW HOTKEY DISPATCHER (thin forwarder) ────────────────
 // When the NanoClick window has foreground focus, the Win32 WH_KEYBOARD_LL hook
 // may be affected by Chromium message loop isolation, text typing heuristics,
-// or input focus. This listener guarantees that shortcuts (mode switch, toggle,
-// emergency stop, preset slots) respond instantly when pressed directly in the UI,
-// while safely ignoring presses when the user is actively typing in a text field
-// or recording a new hotkey.
+// or input focus. This listener forwards presses to Rust (`dispatch_window_key`)
+// for a zero-latency decision and only paints the outcome.
+//
+// The page keeps ONLY what must live in the DOM: the isInput /
+// activeRecordingBtn guards, preventDefault on matched presses, and the held
+// set sent along statelessly per call (no second copy of bindings here).
+// Matching + the Work-Mode veto live in `src-tauri/src/window_dispatch.rs`.
 const _heldWindowKeys = new Set();
 
-function _matchesInWindowHotkey(bindingStr, currentKey, heldKeys) {
-  if (!bindingStr || typeof bindingStr !== "string") return false;
-  const groups = bindingStr.split(/[/|]/).map(s => s.trim()).filter(Boolean);
-  for (const group of groups) {
-    const parts = group.split("+").map(s => s.trim()).filter(Boolean);
-    if (!parts.length) continue;
-    const trigger = parts[parts.length - 1];
-    const required = parts.slice(0, parts.length - 1);
-
-    if (trigger.toUpperCase() !== currentKey.toUpperCase()) {
-      continue;
-    }
-    const allHeld = required.every(req => {
-      const upperReq = req.toUpperCase();
-      for (const held of heldKeys) {
-        const upperHeld = held.toUpperCase();
-        if (upperHeld === upperReq) return true;
-        if (upperReq === "CTRL" && (upperHeld === "CONTROLLEFT" || upperHeld === "CONTROLRIGHT" || upperHeld === "CTRL")) return true;
-        if (upperReq === "ALT" && (upperHeld === "ALTLEFT" || upperHeld === "ALTRIGHT" || upperHeld === "ALT")) return true;
-        if (upperReq === "SHIFT" && (upperHeld === "SHIFTLEFT" || upperHeld === "SHIFTRIGHT" || upperHeld === "SHIFT")) return true;
-      }
-      return false;
-    });
-    if (allHeld) return true;
-  }
-  return false;
-}
-
-window.addEventListener("keydown", (e) => {
+window.addEventListener("keydown", async (e) => {
   if (activeRecordingBtn) return;
   if (e.repeat) return;
 
@@ -5514,20 +5512,31 @@ window.addEventListener("keydown", (e) => {
   const physicalKey = codeToPhysicalKey(e.code, e.key);
   _heldWindowKeys.add(physicalKey);
 
-  const hotkeys = currentConfig?.hotkeys;
-  if (!hotkeys) return;
+  let decision = null;
+  try {
+    if (window.__TAURI__?.core?.invoke) {
+      decision = await window.__TAURI__.core.invoke("dispatch_window_key", {
+        currentKey: physicalKey,
+        heldKeys: [..._heldWindowKeys],
+      });
+    }
+  } catch (_) {
+    return;
+  }
+  if (!decision || typeof decision !== "object") return;
+  const kind = String(decision.kind || "no_match");
 
-  // 1. Emergency stop (always allowed, e.g. Escape)
-  if (_matchesInWindowHotkey(hotkeys.emergency_stop, physicalKey, _heldWindowKeys)) {
+  // 1. Emergency stop (acts only while running — same gate as before).
+  if (kind === "emergency_stop") {
     if (isRunning) {
       e.preventDefault();
       executeStartAutomation({ skipGuiLock: true });
-      return;
     }
+    return;
   }
 
-  // 2. Mode switch (e.g. *+1 or Ctrl+Alt+M)
-  if (_matchesInWindowHotkey(hotkeys.mode_switch, physicalKey, _heldWindowKeys)) {
+  // 2. Mode switch.
+  if (kind === "mode_switch") {
     e.preventDefault();
     if (modeToggleBtn) {
       modeToggleBtn.click();
@@ -5535,11 +5544,10 @@ window.addEventListener("keydown", (e) => {
     return;
   }
 
-  // 3. Toggle clicking (e.g. R or K)
-  // Hotkey toggle bypasses GUI button freeze and stops unconditionally without delay
-  if (_matchesInWindowHotkey(hotkeys.toggle, physicalKey, _heldWindowKeys)) {
+  // 3. Toggle clicking (veto resolved in Rust — page only toasts).
+  if (kind === "toggle") {
     e.preventDefault();
-    if (currentConfig.active_mode === "work" && !isRunning) {
+    if (decision.vetoed) {
       showToast(getI18nText("tray_blocked_work_mode", {}, "Blocked: Work Mode is active"), "warn");
       return;
     }
@@ -5547,17 +5555,14 @@ window.addEventListener("keydown", (e) => {
     return;
   }
 
-  // 4. Preset slots (1..9)
-  if (Array.isArray(hotkeys.preset_hotkeys)) {
-    for (let slotIdx = 0; slotIdx < hotkeys.preset_hotkeys.length; slotIdx++) {
-      const slotBinding = hotkeys.preset_hotkeys[slotIdx];
-      if (slotBinding && _matchesInWindowHotkey(slotBinding, physicalKey, _heldWindowKeys)) {
-        e.preventDefault();
-        const p = presetLibrary()[slotIdx];
-        if (p) {
-          applyPreset(p.id);
-        }
-        return;
+  // 4. Preset slots (1..9) — Rust answers the slot, page applies by index.
+  if (kind === "preset_slot") {
+    const slotIdx = Number(decision.slot);
+    if (Number.isInteger(slotIdx) && slotIdx >= 0 && slotIdx < 9) {
+      e.preventDefault();
+      const p = presetLibrary()[slotIdx];
+      if (p) {
+        applyPreset(p.id);
       }
     }
   }
@@ -5669,9 +5674,22 @@ everyVisible(500, () => {
 });
 
 // ── EMPTY MACRO TEMPLATE ──────────────────────────────────────────────
+// Ids are minted by Rust (new_unique_id): Date.now()+Math.random in the page
+// collided across two tabs in the same millisecond. Sync fallback keeps the
+// template usable when IPC is unavailable (tests, file:// preview).
+function mintIdSync(prefix) {
+  return `${prefix}_${Date.now().toString(16)}${Math.floor(Math.random() * 0xffff).toString(16)}`;
+}
+async function mintId(prefix) {
+  try {
+    const id = await invoke("new_unique_id", { prefix });
+    if (typeof id === "string" && id) return id;
+  } catch (_) {}
+  return mintIdSync(prefix);
+}
 function emptyMacro(name) {
   return {
-    id: "m_" + Date.now().toString(16) + Math.floor(Math.random() * 0xffff).toString(16),
+    id: mintIdSync("m"),
     name: name || "New macro",
     icon: "✨",
     actions: [],
@@ -6823,6 +6841,7 @@ onDomReady(() => {
   const saveBtn = document.getElementById("setImgTrigBtn");
   const clearBtn = document.getElementById("clearImgTrigBtn");
   if (pickBtn) pickBtn.addEventListener("click", async () => {
+    const status = document.getElementById("imgTrigStatus");
     try {
       const [x, y] = await invoke("get_cursor_pos_now");
       document.getElementById("imgTrigX").value = x;
@@ -6831,8 +6850,23 @@ onDomReady(() => {
       if (rgba != null) {
         const hex = (rgba >>> 8).toString(16).padStart(6, "0").toUpperCase();
         document.getElementById("imgTrigColor").value = "#" + hex;
+        if (status) { status.textContent = ""; status.style.color = ""; }
       }
-    } catch (e) { console.error("pickPixel failed:", e); }
+    } catch (e) {
+      // Honest failure: OVERLAY_COVERED (HW overlay/DRM), OFF_SCREEN, GDI_FAILED.
+      // The old code swallowed this in console.error and left empty inputs.
+      const msg = String(e || "");
+      if (status) {
+        if (msg.includes("OVERLAY_COVERED")) {
+          status.textContent = getI18nText("settings_trigger_status_overlay", {}, "Cannot read this pixel: hardware overlay or protected content covers it.");
+        } else if (msg.includes("OFF_SCREEN")) {
+          status.textContent = getI18nText("settings_trigger_status_offscreen", {}, "Cursor is off-screen — move it onto a monitor and retry.");
+        } else {
+          status.textContent = getI18nText("dialog_alert_pick_fail", { err: msg }, `Pick failed: ${msg}`);
+        }
+        status.style.color = "var(--red, #EF4444)";
+      }
+    }
   });
   if (saveBtn) saveBtn.addEventListener("click", async () => {
     const x = parseInt(document.getElementById("imgTrigX").value, 10);

@@ -2470,22 +2470,105 @@ pub fn get_foreground_window_title() -> Option<String> {
 /// (R in bits 24-31, G in 16-23, B in 8-15, A in 0-7). Returns None if
 /// the coordinates are off-screen or the GDI call fails.
 pub fn get_pixel_rgba(x: i32, y: i32) -> Option<u32> {
+    get_pixel_rgba_safe(x, y).ok()
+}
+
+/// Failure modes of a pixel read, for an honest UI (never a silent null).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PixelError {
+    /// Coordinates outside the virtual desktop.
+    OffScreen,
+    /// `GetPixel` returned `CLR_INVALID` — hardware overlay / DRM / GPU
+    /// surface that GDI cannot see (Discord with HW acceleration, video, games).
+    OverlayCovered,
+    /// `GetDC` itself failed.
+    GdiFailed,
+}
+
+impl PixelError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            PixelError::OffScreen => "OFF_SCREEN",
+            PixelError::OverlayCovered => "OVERLAY_COVERED",
+            PixelError::GdiFailed => "GDI_FAILED",
+        }
+    }
+}
+
+/// Pixel read that names its failure instead of returning a silent null.
+/// Step 1 is the classic `GetPixel`; on `CLR_INVALID` it retries once via a
+/// 1x1 `BitBlt` into a memory DC (sees through some overlays GDI misses).
+/// A second miss means DRM/composition — reported, not swallowed.
+pub fn get_pixel_rgba_safe(x: i32, y: i32) -> Result<u32, PixelError> {
+    use windows::Win32::Graphics::Gdi::{
+        BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits,
+        SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, SRCCOPY,
+    };
+    if x < 0 || y < 0 {
+        return Err(PixelError::OffScreen);
+    }
     unsafe {
         let hdc_screen = GetDC(None);
         if hdc_screen.is_invalid() {
-            return None;
+            return Err(PixelError::GdiFailed);
         }
-        let color_ref = GetPixel(hdc_screen, x, y);
+        let direct = GetPixel(hdc_screen, x, y).0;
+        if direct != u32::MAX {
+            let _ = ReleaseDC(None, hdc_screen);
+            let r = (direct & 0xFF) as u8;
+            let g = ((direct >> 8) & 0xFF) as u8;
+            let b = ((direct >> 16) & 0xFF) as u8;
+            return Ok(((r as u32) << 24) | ((g as u32) << 16) | ((b as u32) << 8) | 0xFF);
+        }
+        // Fallback: 1x1 BitBlt into a memory bitmap, then read the bits back.
+        let mut result = Err(PixelError::OverlayCovered);
+        let hdc_mem = CreateCompatibleDC(hdc_screen);
+        if !hdc_mem.is_invalid() {
+            let hbmp = CreateCompatibleBitmap(hdc_screen, 1, 1);
+            if !hbmp.is_invalid() {
+                let old = SelectObject(hdc_mem, hbmp);
+                if BitBlt(hdc_mem, 0, 0, 1, 1, hdc_screen, x, y, SRCCOPY).is_ok() {
+                    let mut info = BITMAPINFO {
+                        bmiHeader: BITMAPINFOHEADER {
+                            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                            biWidth: 1,
+                            biHeight: 1,
+                            biPlanes: 1,
+                            biBitCount: 32,
+                            biCompression: BI_RGB.0,
+                            biSizeImage: 0,
+                            biXPelsPerMeter: 0,
+                            biYPelsPerMeter: 0,
+                            biClrUsed: 0,
+                            biClrImportant: 0,
+                        },
+                        ..std::mem::zeroed()
+                    };
+                    let mut pixel: u32 = 0;
+                    let lines = GetDIBits(
+                        hdc_mem,
+                        hbmp,
+                        0,
+                        1,
+                        Some(&mut pixel as *mut u32 as *mut std::ffi::c_void),
+                        &mut info,
+                        DIB_RGB_COLORS,
+                    );
+                    if lines == 1 {
+                        // DIB gives 0x00BBGGRR — repack into our RGBA u32.
+                        let r = (pixel & 0xFF) as u32;
+                        let g = ((pixel >> 8) & 0xFF) as u32;
+                        let b = ((pixel >> 16) & 0xFF) as u32;
+                        result = Ok((r << 24) | (g << 16) | (b << 8) | 0xFF);
+                    }
+                }
+                SelectObject(hdc_mem, old);
+                let _ = DeleteObject(hbmp);
+            }
+            let _ = DeleteDC(hdc_mem);
+        }
         let _ = ReleaseDC(None, hdc_screen);
-        let raw: u32 = color_ref.0;
-        // CLR_INVALID = 0xFFFF_FFFF (== u32::MAX)
-        if raw == u32::MAX {
-            return None;
-        }
-        let r = (raw & 0xFF) as u8;
-        let g = ((raw >> 8) & 0xFF) as u8;
-        let b = ((raw >> 16) & 0xFF) as u8;
-        Some(((r as u32) << 24) | ((g as u32) << 16) | ((b as u32) << 8) | 0xFF)
+        result
     }
 }
 

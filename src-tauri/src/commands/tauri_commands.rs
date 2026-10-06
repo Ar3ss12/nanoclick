@@ -198,38 +198,6 @@ pub async fn portable_self_update(
 // NOTE: must match `src-tauri/tauri.conf.json` plugins.updater.pubkey.
 pub const UPDATER_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDJCOEYwMUYwNDE0REQwQzkKUldUSjBFMUI4QUdQSzRMOFRONUhLbmZhdHJoMVIwY28rRTNiYTZjSEcyT2QvaHcwVExETmc4c0YK";
 
-/// Smart Guard — identify the app the user has focused.
-///
-/// Backs the "+ Capture active window" button: the UI counts down a few
-/// seconds, the user focuses the target app, then this reports the process
-/// image name (e.g. `javaw.exe`) so it can be added to the app filter list.
-/// `exe` is `null` when the foreground window belongs to NanoClick itself
-/// or cannot be queried (elevated process, lock screen).
-#[tauri::command]
-pub fn capture_foreground_app() -> serde_json::Value {
-    serde_json::json!({
-        "exe": crate::platform::get_foreground_process_name(),
-        "title": crate::platform::get_foreground_window_title(),
-    })
-}
-
-/// Smart Guard — the picker catalogue for the app filter.
-///
-/// Returns running process image names plus installed applications from the
-/// Windows uninstall registry, so the user selects an app instead of typing
-/// `javaw.exe` by hand. Entries without a resolvable executable carry
-/// `exe: null` and are shown for recognition only.
-///
-/// `async` on purpose: the registry walk takes ~100-200 ms and a synchronous
-/// command would run it on the UI thread, visibly hitching the window.
-#[tauri::command]
-pub async fn list_installed_and_running_apps() -> serde_json::Value {
-    serde_json::json!({
-        "running": crate::platform::list_running_apps(),
-        "installed": crate::platform::list_installed_apps(),
-    })
-}
-
 /// Smart Guard — live guard state for the Settings UI.
 ///
 /// `text_events` counts real text keypresses the low-level hook has armed
@@ -314,13 +282,117 @@ pub fn set_image_trigger(
 }
 
 #[tauri::command]
-pub fn pick_screen_pixel(x: i32, y: i32) -> Option<u32> {
-    platform::get_pixel_rgba(x, y)
+pub fn pick_screen_pixel(x: i32, y: i32) -> Result<Option<u32>, String> {
+    // Honest result: Ok(Some) = color, Ok(None) is gone — every failure now
+    // names itself so the UI can paint it instead of staying silent.
+    match platform::get_pixel_rgba_safe(x, y) {
+        Ok(rgba) => Ok(Some(rgba)),
+        Err(e) => Err(e.code().to_string()),
+    }
+}
+
+/// Smart Guard picker search over the boot-warmed catalogue (RAM read, no
+/// syscalls). Returns `{ ready, items }`: `ready == false` means warm-up is
+/// still running — the UI paints "Loading…", NOT "Nothing found".
+#[tauri::command]
+pub fn search_apps(query: String, limit: usize) -> serde_json::Value {
+    let (ready, items) = platform::search_apps(&query, limit);
+    serde_json::json!({ "ready": ready, "items": items })
 }
 
 #[tauri::command]
 pub fn get_cursor_pos_now() -> (i32, i32) {
     platform::get_cursor_pos()
+}
+
+/// Fold one 66 ms telemetry tick into the Rust-owned session stats.
+/// Returns the persisted totals + whether the page should schedule a save.
+/// The page keeps only Canvas paint; counting lives here now.
+#[tauri::command]
+pub fn stats_tick(
+    state: State<'_, crate::AppState>,
+    active: bool,
+    clicks_done: u64,
+    cps: f64,
+    now_ms: u64,
+) -> serde_json::Value {
+    use crate::stats_agg::StatsFlush;
+    let mut cfg = state.config_manager.load();
+    let flush = match state.session_stats.lock() {
+        Ok(mut s) => s.tick(&mut cfg.stats, active, clicks_done, cps, now_ms),
+        Err(_) => StatsFlush::None,
+    };
+    let should_save = flush == StatsFlush::Save;
+    if should_save {
+        let _ = state.config_manager.save(&cfg);
+    }
+    serde_json::json!({
+        "saved": should_save,
+        "totals": cfg.stats,
+    })
+}
+
+/// Session-only counters for the stats header (never persisted).
+#[tauri::command]
+pub fn get_session_stats(state: State<'_, crate::AppState>) -> serde_json::Value {
+    match state.session_stats.lock() {
+        Ok(s) => serde_json::json!({
+            "session_clicks": s.session_clicks,
+            "run_clicks": s.run_clicks,
+            "session_active_ms": s.session_active_ms,
+            "active_now": s.active_now,
+        }),
+        Err(_) => serde_json::json!({
+            "session_clicks": 0,
+            "run_clicks": 0,
+            "session_active_ms": 0,
+            "active_now": false,
+        }),
+    }
+}
+
+/// In-window hotkey decision (the logic half of the page's keydown listener).
+/// The page keeps `preventDefault`, the `isInput`/`activeRecordingBtn` guards
+/// and painting; matching + the Work-Mode veto live here, next to the same
+/// binding vocabulary the global hook parses. Stateless per call: the page
+/// sends its held-key set along, so no lock on any hot path.
+#[tauri::command]
+pub fn dispatch_window_key(
+    state: State<'_, crate::AppState>,
+    current_key: String,
+    held_keys: Vec<String>,
+) -> serde_json::Value {
+    let (toggle, mode_switch, emergency_stop, _, _, _, _, _, preset_slots, _) =
+        state.scheduler.hotkey_snapshot_data();
+    let running = state.scheduler.is_active();
+    let mode_is_work = !state.scheduler.is_autoclicker_mode();
+    let action = crate::window_dispatch::decide_window_key(
+        &toggle,
+        &mode_switch,
+        &emergency_stop,
+        &preset_slots,
+        &current_key,
+        &held_keys,
+        mode_is_work,
+        running,
+    );
+    match action {
+        crate::window_dispatch::WindowAction::NoMatch => {
+            serde_json::json!({ "kind": "no_match" })
+        }
+        crate::window_dispatch::WindowAction::EmergencyStop => {
+            serde_json::json!({ "kind": "emergency_stop" })
+        }
+        crate::window_dispatch::WindowAction::ModeSwitch => {
+            serde_json::json!({ "kind": "mode_switch" })
+        }
+        crate::window_dispatch::WindowAction::Toggle { vetoed } => {
+            serde_json::json!({ "kind": "toggle", "vetoed": vetoed })
+        }
+        crate::window_dispatch::WindowAction::PresetSlot(slot) => {
+            serde_json::json!({ "kind": "preset_slot", "slot": slot })
+        }
+    }
 }
 
 #[tauri::command]
@@ -529,12 +601,38 @@ fn now_ms() -> u64 {
 }
 
 fn uuid_like_id() -> String {
+    new_prefixed_id("m_")
+}
+
+/// Monotonic unique id with a caller-chosen prefix (no `Math.random` in the
+/// page: two tabs generating `Date.now()` in the same millisecond collide).
+/// Counter high-bits + time low-bits, hex-encoded.
+fn new_prefixed_id(prefix: &str) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+    static ID_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = ID_SEQ.fetch_add(1, Ordering::SeqCst);
     let n = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
-    format!("m_{:x}", n)
+    let mixed = (seq << 56) ^ n;
+    format!("{prefix}{mixed:x}")
+}
+
+/// Mint a unique id for a new preset / macro / copy. The page used
+/// `"preset_" + Date.now()` (and `Math.random` for macros) — same-millisecond
+/// duplicates across two tabs were possible. Rust owns uniqueness now.
+#[tauri::command]
+pub fn new_unique_id(prefix: String) -> String {
+    let p = prefix.trim();
+    let safe: String = p
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .take(16)
+        .collect();
+    let prefix = if safe.is_empty() { "id_".into() } else { format!("{safe}_") };
+    new_prefixed_id(&prefix)
 }
 
 // ─── Tests ───────────────────────────────────────────────────────
@@ -706,6 +804,23 @@ pub fn validate_ignore_key(
 #[tauri::command]
 pub fn get_default_ignored_keys() -> Vec<String> {
     crate::guard::key_policy::default_ignored_labels()
+}
+
+/// Update banner dismissal, backend-owned (was `localStorage` in the page:
+/// wiped on reinstall and invisible to a rebuilt page after deep sleep).
+#[tauri::command]
+pub fn get_update_dismissed_version(state: tauri::State<'_, crate::AppState>) -> String {
+    state.config_manager.load().ui.update_dismissed_version
+}
+
+#[tauri::command]
+pub fn dismiss_update_version(
+    state: tauri::State<'_, crate::AppState>,
+    version: String,
+) -> Result<(), String> {
+    let mut cfg = state.config_manager.load();
+    cfg.ui.update_dismissed_version = version.trim().chars().take(32).collect();
+    state.config_manager.save(&cfg)
 }
 
 #[cfg(test)]

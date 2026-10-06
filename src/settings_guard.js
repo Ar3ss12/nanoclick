@@ -22,11 +22,9 @@ const SmartGuard = {
   /// owns that layer and the user cannot remove it.
   _ignoreKeys: [],
   _ignoreCapturing: false,
-  _captureTimer: null,
   _capturing: false,
-  /// Picker catalogue: { running: [...], installed: [...] } (lazy, cached).
-  _catalog: null,
-  _catalogLoading: false,
+  _captureId: null,
+  _captureUnsubs: null,
   _suggestItems: [],
   _suggestIndex: -1,
   _statusTimer: null,
@@ -409,74 +407,75 @@ const SmartGuard = {
     });
 
     // mousedown (not click) so the row is handled before the input blurs.
+    // _suggestMouseDown bridges the blur race: blur hides the box, but a
+    // mousedown on a row must win. The flag (not a 120 ms setTimeout) decides.
     const box = this._el("appFilterSuggest");
     if (box) {
       box.addEventListener("mousedown", (e) => {
+        this._suggestMouseDown = true;
         e.preventDefault();
         const row = e.target.closest(".app-suggest-item");
         if (row) this._pickSuggest(Number(row.dataset.idx));
       });
+      box.addEventListener("mouseup", () => {
+        this._suggestMouseDown = false;
+      });
     }
 
-    entry.addEventListener("blur", () => setTimeout(() => this._hideSuggest(), 120));
+    entry.addEventListener("blur", () => {
+      if (this._suggestMouseDown) return;
+      this._hideSuggest();
+    });
   },
 
-  /** Fetch the catalogue once, then reuse it for the session. */
-  async _loadCatalog() {
-    if (this._catalog) return this._catalog;
-    if (this._catalogLoading) return { running: [], installed: [] };
-    this._catalogLoading = true;
-
-    let catalog = { running: [], installed: [] };
+  /** RAM read over the boot-warmed catalogue (Rust owns scan + rank + limit). */
+  async _searchCatalog(query) {
     try {
       if (window.__TAURI__?.core?.invoke) {
-        const res = await window.__TAURI__.core.invoke("list_installed_and_running_apps");
-        catalog = {
-          running: Array.isArray(res?.running) ? res.running : [],
-          installed: Array.isArray(res?.installed) ? res.installed : [],
+        const res = await window.__TAURI__.core.invoke("search_apps", {
+          query: String(query || ""),
+          limit: 30,
+        });
+        return {
+          ready: !!res?.ready,
+          // Trust the backend order: running first, deduped, capped at 30.
+          // No second filter pass here — that was the double-filtering bug.
+          items: Array.isArray(res?.items) ? res.items : [],
         };
       }
     } catch (err) {
-      console.warn("[SmartGuard] app catalogue failed:", err);
+      console.warn("[SmartGuard] app search failed:", err);
     }
-
-    this._catalogLoading = false;
-    this._catalog = catalog;
-    return catalog;
+    return { ready: true, items: [] };
   },
 
   /**
-   * Ranked matches: running processes first (guaranteed to match the
-   * foreground filter), then installed apps that expose a real executable.
+   * Ranked matches straight from Rust. ALWAYS returns an array — never an
+   * object: _showSuggest() calls .map()/.length on the result, and a
+   * `{empty:true}` return used to throw `TypeError: .map is not a function`
+   * on the first focus before the catalogue warmed up.
    */
   async _computeSuggest() {
-    const query = (this._el("appFilterEntry")?.value || "").trim().toLowerCase();
-    const { running, installed } = await this._loadCatalog();
-    const out = [];
-    const seen = new Set();
-    const LIMIT = 80;
-
-    for (const item of running) {
-      const exe = String(item?.exe || "").toLowerCase();
-      if (!exe || (query && !exe.includes(query)) || seen.has(exe)) continue;
-      seen.add(exe);
-      out.push({ label: exe, exe, source: "running" });
-      if (out.length >= LIMIT) break;
-    }
-
-    if (out.length < LIMIT) {
-      for (const item of installed) {
-        const exe = String(item?.exe || "").toLowerCase();
-        if (!exe) continue;
-        const label = String(item?.label || exe);
-        if (query && !label.toLowerCase().includes(query) && !exe.includes(query)) continue;
-        if (seen.has(exe)) continue;
-        seen.add(exe);
-        out.push({ label, exe, source: "installed" });
-        if (out.length >= LIMIT) break;
+    const query = (this._el("appFilterEntry")?.value || "").trim();
+    const cat = await this._searchCatalog(query);
+    this._lastCatalogReady = !!cat.ready;
+    if (!cat.ready) {
+      const box0 = this._el("appFilterSuggest");
+      if (box0) {
+        box0.innerHTML = `<div class="app-suggest-empty">${this._esc(
+          this._t("settings_app_picker_loading", "Loading app list…"),
+        )}</div>`;
+        box0.style.display = "block";
       }
+      return [];
     }
-    return out;
+    return cat.items
+      .filter((item) => item && typeof item.exe === "string" && item.exe)
+      .map((item) => ({
+        label: String(item.label || item.exe),
+        exe: String(item.exe).toLowerCase(),
+        source: item.source === "running" ? "running" : "installed",
+      }));
   },
 
   async _showSuggest() {
@@ -485,6 +484,10 @@ const SmartGuard = {
 
     this._suggestItems = await this._computeSuggest();
     this._suggestIndex = -1;
+
+    // Catalogue still warming: _computeSuggest already painted "Loading…",
+    // do NOT overwrite it with "Nothing found".
+    if (!this._lastCatalogReady) return;
 
     if (this._suggestItems.length === 0) {
       box.innerHTML = `<div class="app-suggest-empty">${this._esc(
@@ -543,12 +546,16 @@ const SmartGuard = {
    * Start/stop the status poller so the user can *see* the guard working.
    * `text_events` is the decisive diagnostic: if it stays at 0 while typing,
    * either the checkbox is off or the hook is not receiving keys.
+   * Visibility-gated + 1 s cadence: a hidden page (tray) must not burn IPC
+   * round-trips for a status line nobody can see. The lockout readout is
+   * sub-second transient, so no backend push event exists for it — the poll
+   * is the only source, kept cheap instead of removed.
    */
   _syncStatusPolling() {
     const enabled = !!this._el("typingGuardCheckbox")?.checked;
     if (enabled && !this._statusTimer) {
       this._renderStatus();
-      this._statusTimer = setInterval(() => this._renderStatus(), 400);
+      this._statusTimer = setInterval(() => this._renderStatus(), 1000);
     } else if (!enabled && this._statusTimer) {
       clearInterval(this._statusTimer);
       this._statusTimer = null;
@@ -564,6 +571,8 @@ const SmartGuard = {
     const el = this._el("guardStatus");
     if (!el || this._statusBusy) return;
     if (!this._el("typingGuardCheckbox")?.checked) return;
+    // Hidden page: skip the IPC round-trip entirely (tray-dwelling cost).
+    if (typeof document !== "undefined" && document.hidden) return;
 
     this._statusBusy = true;
     try {
@@ -819,74 +828,150 @@ const SmartGuard = {
    * 3-second countdown, then ask Rust what the user focused. The user
    * never has to type a path or hunt the process list by hand.
    */
-  startCapture() {
-    if (this._capturing) return;
+  /**
+   * Native capture: the countdown lives in Rust (a std::thread immune to
+   * WebView2 background throttling). The page only paints ticks and the
+   * result — it never owns time. The button is NEVER disabled: while running
+   * it becomes a red "Cancel" (a disabled button swallows clicks, so cancel
+   * would be physically impossible).
+   */
+  async startCapture() {
+    // Second click while running = cancel (single guard, reachable).
+    if (this._capturing) {
+      this.cancelCapture();
+      return;
+    }
     this._capturing = true;
+    this._captureId = null;
 
     const btn = this._el("captureAppBtn");
-    if (btn) btn.disabled = true;
-
-    let remaining = 3;
-    const tick = () => {
-      if (remaining > 0) {
-        const status = this._el("captureAppStatus");
-        if (status) {
-          status.textContent = this._t(
-            "settings_capture_countdown",
-            "Switch to the target app… {n}",
-            { n: remaining },
-          );
-        }
-        remaining -= 1;
-        this._captureTimer = setTimeout(tick, 1000);
-        return;
-      }
-      this._finishCapture();
-    };
-    tick();
-  },
-
-  async _finishCapture() {
-    const status = this._el("captureAppStatus");
-    const btn = this._el("captureAppBtn");
-    this._captureTimer = null;
-    this._capturing = false;
-    if (btn) btn.disabled = false;
-
-    let exe = "";
-    try {
-      if (window.__TAURI__?.core?.invoke) {
-        const res = await window.__TAURI__.core.invoke("capture_foreground_app");
-        exe = String(res?.exe || "").trim().toLowerCase();
-      }
-    } catch (err) {
-      console.warn("[SmartGuard] capture failed:", err);
+    if (btn) {
+      btn.dataset.capturing = "1";
+      btn.textContent = this._t("settings_capture_cancel", "Cancel");
+      btn.classList.add("btn-cancel");
     }
 
-    if (!exe) {
-      // Most common cause: nanoclick itself was still focused, and the
-      // backend deliberately refuses to report its own process.
+    const status = this._el("captureAppStatus");
+    const paintTick = (n) => {
       if (status) {
+        status.textContent = this._t(
+          "settings_capture_countdown",
+          "Switch to the target app… {n}",
+          { n },
+        );
+      }
+    };
+    paintTick(3);
+
+    try {
+      if (!window.__TAURI__?.core?.invoke) throw new Error("no-ipc");
+      const { listen } = window.__TAURI__.event;
+      // One-shot listeners: dropped on the first terminal event.
+      const unsubs = [];
+      const done = (fn) => {
+        unsubs.forEach((u) => { try { u(); } catch (_) { /* already gone */ } });
+        fn();
+      };
+      const finishOk = (exe) => done(() => this._endCapture(true, exe, null));
+      const finishErr = (reason) => done(() => this._endCapture(false, "", reason));
+      // Race-free id filter: before `start_native_app_capture` resolves,
+      // _captureId is null and the first tick is ACCEPTED (it can only be
+      // ours — no other session is in flight while _capturing is true).
+      // After resolve, only our own id passes; stale sessions die silently.
+      const mine = (p) => this._captureId == null || p.id === this._captureId;
+      unsubs.push(await listen("capture-tick", (e) => {
+        const p = e?.payload || {};
+        if (!mine(p)) return;
+        paintTick(p.remaining);
+      }));
+      unsubs.push(await listen("capture-done", (e) => {
+        const p = e?.payload || {};
+        if (!mine(p)) return;
+        finishOk(String(p.exe || ""));
+      }));
+      unsubs.push(await listen("capture-error", (e) => {
+        const p = e?.payload || {};
+        if (!mine(p)) return;
+        finishErr(String(p.reason || "unresolvable"));
+      }));
+      unsubs.push(await listen("capture-cancelled", (e) => {
+        const p = e?.payload || {};
+        if (!mine(p)) return;
+        finishErr("cancelled");
+      }));
+      this._captureUnsubs = unsubs;
+
+      const res = await window.__TAURI__.core.invoke("start_native_app_capture", {
+        countdownSecs: 3,
+      });
+      this._captureId = res?.id ?? null;
+      if (this._captureId == null) throw new Error("no-id");
+    } catch (err) {
+      console.warn("[SmartGuard] native capture start failed:", err);
+      this._endCapture(false, "", "start-failed");
+    }
+  },
+
+  /** Abort the running native session (second click = cancel). */
+  async cancelCapture() {
+    try {
+      if (window.__TAURI__?.core?.invoke && this._captureId != null) {
+        await window.__TAURI__.core.invoke("cancel_native_app_capture", {
+          id: this._captureId,
+        });
+      }
+    } catch (_) { /* the cancelled event still lands */ }
+  },
+
+  /** Single exit funnel: every path re-enables the button + paints status. */
+  _endCapture(ok, exe, reason) {
+    if (this._captureUnsubs) {
+      this._captureUnsubs.forEach((u) => { try { u(); } catch (_) { /* gone */ } });
+      this._captureUnsubs = null;
+    }
+    this._capturing = false;
+    this._captureId = null;
+    const status = this._el("captureAppStatus");
+    const btn = this._el("captureAppBtn");
+    if (btn) {
+      // Restore the idle label (i18n repaint may have overwritten it while
+      // we held the "Cancel" text) and drop the cancel styling. Never
+      // disabled at any point — a disabled button swallows the cancel click.
+      delete btn.dataset.capturing;
+      btn.classList.remove("btn-cancel");
+      btn.textContent = this._t("settings_btn_capture_app", "+ 🎯 Capture");
+    }
+    if (ok && exe) {
+      if (this._list.includes(exe)) {
+        if (status) {
+          status.textContent = `${this._t("settings_app_filter_duplicate", "Already in the list:")} ${exe}`;
+        }
+        return;
+      }
+      this.addEntry(exe);
+      if (status) {
+        status.textContent = `${this._t("settings_capture_captured", "Captured:")} ${exe}`;
+      }
+      return;
+    }
+    if (status) {
+      if (reason === "own-window") {
+        status.textContent = this._t(
+          "settings_capture_own_window",
+          "That is NanoClick itself — switch to the target app (Alt+Tab) during the countdown.",
+        );
+      } else if (reason === "cancelled") {
+        status.textContent = this._t("settings_capture_cancelled", "Capture cancelled.");
+      } else {
         status.textContent = this._t(
           "settings_capture_failed",
           "Could not detect the active app — switch to it during the countdown.",
         );
       }
-      return;
-    }
-
-    if (this._list.includes(exe)) {
-      if (status) {
-        status.textContent = `${this._t("settings_app_filter_duplicate", "Already in the list:")} ${exe}`;
-      }
-      return;
-    }
-
-    this.addEntry(exe);
-    if (status) {
-      status.textContent = `${this._t("settings_capture_captured", "Captured:")} ${exe}`;
     }
   },
+
+
 };
 
 if (typeof window !== "undefined") {

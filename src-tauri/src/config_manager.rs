@@ -309,6 +309,11 @@ pub struct UiSettings {
     pub accent_color: String,
     #[serde(default = "default_language")]
     pub language: String,
+    /// Update banner dismissal (was `localStorage` in the page): a dismissed
+    /// version survives reinstalls, profile wipes and deep-sleep rebuilds.
+    /// `#[serde(default)]` — old configs deserialize to empty = "nothing dismissed".
+    #[serde(default)]
+    pub update_dismissed_version: String,
 }
 
 fn default_true() -> bool {
@@ -354,6 +359,7 @@ impl Default for UiSettings {
             theme: "cyberpunk".into(),
             accent_color: "#06b6d4".into(),
             language: default_language(),
+            update_dismissed_version: String::new(),
         }
     }
 }

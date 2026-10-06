@@ -8,6 +8,8 @@ mod persistence;
 pub mod platform;
 mod recorder;
 mod scheduler;
+mod stats_agg;
+mod window_dispatch;
 mod overlay;
 mod tray;
 mod watcher;
@@ -39,6 +41,9 @@ pub(crate) fn set_debug_mode_enabled(enabled: bool) {
 pub struct AppState {
     pub scheduler: Arc<ClickScheduler>,
     pub config_manager: Arc<ConfigManager>,
+    /// Session stats counters (Rust-owned since the stats migration):
+    /// the 66 ms ticks fold into this, the page keeps only Canvas paint.
+    pub session_stats: Mutex<crate::stats_agg::SessionStats>,
     /// FIFO queue of mandatory-acknowledge boot notices (Deadbolt Modal).
     /// Drained one-by-one by `get_startup_notices`; the UI stays bolted
     /// until every notice is dismissed with OK. Never blocks boot itself.
@@ -1800,6 +1805,7 @@ pub fn run() {
     let app_state = AppState {
         scheduler,
         config_manager,
+        session_stats: Mutex::new(crate::stats_agg::SessionStats::new()),
         startup_notices,
         file_toasts,
         notification_store,
@@ -2128,6 +2134,11 @@ pub fn run() {
                     }
                 });
             }
+            // ── App-picker catalogue warm-up (Smart Guard suggest) ──────
+            // EnumProcesses + uninstall-registry walk (~150-300 ms) once in the
+            // background: by the time the user opens Settings the list is RAM.
+            // UI-thread-only afterwards — the click loop never touches it.
+            crate::platform::warm_up_catalog_async();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -2160,11 +2171,15 @@ pub fn run() {
             commands::set_image_trigger,
             commands::pick_screen_pixel,
             commands::get_cursor_pos_now,
+            commands::stats_tick,
+            commands::get_session_stats,
+            commands::dispatch_window_key,
             commands::get_primary_screen_size,
             // v3.2 Macro Engine commands
             commands::list_macros,
             commands::save_macro,
             commands::delete_macro,
+            commands::new_unique_id,
             // Preset library store (its own file — a config save can no longer replace it)
             commands::list_presets,
             commands::save_preset,
@@ -2194,14 +2209,19 @@ pub fn run() {
             commands::register_elevated_logon_task,
             commands::unregister_elevated_logon_task,
             commands::get_elevated_logon_task_registered,
-            commands::capture_foreground_app,
+            platform::capture::start_native_app_capture,
+            platform::capture::cancel_native_app_capture,
+            platform::capture::start_position_picker_stream,
+            platform::capture::stop_position_picker_stream,
+            commands::search_apps,
             commands::get_smart_guard_defaults,
             commands::get_smart_guard_status,
             // Key policy (layer B): the user-editable ignored-key list.
             commands::get_key_policy,
             commands::validate_ignore_key,
             commands::get_default_ignored_keys,
-            commands::list_installed_and_running_apps,
+            commands::get_update_dismissed_version,
+            commands::dismiss_update_version,
             overlay::overlay_ready,
             overlay::toggle_overlay,
             exit_app,

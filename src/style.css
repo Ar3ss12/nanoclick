@@ -2415,6 +2415,14 @@ button {
   color: var(--text-mid);
 }
 
+/* Capture button in Cancel state: red, never disabled (a disabled button
+   swallows the second click, making cancel physically impossible). */
+.preset-modal-btn.btn-cancel {
+  background: rgba(239, 68, 68, 0.15);
+  border: 1px solid var(--red, #EF4444);
+  color: var(--red, #EF4444);
+}
+
 .preset-modal-btn.save {
   background: var(--cyan);
   border: none;

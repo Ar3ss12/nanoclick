@@ -96,7 +96,9 @@ fn test_main_js_escape_and_backdrop_handlers() {
 fn test_stats_js_and_immediate_updates() {
     let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
 
-    // 1. stats.js must be present in embedded assets
+    // 1. stats.js must be present in embedded assets — as a THIN client.
+    // Counting lives in Rust (stats_agg.rs via stats_tick); the page keeps
+    // only the Canvas chart, DOM paint and the localStorage backup.
     let stats_key = tauri::utils::assets::AssetKey::from("stats.js");
     let stats_bytes = ctx.assets().get(&stats_key).expect("stats.js must be embedded");
     let stats_code = String::from_utf8_lossy(&stats_bytes);
@@ -104,15 +106,16 @@ fn test_stats_js_and_immediate_updates() {
     assert!(stats_code.contains("recordSessionTick"), "stats.js must have recordSessionTick");
     assert!(stats_code.contains("drawStatsChart"), "stats.js must have drawStatsChart");
     assert!(stats_code.contains("saveToLocalStorage"), "stats.js must have localStorage backup");
-    // Session lifecycle invariants: exactly-once finalize, junk filter, dirty flag.
-    // Finalize runs ONLY on the true active->idle transition (early return on
-    // !activeNow swallows late 66ms worker echoes); belt-and-suspenders
-    // monotonic guard survives even a missed flag reset.
-    assert!(stats_code.contains("if (!this.state.activeNow)"), "stats.js finalize must no-op on late idle echoes");
-    assert!(stats_code.contains("lastFinalizedClicks"), "stats.js must guard double-flush with lastFinalizedClicks");
-    assert!(stats_code.contains("isJunk"), "stats.js must filter junk runs from history");
-    assert!(stats_code.contains("statsDirty"), "stats.js must gate disk writes with a dirty flag");
-    assert!(stats_code.contains("st.history.length > 50"), "stats.js history must stay ring-capped at 50");
+    assert!(stats_code.contains("stats_tick"), "stats.js must fold ticks through the stats_tick command");
+    assert!(stats_code.contains("get_session_stats"), "stats.js must mirror session counters from the backend");
+    // No page-side counting anymore — that was the second copy of the truth.
+    assert!(!stats_code.contains("statsDirty"), "page-side dirty flag must stay deleted — Rust owns flushing");
+    assert!(!stats_code.contains("lastFinalizedClicks"), "page-side finalize guard must stay deleted — Rust owns finalize");
+    // Session lifecycle invariants now live in stats_agg.rs unit tests.
+    let agg_src = include_str!("../src/stats_agg.rs");
+    assert!(agg_src.contains("is_junk"), "stats_agg.rs must filter junk runs from history");
+    assert!(agg_src.contains("history.len() > 50"), "stats_agg.rs history must stay ring-capped at 50");
+    assert!(agg_src.contains("Late echo"), "stats_agg.rs finalize must no-op on late idle echoes");
 
     // 2. index.html must load stats.js
     let html_key = tauri::utils::assets::AssetKey::from("index.html");
@@ -3650,11 +3653,12 @@ fn test_all_production_set_intervals_are_gated_by_every_visible() {
     let js = String::from_utf8_lossy(&bytes);
 
     // Known one-shot / debug-only prefixes that are legitimately NOT everyVisible.
+    // (The position picker used to be here — it streams position-picker-tick
+    // from a Rust thread now, no setInterval at all.)
     let known_prefixes = [
         "return setInterval(",             // implementation of everyVisible() itself
         "_logFlushTimer = setInterval(",  // debug-mode only; cleared in setDebugMode(false)
         "resetTimer = setInterval(",       // one-shot reset confirm; cleared on exit
-        "pickPosInterval = setInterval(",  // position picker; cleared after capture
         "startDelayTimer = setInterval(",  // start-delay countdown; cleared on stop/start
         "onboardingTimer = setInterval(",  // onboarding wizard; cleared on close
     ];
@@ -4248,9 +4252,11 @@ fn test_in_window_hotkey_skips_during_recording() {
 #[test]
 fn test_in_window_hotkey_dispatcher_wiring() {
     let main_js = include_str!("../../src/main.js");
+    // The page is a thin forwarder: matching lives in window_dispatch.rs,
+    // the page only forwards + paints the outcome.
     assert!(
-        main_js.contains("function _matchesInWindowHotkey"),
-        "main.js must define _matchesInWindowHotkey"
+        main_js.contains("dispatch_window_key"),
+        "main.js must forward in-window presses to dispatch_window_key"
     );
     assert!(
         main_js.contains("const _heldWindowKeys = new Set();"),
@@ -4259,6 +4265,24 @@ fn test_in_window_hotkey_dispatcher_wiring() {
     assert!(
         main_js.contains("codeToPhysicalKey(e.code, e.key)"),
         "main.js in-window key listener must normalize physical keys"
+    );
+    assert!(
+        !main_js.contains("function _matchesInWindowHotkey"),
+        "page-side matcher must stay deleted — Rust owns matching"
+    );
+    let dispatch_rs = include_str!("../src/window_dispatch.rs");
+    assert!(
+        dispatch_rs.contains("pub fn binding_matches"),
+        "window_dispatch.rs must own binding_matches"
+    );
+    assert!(
+        dispatch_rs.contains("pub fn decide_window_key"),
+        "window_dispatch.rs must own decide_window_key"
+    );
+    let lib_rs = include_str!("../src/lib.rs");
+    assert!(
+        lib_rs.contains("dispatch_window_key"),
+        "lib.rs must register dispatch_window_key"
     );
 }
 
@@ -4281,14 +4305,27 @@ fn test_in_window_held_keys_lifecycle_and_blur_clear() {
 
 #[test]
 fn test_in_window_work_mode_safety_toast_wiring() {
+    // The Work-Mode veto for the IN-WINDOW dispatcher is resolved in Rust
+    // (decide_window_key returns Toggle{vetoed}); the page only toasts via
+    // decision.vetoed. (executeStartAutomation keeps its own check-active-mode
+    // stage for the BUTTON path — a different call site, out of scope here.)
     let main_js = include_str!("../../src/main.js");
     assert!(
-        main_js.contains("currentConfig.active_mode === \"work\""),
-        "in-window toggle must check Work Mode"
+        main_js.contains("decision.vetoed"),
+        "in-window toggle must read the Rust-resolved veto"
     );
     assert!(
         main_js.contains("tray_blocked_work_mode"),
         "in-window toggle in Work Mode must warn with tray_blocked_work_mode toast"
+    );
+    assert!(
+        !main_js.contains("_matchesInWindowHotkey(hotkeys.toggle"),
+        "page dispatcher must not match the toggle locally — Rust owns matching"
+    );
+    let dispatch_rs = include_str!("../src/window_dispatch.rs");
+    assert!(
+        dispatch_rs.contains("vetoed"),
+        "window_dispatch.rs must resolve the Work-Mode veto"
     );
 }
 
@@ -4296,8 +4333,8 @@ fn test_in_window_work_mode_safety_toast_wiring() {
 fn test_in_window_emergency_stop_running_gate() {
     let main_js = include_str!("../../src/main.js");
     assert!(
-        main_js.contains("_matchesInWindowHotkey(hotkeys.emergency_stop, physicalKey, _heldWindowKeys)"),
-        "in-window dispatcher must evaluate emergency_stop hotkey"
+        main_js.contains("kind === \"emergency_stop\""),
+        "in-window dispatcher must paint the Rust emergency_stop decision"
     );
     assert!(
         main_js.contains("if (isRunning) {"),
@@ -4307,14 +4344,19 @@ fn test_in_window_emergency_stop_running_gate() {
 
 #[test]
 fn test_in_window_preset_slots_wiring() {
+    // Slots are matched in Rust (PresetSlot(i)); the page applies by index.
     let main_js = include_str!("../../src/main.js");
     assert!(
-        main_js.contains("Array.isArray(hotkeys.preset_hotkeys)"),
-        "in-window dispatcher must check preset_hotkeys array for slot shortcuts"
+        main_js.contains("kind === \"preset_slot\""),
+        "in-window dispatcher must paint the Rust preset_slot decision"
     );
     assert!(
         main_js.contains("applyPreset(p.id)"),
         "in-window slot shortcut must call applyPreset"
+    );
+    assert!(
+        !main_js.contains("Array.isArray(hotkeys.preset_hotkeys)"),
+        "page must not iterate preset bindings — Rust owns slot matching"
     );
 }
 
@@ -4444,6 +4486,155 @@ fn test_context_menu_is_suppressed_on_all_pages() {
     assert!(hud_js.contains(needle),     "hud.js must suppress contextmenu at capture phase");
     assert!(overlay_js.contains(needle), "overlay.js must suppress contextmenu at capture phase");
 }
+
+#[test]
+fn test_capture_flow_never_hangs() {
+    // The app capture countdown lives in Rust (capture.rs), not in a page
+    // setTimeout chain — Chromium throttles timers to ~1 Hz when unfocused,
+    // and capture REQUIRES Alt+Tab away. Every exit must paint status.
+    let guard_js = include_str!("../../src/settings_guard.js");
+    let capture_rs = include_str!("../src/platform/capture.rs");
+    let lib_rs = include_str!("../src/lib.rs");
+    // No page-side timer chain in the capture path.
+    assert!(!guard_js.contains("this._captureTimer = setTimeout"), "capture must not count down with setTimeout");
+    // All four events wired with race-free id filtering (mine() accepts the
+    // first tick while _captureId is still null — otherwise the fast Rust
+    // thread loses tick #1 before invoke() resolves).
+    for ev in ["capture-tick", "capture-done", "capture-error", "capture-cancelled"] {
+        assert!(guard_js.contains(ev), "settings_guard.js must listen for the capture event");
+        assert!(capture_rs.contains(ev), "capture.rs must emit the capture event");
+    }
+    assert!(guard_js.contains("const mine = (p)"), "id filter must accept pre-resolve ticks via mine()");
+    assert!(!guard_js.contains("p.id !== this._captureId"), "bare id filter drops the first tick — must stay deleted");
+    // Cancel path: reachable single guard, button NEVER disabled (a disabled
+    // button swallows the second click, making cancel physically impossible).
+    assert!(guard_js.contains("if (this._capturing)"), "second click while running must reach cancelCapture");
+    assert!(guard_js.contains("cancel_native_app_capture"), "cancel button must invoke cancel_native_app_capture");
+    assert!(guard_js.contains("settings_capture_cancel"), "cancel state needs a localized label");
+    assert!(guard_js.contains("btn-cancel"), "cancel state needs red styling, not disabled");
+    assert!(!guard_js.contains("btn.disabled = true"), "capture button must never be disabled");
+    assert!(guard_js.contains("_endCapture"), "every capture exit must funnel through _endCapture");
+    assert!(guard_js.contains("settings_capture_own_window"), "own-window capture must explain Alt+Tab, not hang");
+    assert!(lib_rs.contains("start_native_app_capture"), "lib.rs must register start_native_app_capture");
+    assert!(lib_rs.contains("cancel_native_app_capture"), "lib.rs must register cancel_native_app_capture");
+    // Own-window honesty + cancel styling + i18n symmetry (UA/EN pair).
+    let css = include_str!("../../src/style.css");
+    assert!(css.contains(".preset-modal-btn.btn-cancel"), "cancel button needs red btn-cancel styling");
+    for locale in ["en", "ua"] {
+        let dict = match locale {
+            "ua" => include_str!("../../src/locales/ua.json"),
+                        _ => include_str!("../../src/locales/en.json"),
+        };
+        assert!(dict.contains("settings_capture_cancel"), "locale must carry settings_capture_cancel");
+    }
+    // Old one-shot command is gone — only the native session remains.
+    assert!(!lib_rs.contains("capture_foreground_app"), "dead capture_foreground_app must stay deleted");
+}
+
+#[test]
+fn test_position_picker_streams_from_rust() {
+    // The cursor picker streams position-picker-tick @ ~20 Hz from a Rust
+    // thread; the page only paints. The old setInterval(50ms) poll kept the
+    // renderer awake with 20 IPC round-trips per second.
+    let main_js = include_str!("../../src/main.js");
+    assert!(main_js.contains("start_position_picker_stream"), "page must start the Rust picker stream");
+    assert!(main_js.contains("stop_position_picker_stream"), "page must stop the Rust picker stream");
+    assert!(main_js.contains("position-picker-tick"), "page must paint position-picker-tick events");
+    assert!(!main_js.contains("pickPosInterval = setInterval"), "page-side picker polling must stay deleted");
+    let capture_rs = include_str!("../src/platform/capture.rs");
+    assert!(capture_rs.contains("position-picker-tick"), "capture.rs must emit position-picker-tick");
+    let lib_rs = include_str!("../src/lib.rs");
+    assert!(lib_rs.contains("start_position_picker_stream"), "lib.rs must register start_position_picker_stream");
+    assert!(lib_rs.contains("stop_position_picker_stream"), "lib.rs must register stop_position_picker_stream");
+}
+
+#[test]
+fn test_ids_are_minted_by_rust() {
+    // new_unique_id owns uniqueness (counter high-bits + time low-bits):
+    // Date.now()+Math.random in the page collided across two tabs.
+    let main_js = include_str!("../../src/main.js");
+    assert!(main_js.contains("new_unique_id"), "page must mint ids through new_unique_id");
+    assert!(!main_js.contains("\"preset_\" + Date.now()"), "page must not mint preset ids with Date.now");
+    assert!(!main_js.contains("`preset_${Date.now()"), "page must not mint import ids with Date.now");
+    let cmds_rs = include_str!("../src/commands/tauri_commands.rs");
+    assert!(cmds_rs.contains("pub fn new_unique_id"), "backend must expose new_unique_id");
+    let lib_rs = include_str!("../src/lib.rs");
+    assert!(lib_rs.contains("new_unique_id"), "lib.rs must register new_unique_id");
+}
+
+#[test]
+fn test_update_dismissal_is_backend_owned() {
+    // config.ui.update_dismissed_version survives reinstalls and deep-sleep
+    // rebuilds; localStorage did neither.
+    let main_js = include_str!("../../src/main.js");
+    assert!(main_js.contains("dismiss_update_version"), "page must persist dismissal via dismiss_update_version");
+    assert!(main_js.contains("get_update_dismissed_version"), "page must read dismissal from the backend");
+    assert!(!main_js.contains("UPDATE_DISMISS_KEY"), "localStorage dismissal key must stay deleted");
+    let cm_src = include_str!("../src/config_manager.rs");
+    assert!(cm_src.contains("update_dismissed_version"), "UiSettings must carry update_dismissed_version");
+    let lib_rs = include_str!("../src/lib.rs");
+    assert!(lib_rs.contains("dismiss_update_version"), "lib.rs must register dismiss_update_version");
+}
+
+#[test]
+fn test_stats_counting_lives_in_rust() {
+    // stats_tick folds the 66 ms tick into SessionStats; the page mirrors.
+    let lib_rs = include_str!("../src/lib.rs");
+    assert!(lib_rs.contains("stats_tick"), "lib.rs must register stats_tick");
+    assert!(lib_rs.contains("get_session_stats"), "lib.rs must register get_session_stats");
+    assert!(lib_rs.contains("session_stats"), "AppState must carry session_stats");
+}
+
+#[test]
+fn test_suggest_reads_from_ram() {
+    // The picker catalogue is warmed once at boot (setup -> warm_up_catalog_async)
+    // into a OnceLock; the page only does RAM reads via search_apps.
+    // The old path scanned EnumProcesses + registry on every input focus and
+    // painted "Nothing found" while loading.
+    let guard_js = include_str!("../../src/settings_guard.js");
+    let platform_rs = include_str!("../src/platform/mod.rs");
+    let lib_rs = include_str!("../src/lib.rs");
+    assert!(!guard_js.contains("_catalogLoading"), "dead _catalogLoading flag must stay deleted");
+    assert!(!guard_js.contains("_loadCatalog"), "dead _loadCatalog must stay deleted");
+    assert!(!guard_js.contains("list_installed_and_running_apps"), "old full-scan command must stay deleted");
+    assert!(guard_js.contains("_searchCatalog"), "suggest must go through _searchCatalog");
+    assert!(guard_js.contains("settings_app_picker_loading"), "unready catalogue must paint Loading, not Nothing found");
+    // Defect 1 (fatal TypeError): _computeSuggest must ALWAYS return an array —
+    // the {empty:true} object crashed .map() on first focus before warm-up.
+    assert!(!guard_js.contains("return { empty: true }"), "{{empty:true}} return crashes .map() — must stay deleted");
+    assert!(guard_js.contains("_lastCatalogReady"), "Loading vs Empty must be distinguished by a ready flag");
+    // Defect 4 (double filtering): Rust owns scan+rank+limit; the page maps only.
+    assert!(!guard_js.contains("const LIMIT = 80"), "page-side LIMIT re-cap must stay deleted — Rust caps at 30");
+    assert!(!guard_js.contains("seen.has(exe)"), "page-side dedup must stay deleted — Rust dedups");
+    // Defect 5.2 (blur race): mousedown flag, not a 120 ms setTimeout.
+    assert!(guard_js.contains("_suggestMouseDown"), "blur race must be bridged by a mousedown flag");
+    assert!(!guard_js.contains("setTimeout(() => this._hideSuggest()"), "120 ms blur setTimeout must stay deleted");
+    // Defect 5.1 (status poll): visibility-gated, 1 s — not a blind 400 ms burn.
+    assert!(guard_js.contains("document.hidden"), "status poll must skip IPC while the page is hidden");
+    assert!(!guard_js.contains("_renderStatus(), 400"), "400 ms status poll must stay deleted");
+    assert!(platform_rs.contains("OnceLock"), "catalogue must live in a std OnceLock (no new crates)");
+    assert!(platform_rs.contains("fn warm_up_catalog_async"), "platform must expose warm_up_catalog_async");
+    assert!(platform_rs.contains("fn search_apps"), "platform must expose search_apps");
+    assert!(lib_rs.contains("warm_up_catalog_async"), "setup() must warm the catalogue at boot");
+    assert!(lib_rs.contains("search_apps"), "lib.rs must register search_apps");
+}
+
+#[test]
+fn test_pixel_reports_honestly() {
+    // pick_screen_pixel returns Result: Ok(color) or a named error code.
+    // The page paints the failure in the status line — never a silent console.error.
+    let cmds_rs = include_str!("../src/commands/tauri_commands.rs");
+    let win_rs = include_str!("../src/platform/windows/mod.rs");
+    let main_js = include_str!("../../src/main.js");
+    assert!(cmds_rs.contains("pub fn pick_screen_pixel"), "pick_screen_pixel command must exist");
+    assert!(cmds_rs.contains("get_pixel_rgba_safe"), "pick_screen_pixel must use the honest reader");
+    assert!(win_rs.contains("enum PixelError"), "windows backend must define PixelError");
+    assert!(win_rs.contains("OverlayCovered"), "overlay/DRM miss must be a named variant");
+    assert!(win_rs.contains("BitBlt"), "1x1 BitBlt fallback must exist before giving up");
+    assert!(main_js.contains("OVERLAY_COVERED"), "page must paint the overlay failure in the status line");
+    assert!(main_js.contains("settings_trigger_status_overlay"), "overlay failure needs a localized status string");
+}
+
 
 #[test]
 fn test_standardized_notification_protocol_and_store_wiring() {

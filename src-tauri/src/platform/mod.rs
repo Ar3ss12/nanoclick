@@ -4,6 +4,7 @@
 //! Reference: `docs/MACRO_ARCHITECTURE.md` §11.
 
 pub mod backend;
+pub mod capture;
 #[cfg(target_os = "windows")]
 pub mod portable_update_shim {
     /// Re-export the portable updater surface for non-platform callers.
@@ -168,6 +169,17 @@ pub fn recorder_backend_stop() {
     }
 }
 
+// ── App-picker catalogue — warmed once at boot, read from RAM afterwards ──
+// The Smart Guard suggest list used to call `list_running_apps()` +
+// `list_installed_apps()` on every input focus (~150-300 ms of EnumProcesses
+// + registry walk) and painted "Nothing found" while the catalogue was still
+// loading. Now Rust warms it once in a background thread at startup
+// (`warm_up_catalog_async`, called from `setup()`), and the UI reads it via
+// `search_apps` in microseconds. No lock on any hot path — the catalogue is
+// UI-thread-only; the click loop never touches it.
+
+use std::sync::{OnceLock, RwLock};
+
 /// One selectable application for the Smart Guard app filter.
 ///
 /// `exe` is the process image name the click loop matches against
@@ -179,6 +191,77 @@ pub struct AppEntry {
     pub exe: Option<String>,
     /// `"running"` or `"installed"` — the picker groups by this.
     pub source: &'static str,
+}
+
+struct CatalogInner {
+    running: Vec<AppEntry>,
+    installed: Vec<AppEntry>,
+    ready: bool,
+}
+
+static APP_CATALOG: OnceLock<RwLock<CatalogInner>> = OnceLock::new();
+
+fn catalog_lock() -> &'static RwLock<CatalogInner> {
+    APP_CATALOG.get_or_init(|| {
+        RwLock::new(CatalogInner {
+            running: Vec::new(),
+            installed: Vec::new(),
+            ready: false,
+        })
+    })
+}
+
+/// Fire-and-forget warm-up: EnumProcesses + uninstall-registry walk once,
+/// off the startup critical path. Safe to call multiple times (second call
+/// is a no-op while the first is in flight or done).
+pub fn warm_up_catalog_async() {
+    std::thread::spawn(|| {
+        let running = list_running_apps();
+        let installed = list_installed_apps();
+        if let Ok(mut guard) = catalog_lock().write() {
+            guard.running = running;
+            guard.installed = installed;
+            guard.ready = true;
+        }
+    });
+}
+
+/// Search the warmed catalogue. Pure RAM read, no syscalls.
+/// Returns `(ready, items)`: `ready == false` means the background warm-up
+/// has not finished yet — the UI must paint "Loading…", NOT "Nothing found".
+pub fn search_apps(query: &str, limit: usize) -> (bool, Vec<AppEntry>) {
+    let limit = limit.clamp(1, 100);
+    let guard = match catalog_lock().read() {
+        Ok(g) => g,
+        Err(_) => return (false, Vec::new()),
+    };
+    if !guard.ready {
+        return (false, Vec::new());
+    }
+    let q = query.trim().to_ascii_lowercase();
+    let mut out: Vec<AppEntry> = Vec::new();
+    // Priority 1: running processes (what the user most likely wants).
+    for app in guard.running.iter() {
+        if q.is_empty() || app.label.to_ascii_lowercase().contains(&q) {
+            out.push(app.clone());
+            if out.len() >= limit {
+                return (true, out);
+            }
+        }
+    }
+    // Priority 2: installed apps, deduped against running hits.
+    for app in guard.installed.iter() {
+        let label_lc = app.label.to_ascii_lowercase();
+        if (q.is_empty() || label_lc.contains(&q))
+            && !out.iter().any(|e| e.label.eq_ignore_ascii_case(&app.label))
+        {
+            out.push(app.clone());
+            if out.len() >= limit {
+                return (true, out);
+            }
+        }
+    }
+    (true, out)
 }
 
 /// Lowercase base file name of a path (`C:\A\B\Discord.exe` → `discord.exe`).
