@@ -4629,6 +4629,47 @@ fn test_suggest_reads_from_ram() {
 }
 
 #[test]
+fn test_backup_buttons_have_honest_states() {
+    // Buttons must never go dead during IPC: busy spinner + single-flight +
+    // success pop, reduced-motion guard, no host confirm()/alert() in the
+    // backup path (a suppressed WebView2 dialog reads as "no" and the import
+    // silently does nothing — FIELD_BUG_REPORT.md §4).
+    let main_js = include_str!("../../src/main.js");
+    let css = include_str!("../../src/style.css");
+    let html = include_str!("../../src/index.html");
+    let cmds_rs = include_str!("../src/commands/tauri_commands.rs");
+    // Microinteraction: compositor-only states exist and are used.
+    assert!(css.contains("is-busy::after"), "busy spinner must exist in CSS");
+    assert!(css.contains("@keyframes btn-spin"), "spinner keyframes must exist");
+    assert!(css.contains("is-success"), "success pop must exist in CSS");
+    assert!(css.contains("prefers-reduced-motion"), "animations must respect reduced motion");
+    assert!(main_js.contains("setBtnBusy"), "backup buttons must carry busy states");
+    assert!(main_js.contains("flashBtnSuccess"), "backup buttons must flash success");
+    assert!(main_js.contains("backupBusy"), "parallel backup clicks must be single-flight");
+    // No blocking host dialogs in the backup flow — in-page modal instead.
+    assert!(main_js.contains("backupImportModal"), "import choice must live in an in-page modal");
+    assert!(html.contains("backupImportModal"), "import modal markup must exist");
+    assert!(main_js.contains("bindBackdropClose(\"presetEditModal\")"), "backdrop helper must stay intact");
+    assert!(!main_js.contains("confirm(getI18nText(\"dialog_confirm_restore_config\""), "host confirm() in backup path must stay deleted");
+    assert!(!main_js.contains("alert(getI18nText(\"dialog_alert_restore_backup_success\""), "host alert() in backup path must stay deleted");
+    // Import size guards: page refuses before reading, backend refuses on IPC.
+    assert!(main_js.contains("MAX_BACKUP_BYTES"), "page must refuse oversize backup files early");
+    assert!(cmds_rs.contains("MAX_BACKUP_JSON_BYTES"), "import_full_backup must refuse oversize payloads");
+    // Escape must close the new modal too.
+    assert!(main_js.contains("backupImportModal"), "Escape handler must cover the import modal");
+    // i18n symmetry for the new keys.
+    for lang in ["en", "ua"] {
+        let dict = match lang {
+            "ua" => include_str!("../../src/locales/ua.json"),
+            _ => include_str!("../../src/locales/en.json"),
+        };
+        for key in ["backup_import_title", "backup_import_config", "backup_import_macros", "backup_import_confirm", "backup_import_too_large", "settings_btn_backup_working"] {
+            assert!(dict.contains(key), "locale {lang} must carry {key}");
+        }
+    }
+}
+
+#[test]
 fn test_pixel_reports_honestly() {
     // pick_screen_pixel returns Result: Ok(color) or a named error code.
     // The page paints the failure in the status line — never a silent console.error.

@@ -4587,9 +4587,11 @@ function setupPresetListeners() {
       const editModal    = document.getElementById("presetEditModal");
       const inspectModal = document.getElementById("presetInspectModal");
       const onbModal     = document.getElementById("onboardingModal");
+      const backupModal  = document.getElementById("backupImportModal");
       if (editModal    && !editModal.classList.contains("hidden"))    editModal.classList.add("hidden");
       if (inspectModal && !inspectModal.classList.contains("hidden")) inspectModal.classList.add("hidden");
       if (onbModal     && !onbModal.classList.contains("hidden"))     onbModal.classList.add("hidden");
+      if (backupModal  && !backupModal.classList.contains("hidden"))  backupModal.classList.add("hidden");
     });
   }
 
@@ -6757,16 +6759,51 @@ onDomReady(() => {
 
 
 // ── FULL BACKUP EXPORT / IMPORT ─────────────────────────────
+// Buttons carry honest states (idle → busy → success/error) instead of going
+// dead during IPC: a second click mid-flight is ignored (single-flight),
+// and the user always sees what happened. No page-side timers involved.
+function setBtnBusy(btn, busy, busyLabel) {
+  if (!btn) return;
+  if (busy) {
+    if (btn.dataset.busyText === undefined) btn.dataset.busyText = btn.textContent;
+    btn.disabled = true;
+    btn.classList.add("is-busy");
+    btn.setAttribute("aria-busy", "true");
+    if (busyLabel) btn.textContent = busyLabel;
+  } else {
+    btn.disabled = false;
+    btn.classList.remove("is-busy");
+    btn.removeAttribute("aria-busy");
+    if (btn.dataset.busyText !== undefined) {
+      btn.textContent = btn.dataset.busyText;
+      delete btn.dataset.busyText;
+    }
+  }
+}
+
+function flashBtnSuccess(btn) {
+  if (!btn) return;
+  btn.classList.remove("is-success");
+  void btn.offsetWidth; // restart the one-shot pop animation
+  btn.classList.add("is-success");
+  setTimeout(() => btn.classList.remove("is-success"), 650);
+}
+
 onDomReady(() => {
   const exportBtn = document.getElementById("exportBackupBtn");
   const importBtn = document.getElementById("importBackupBtn");
+  let backupBusy = false;
   if (exportBtn) exportBtn.addEventListener("click", async () => {
+    if (backupBusy) return;
+    backupBusy = true;
     // The page used to build a `blob:` URL and click a hidden anchor with a
     // `download` attribute. WebView2 silently drops that navigation: the IPC
     // succeeded and nothing arrived, with no exception for the `catch` to see.
     // The backend writes the file and hands back the path instead.
+    setBtnBusy(exportBtn, true, getI18nText("settings_btn_backup_working", {}, "Working…"));
     try {
       const path = await invoke("export_full_backup_to_disk");
+      flashBtnSuccess(exportBtn);
       if (typeof showToast === "function") {
         showToast(
           getI18nText("backup_exported_ok", { path }, "Backup saved to " + path),
@@ -6778,34 +6815,104 @@ onDomReady(() => {
       if (typeof showToast === "function") {
         showToast(getI18nText("dialog_alert_export_backup_fail", {}, "Failed to export backup."), "error");
       }
+    } finally {
+      setBtnBusy(exportBtn, false);
+      backupBusy = false;
     }
   });
   if (importBtn) importBtn.addEventListener("click", () => {
+    if (backupBusy) return;
     const fileInput = document.createElement("input");
     fileInput.type = "file";
     fileInput.accept = ".json,application/json";
     fileInput.addEventListener("change", async (event) => {
       const file = event.target.files?.[0];
       if (!file) return;
-      const restoreConfig = confirm(getI18nText("dialog_confirm_restore_config", {}, "Restore CONFIG + PRESETS from the backup?\n\nOK = yes, Cancel = keep current config."));
-      const restoreMacros = restoreConfig && confirm(getI18nText("dialog_confirm_restore_macros", {}, "Also restore MACROS?\n\nOK = yes (replaces current macros), Cancel = keep current macros."));
-      if (!restoreConfig && !restoreMacros) return;
-      try {
-        const backupJson = await file.text();
-        const msg = await invoke("import_full_backup", {
-          backupJson,
-          restoreConfig,
-          restoreMacros,
-        });
-        alert(getI18nText("dialog_alert_restore_backup_success", { msg }, `Backup restored successfully (${msg}). Restart the app to see all changes.`));
-      } catch (err) {
-        console.error("[Backup] import failed:", err);
-        alert(getI18nText("dialog_alert_restore_backup_fail", { err }, `Import failed: ${err}`));
+      // A real backup is tens of KB. Anything bigger is either the wrong file
+      // or an OOM attempt (the payload lives ×4 in memory: Blob + JS string
+      // + IPC arg + Rust Value). Refuse early with an honest toast.
+      const MAX_BACKUP_BYTES = 5 * 1024 * 1024;
+      if (file.size > MAX_BACKUP_BYTES) {
+        const status = document.getElementById("backupImportStatus");
+        if (status) status.textContent = getI18nText("backup_import_too_large", {}, "File too large for a backup — refusing to parse.");
+        if (typeof showToast === "function") {
+          showToast(getI18nText("backup_import_too_large", {}, "File too large for a backup — refusing to parse."), "error");
+        }
+        return;
       }
+      let backupJson;
+      try {
+        backupJson = await file.text();
+      } catch (err) {
+        console.error("[Backup] import read failed:", err);
+        return;
+      }
+      openBackupImportModal(file.name || "", backupJson);
     });
     fileInput.click();
   });
 });
+
+function setBackupImportStatus(text, isError) {
+  const status = document.getElementById("backupImportStatus");
+  if (status) {
+    status.textContent = text || "";
+    status.style.color = isError ? "var(--red, #EF4444)" : "";
+  }
+}
+
+// In-page restore dialog: host confirm()/alert() are unreliable in WebView2
+// (a suppressed dialog reads as "no" / swallows the result), so the choice
+// lives in the DOM with checkboxes. Wired once via dataset guard.
+function openBackupImportModal(fileName, backupJson) {
+  const modal = document.getElementById("backupImportModal");
+  if (!modal) return;
+  const fileLabel = document.getElementById("backupImportFileLabel");
+  const cfgCb = document.getElementById("backupRestoreConfigCb");
+  const macrosCb = document.getElementById("backupRestoreMacrosCb");
+  const confirmBtn = document.getElementById("backupImportConfirmBtn");
+  const cancelBtn = document.getElementById("backupImportCancelBtn");
+  if (fileLabel) fileLabel.textContent = fileName;
+  if (cfgCb) cfgCb.checked = true;
+  if (macrosCb) macrosCb.checked = true;
+  const close = () => modal.classList.add("hidden");
+  if (cancelBtn && cancelBtn.dataset.bound !== "1") {
+    cancelBtn.dataset.bound = "1";
+    cancelBtn.addEventListener("click", close);
+  }
+  if (modal.dataset.backdropBound !== "1") {
+    modal.dataset.backdropBound = "1";
+    modal.addEventListener("click", (e) => { if (e.target === modal) close(); });
+  }
+  if (confirmBtn && confirmBtn.dataset.bound !== "1") {
+    confirmBtn.dataset.bound = "1";
+    confirmBtn.addEventListener("click", async () => {
+      const json = confirmBtn.dataset.backupJson || "";
+      const restoreConfig = !!document.getElementById("backupRestoreConfigCb")?.checked;
+      const restoreMacros = !!document.getElementById("backupRestoreMacrosCb")?.checked;
+      if (!restoreConfig && !restoreMacros) { close(); return; }
+      setBtnBusy(confirmBtn, true, getI18nText("settings_btn_backup_working", {}, "Working…"));
+      try {
+        const msg = await invoke("import_full_backup", { backupJson: json, restoreConfig, restoreMacros });
+        close();
+        flashBtnSuccess(document.getElementById("importBackupBtn"));
+        const okText = getI18nText("dialog_alert_restore_backup_success", { msg }, `Backup restored successfully (${msg}). Restart the app to see all changes.`);
+        setBackupImportStatus(okText, false);
+        if (typeof showToast === "function") showToast(okText, "success");
+      } catch (err) {
+        console.error("[Backup] import failed:", err);
+        const errText = getI18nText("dialog_alert_restore_backup_fail", { err }, `Import failed: ${err}`);
+        setBackupImportStatus(errText, true);
+        if (typeof showToast === "function") showToast(errText, "error");
+      } finally {
+        setBtnBusy(confirmBtn, false);
+        confirmBtn.dataset.backupJson = "";
+      }
+    });
+  }
+  if (confirmBtn) confirmBtn.dataset.backupJson = backupJson;
+  modal.classList.remove("hidden");
+}
 
 
 // ── SMART GUARD (Typing Guard + App filter) ─────────────────

@@ -509,9 +509,38 @@
                     <button id="exportBackupBtn" class="preset-modal-btn save" style="flex:1;" data-i18n="settings_btn_export_backup">⬇ Export backup</button>
                     <button id="importBackupBtn" class="preset-modal-btn cancel" style="flex:1;" data-i18n="settings_btn_import_backup">⬆ Import backup</button>
                   </div>
+                  <div id="backupImportStatus" class="settings-hint" style="min-height:16px;" role="status" aria-live="polite"></div>
                 </div>
               </div>
             </div>
+
+  <!-- Backup Import Modal: in-page choice, never a host confirm()/alert().
+       WebView2 may suppress the host dialog (reads as "no"), which used to
+       make an import silently do nothing (FIELD_BUG_REPORT.md §4). -->
+  <div id="backupImportModal" class="modal-overlay hidden">
+    <div class="modal-card preset-modal-card">
+      <div class="modal-header">
+        <h2 data-i18n="backup_import_title">Restore from backup</h2>
+      </div>
+      <div class="modal-body">
+        <p class="settings-hint" id="backupImportFileLabel" style="margin-bottom:10px;"></p>
+        <label class="checkbox-row">
+          <input type="checkbox" id="backupRestoreConfigCb" class="custom-checkbox" checked>
+          <span class="checkbox-box"></span>
+          <span data-i18n="backup_import_config">Config + presets</span>
+        </label>
+        <label class="checkbox-row">
+          <input type="checkbox" id="backupRestoreMacrosCb" class="custom-checkbox" checked>
+          <span class="checkbox-box"></span>
+          <span data-i18n="backup_import_macros">Macros (replaces current)</span>
+        </label>
+      </div>
+      <div class="modal-footer" style="display:flex;gap:10px;justify-content:flex-end;">
+        <button id="backupImportCancelBtn" class="preset-modal-btn cancel" data-i18n="modal_cancel">Cancel</button>
+        <button id="backupImportConfirmBtn" class="preset-modal-btn save" data-i18n="backup_import_confirm">Restore</button>
+      </div>
+    </div>
+  </div>
 
             <!-- Card 2: Behavior & Safety -->
             <div class="config-card">

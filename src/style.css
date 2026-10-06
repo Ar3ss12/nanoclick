@@ -2406,7 +2406,81 @@ button {
   font-size: 11px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s ease;
+  /* Compositor-only microinteraction: transform/opacity never trigger layout,
+     so hover/press stays at 60 fps even on a busy WebView2 renderer. */
+  transition: transform 120ms ease, box-shadow 150ms ease, background-color 150ms ease,
+    border-color 150ms ease, opacity 150ms ease;
+  will-change: transform;
+}
+
+.preset-modal-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.preset-modal-btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.preset-modal-btn:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
+}
+
+.preset-modal-btn:disabled,
+.preset-modal-btn.is-busy {
+  cursor: wait;
+  opacity: 0.75;
+}
+
+/* Busy spinner: border rotation on a pseudo-element, no extra DOM. */
+.preset-modal-btn.is-busy {
+  position: relative;
+  pointer-events: none;
+}
+
+.preset-modal-btn.is-busy::after {
+  content: "";
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  margin-left: 8px;
+  vertical-align: -1px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: btn-spin 700ms linear infinite;
+}
+
+@keyframes btn-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* One-shot success pop: applied from JS, removed after ~600 ms. */
+.preset-modal-btn.is-success {
+  animation: btn-pop 320ms ease;
+}
+
+@keyframes btn-pop {
+  0% { transform: scale(1); }
+  40% { transform: scale(1.06); }
+  100% { transform: scale(1); }
+}
+
+/* Reduced-motion users (and tray-hidden pages) get zero animation cost. */
+@media (prefers-reduced-motion: reduce) {
+  .preset-modal-btn,
+  .preset-modal-btn:hover,
+  .preset-modal-btn:active,
+  .preset-modal-btn.is-success {
+    transform: none !important;
+    animation: none !important;
+    transition: none !important;
+  }
+  .preset-modal-btn.is-busy::after {
+    animation: none !important;
+    border-top-color: currentColor;
+    opacity: 0.6;
+  }
 }
 
 .preset-modal-btn.cancel {

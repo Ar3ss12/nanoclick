@@ -734,6 +734,16 @@ pub fn import_full_backup(
     restore_config: bool,
     restore_macros: bool,
 ) -> Result<String, String> {
+    // Defense in depth: the page refuses >5 MB before reading, but IPC can be
+    // called directly — a huge string would live ×3 in memory (arg + Value +
+    // cloned subtrees) before parsing even starts.
+    const MAX_BACKUP_JSON_BYTES: usize = 5 * 1024 * 1024;
+    if backup_json.len() > MAX_BACKUP_JSON_BYTES {
+        return Err("backup payload too large — refusing to parse".into());
+    }
+    if !restore_config && !restore_macros {
+        return Err("nothing selected to restore".into());
+    }
     let value: serde_json::Value =
         serde_json::from_str(&backup_json).map_err(|e| format!("parse backup: {e}"))?;
     if value
