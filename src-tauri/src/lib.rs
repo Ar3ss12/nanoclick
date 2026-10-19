@@ -424,6 +424,20 @@ fn get_config_path(state: State<'_, AppState>) -> String {
     state.config_manager.get_config_path()
 }
 
+/// Tell the live page how a satellite toggle landed, so a busy checkbox locks
+/// itself with a toast instead of mirroring a window that was never built.
+/// Fire-and-forget (`let _ =`, targeted at `main` only) — same contract as
+/// every other emit: the click loop never waits for the UI.
+fn emit_satellite_toggle_result(app: &AppHandle, which: &str, ok: bool, reason: &str) {
+    use tauri::Emitter;
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.emit(
+            "satellite-toggle-result",
+            serde_json::json!({ "which": which, "ok": ok, "reason": reason }),
+        );
+    }
+}
+
 #[tauri::command]
 fn get_current_mouse_pos() -> (i32, i32) {
     platform::get_cursor_pos()
@@ -965,9 +979,20 @@ pub(crate) fn toggle_hud_from_tray(app: &AppHandle) {
             return;
         }
     };
-    let applied = main_window_visible(app);
-    if applied {
-        let _ = toggle_hud_window(app.clone(), show);
+    // The facade owns the visibility gate: it answers DeferredTray when the
+    // main window is away. No second predicate here — it would desync from
+    // the toggle's own answer.
+    match toggle_hud_window(app.clone(), show) {
+        Ok(overlay::SatelliteToggle::DeferredTray) => {
+            emit_satellite_toggle_result(app, "hud", false, "tray");
+        }
+        Err(e) => {
+            // Satellite bulkhead busy: lock the page checkbox instead of
+            // painting a window that was never built.
+            debug_log_internal("warn", &format!("[Tray] HUD toggle refused: {e}"));
+            emit_satellite_toggle_result(app, "hud", false, "busy");
+        }
+        _ => {}
     }
     // The BEHAVIOR checkbox on the page mirrors this WITHOUT saving: the tray
     // already persisted the value, and a page-side save would write its stale
@@ -979,7 +1004,7 @@ pub(crate) fn toggle_hud_from_tray(app: &AppHandle) {
     // the app is in the tray, so the HUD will appear together with the window.
     report_tray_action(
         app,
-        if !applied {
+        if !main_window_visible(app) {
             "HUD will appear with the window"
         } else if show {
             "HUD shown"
@@ -1797,7 +1822,9 @@ fn toggle_hud_window_inner(app: AppHandle, show: bool) -> Result<overlay::Satell
         // window returns (`restore_main_window`). Creating it here left an
         // always-on-top counter floating over the desktop with no owner.
         if !main_window_visible(&app) {
-            debug_log_internal("info", "[HUD] show deferred: main window is not visible");
+            // Deferred is a user-visible decision (the checkbox stays off while
+            // the preference is on): `warn` keeps it release-visible.
+            debug_log_internal("warn", "[HUD] show deferred: main window is not visible");
             return Ok(SatelliteToggle::DeferredTray);
         }
         let already_existed = app.get_webview_window("hud").is_some();
