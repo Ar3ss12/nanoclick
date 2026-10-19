@@ -2476,20 +2476,21 @@ fn test_tray_hardening_and_input_diagnostics_wiring() {
             && lib_src.contains("reload_strategy(app.get_webview_window(\"main\").is_some())"),
         "the reload branch decision must be pure and used by the handler"
     );
-    // Ghost-killer: tray paths must DESTROY satellites, never hide them.
-    // hide() leaves the WebView2 helpers alive (~120 MB) and a stray show()
-    // resurrects the ghost. Restore rebuilds from the saved preference.
+    // Tray paths HIDE satellites with the main window (hide/show model: the
+    // page stays alive in plain-tray mode and would not recreate destroyed
+    // windows; deep sleep destroys the main WebView separately). Restore
+    // rebuilds hidden satellites from the saved preference.
     assert!(
-        lib_src.contains("fn destroy_secondary_windows"),
-        "ghost-killer `destroy_secondary_windows` must exist"
+        lib_src.contains("fn hide_secondary_windows"),
+        "tray paths must hide satellites with the main window"
     );
     assert!(
-        !lib_src.contains("fn hide_secondary_windows"),
-        "dead `hide_secondary_windows` must be gone (destroy, not hide)"
+        !lib_src.contains("fn destroy_secondary_windows"),
+        "dead `destroy_secondary_windows` must be gone (hide, not destroy)"
     );
     assert!(
-        !lib_src.contains("hide_secondary_windows(&"),
-        "no tray path may hide satellites — destroy them"
+        !lib_src.contains("destroy_secondary_windows(&"),
+        "no tray path may destroy satellites — hide them"
     );
     let restart = section(
         lib_src,
