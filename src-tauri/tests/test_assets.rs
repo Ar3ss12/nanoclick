@@ -626,12 +626,12 @@ fn test_lazy_windows_built_at_runtime() {
 
     let lib_src = include_str!("../src/lib.rs");
     assert!(
-        lib_src.contains("ensure_hud_window"),
-        "lib.rs must expose ensure_hud_window"
+        lib_src.contains("overlay::ensure_satellite"),
+        "lib.rs must build satellites through the single-owner facade"
     );
     assert!(
-        lib_src.contains("hud.html"),
-        "lib.rs must load hud.html at runtime"
+        overlay_src.contains("hud.html"),
+        "overlay.rs must load hud.html at runtime (single-owner facade)"
     );
     assert!(
         lib_src.contains("no WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"),
@@ -2300,16 +2300,18 @@ fn test_tray_hardening_and_input_diagnostics_wiring() {
     );
 
     // ── F2: HUD/overlay must not linger on screen ───────────────────────────
-    // Ghost-killer: tray paths DESTROY satellites (hide() leaves WebView2
-    // helpers alive + a stray show() resurrects the ghost).
+    // Tray paths HIDE satellites with the main window (hide/show model: the
+    // page stays alive in plain-tray mode and would not recreate destroyed
+    // windows; deep sleep destroys the main WebView separately).
     assert!(
-        lib_src.contains("fn destroy_secondary_windows")
+        lib_src.contains("fn hide_secondary_windows")
             && lib_src.contains("fn show_secondary_windows"),
-        "the secondary windows must die with the main window into the tray and rebuild on restore (F2)"
+        "the secondary windows must hide with the main window into the tray and show on restore (F2)"
     );
     assert!(
-        lib_src.contains("destroy_secondary_windows(&app_handle)"),
-        "the close/hide path must destroy them"
+        lib_src.contains("hide_secondary_windows(&app_handle)")
+            || lib_src.contains("hide_secondary_windows(app_handle)"),
+        "the close/hide path must hide them"
     );
 
     // ── F3: remember the window SIZE, not just the position ─────────────────
@@ -3667,11 +3669,22 @@ fn test_remember_window_state_wiring() {
     );
     // Written on the tray transitions too, not only on a clean exit: a Task Manager
     // kill must not resurrect a window the user had put in the tray.
-    assert!(
-        lib_src
-            .matches("persist_window_visibility(&app_handle, false)")
+    // (Matches `&app_handle` and `&app`/`app` call shapes — the name varies
+    // across refactors, the callee is what matters.)
+    let tray_persists = lib_src
+        .matches("persist_window_visibility(&app_handle, false)")
+        .count()
+        + lib_src
+            .matches("persist_window_visibility(app_handle, false)")
             .count()
-            >= 2,
+        + lib_src
+            .matches("persist_window_visibility(&app, false)")
+            .count()
+        + lib_src
+            .matches("persist_window_visibility(app, false)")
+            .count();
+    assert!(
+        tray_persists >= 2,
         "the close path and the minimize path must both persist the tray state"
     );
     // A preset must never change how the app starts (tech.md §Presets).
@@ -4156,16 +4169,21 @@ fn test_tray_switch_reports_both_flags() {
     }
 
     // And a skipped deep sleep names its reason in the release-visible log.
+    // (Matches both `&app_handle` and `app_handle` call shapes — the borrow
+    // varies across refactors, the callee is what matters.)
     let lib_src = include_str!("../src/lib.rs");
     assert!(
         lib_src.contains("fn deep_sleep_skip_reason"),
         "the reason a close did not free memory must be explainable"
     );
+    let skip_calls = lib_src
+        .matches("deep_sleep_skip_reason(&app_handle)")
+        .count()
+        + lib_src
+            .matches("deep_sleep_skip_reason(app_handle)")
+            .count();
     assert!(
-        lib_src
-            .matches("deep_sleep_skip_reason(&app_handle)")
-            .count()
-            >= 2,
+        skip_calls >= 2,
         "both the close and the minimize path must log why deep sleep was skipped"
     );
 }
@@ -6771,8 +6789,8 @@ fn test_stage_d_daemon_skeleton_wiring() {
     .expect("tests/daemon_handshake.rs must exist");
     for needle in [
         "handshake_ping_state_toggle_over_tcp",
-        "kill_ui_connection_daemon_truth_survives",
-        "chaos_kill_ui_process_engine_keeps_running",
+        "ui_disconnect_daemon_truth_survives",
+        "chaos_ui_disconnect_engine_keeps_running",
     ] {
         assert!(
             handshake.contains(needle),
@@ -6840,15 +6858,19 @@ fn test_save_app_config_is_non_blocking_and_offloads_satellite_build() {
         "save_app_config handles the hud toggle after the scope commits"
     );
 
-    // Also verify reset_config_to_defaults offloads satellite toggles
+    // Also verify reset_config_to_defaults settles its scope before toggles.
     let reset_app = section(
         lib_src,
         "fn reset_config_to_defaults(",
         "fn apply_mode_toggle",
     );
     assert!(
-        reset_app.contains("std::thread::spawn(move ||"),
-        "reset_config_to_defaults must also offload satellite toggles to background thread"
+        reset_app.contains("node.scoped("),
+        "reset_config_to_defaults must run the reset inside node.scoped()"
+    );
+    assert!(
+        reset_app.contains("match outcome"),
+        "reset_config_to_defaults must unpack the scoped outcome before side-effects"
     );
 }
 

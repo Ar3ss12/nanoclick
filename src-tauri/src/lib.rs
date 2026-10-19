@@ -281,7 +281,7 @@ fn save_app_config(
     // frontend retries once with a fresh collect. Scoped execution: the guard
     // commits on Ok and aborts on Err, so no implicit-drop path exists here
     // by construction. Rollback is a no-op: the disk is untouched until
-    // `config_manager.save()` inside the closure.
+    // the persist call inside the closure.
     let node = crate::stability::config_node();
     // Scope boundary: everything touching the config file and the scheduler
     // mirror runs inside. Satellite create/destroy runs after commit.
@@ -1764,12 +1764,13 @@ pub(crate) fn shutdown_application(app: &AppHandle) {
 }
 
 #[tauri::command]
-fn toggle_hud_window(app: AppHandle, show: bool) -> Result<(), String> {
+fn toggle_hud_window(app: AppHandle, show: bool) -> Result<overlay::SatelliteToggle, String> {
+    use overlay::SatelliteToggle;
     // Scoped admission through the satellite bulkhead: a refused create is a
     // planned abort, never a breaker trip.
     let node = crate::stability::satellite_node();
     let app_rb = app.clone();
-    let outcome: Result<(), snubber::SnubberError<String>> = node.scoped(
+    let outcome: Result<SatelliteToggle, snubber::SnubberError<String>> = node.scoped(
         move || {
             if let Some(win) = app_rb.get_webview_window("hud") {
                 let _ = win.destroy();
@@ -1787,7 +1788,8 @@ fn toggle_hud_window(app: AppHandle, show: bool) -> Result<(), String> {
 }
 
 /// Inner HUD toggle (no admission: the scope lives on `toggle_hud_window`).
-fn toggle_hud_window_inner(app: AppHandle, show: bool) -> Result<(), String> {
+fn toggle_hud_window_inner(app: AppHandle, show: bool) -> Result<overlay::SatelliteToggle, String> {
+    use overlay::SatelliteToggle;
     if show {
         // The HUD is a satellite of the main window, never standalone. While
         // the app lives in the tray (main hidden, or released by deep sleep)
@@ -1796,7 +1798,7 @@ fn toggle_hud_window_inner(app: AppHandle, show: bool) -> Result<(), String> {
         // always-on-top counter floating over the desktop with no owner.
         if !main_window_visible(&app) {
             debug_log_internal("info", "[HUD] show deferred: main window is not visible");
-            return Ok(());
+            return Ok(SatelliteToggle::DeferredTray);
         }
         let already_existed = app.get_webview_window("hud").is_some();
         overlay::ensure_satellite(&app, "hud")?;
@@ -1806,8 +1808,13 @@ fn toggle_hud_window_inner(app: AppHandle, show: bool) -> Result<(), String> {
             // (no white flash). Existing window: show immediately.
             if already_existed {
                 let _ = win.show();
+                Ok(SatelliteToggle::AlreadyThere)
+            } else {
+                debug_log_internal("info", "[HUD] hud window shown (lazy)");
+                Ok(SatelliteToggle::Applied)
             }
-            debug_log_internal("info", "[HUD] hud window shown (lazy)");
+        } else {
+            Ok(SatelliteToggle::DeferredTray)
         }
     } else if let Some(win) = app.get_webview_window("hud") {
         let _ = win.destroy();
@@ -1815,8 +1822,10 @@ fn toggle_hud_window_inner(app: AppHandle, show: bool) -> Result<(), String> {
             "info",
             "[HUD] hud window destroyed, WebView memory released",
         );
+        Ok(SatelliteToggle::Applied)
+    } else {
+        Ok(SatelliteToggle::AlreadyThere)
     }
-    Ok(())
 }
 
 #[allow(dead_code)]
@@ -2021,6 +2030,30 @@ pub fn run() {
             crate::tauri_sink::set_extra_sink(std::sync::Arc::new(
                 crate::tauri_sink::TauriSink::new(handle.clone()),
             ));
+            // Stage A OOP satellites (default OFF): out-of-process overlay/hud
+            // supervised child processes. Enabled by `NANOCLICK_OOP_SATELLITES=1`
+            // env var or `ui.oop_satellites` config flag; otherwise the
+            // in-process WebViews above stay the behaviour.
+            {
+                let oop_env = std::env::var("NANOCLICK_OOP_SATELLITES")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                let oop_cfg = initial_app_cfg.ui.oop_satellites.unwrap_or(false);
+                if oop_env || oop_cfg {
+                    crate::satellite::set_satellite_oop(true);
+                    for label in [
+                        crate::satellite::SATELLITE_OVERLAY,
+                        crate::satellite::SATELLITE_HUD,
+                    ] {
+                        let h = handle.clone();
+                        std::thread::Builder::new()
+                            .name(format!("nanoclick-satellite-{label}"))
+                            .spawn(move || crate::satellite::run_satellite_supervisor(label, h))
+                            .ok();
+                    }
+                    debug_log_internal("info", "[Satellite] OOP supervisor enabled");
+                }
+            }
 
             // **v1.0 memory-pressure workaround**: the auto-created window
             // from `tauri.conf.json` spawned 5 WebView2 child processes that
