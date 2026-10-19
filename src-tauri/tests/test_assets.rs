@@ -6,25 +6,58 @@ fn test_index_html_modals_and_structure() {
     let html = String::from_utf8_lossy(&bytes);
 
     // 1. Preset edit modal has required id and scrollable body class
-    assert!(html.contains("id=\"presetEditModal\""), "missing #presetEditModal");
-    assert!(html.contains("preset-modal-body"), "missing .preset-modal-body class");
-    assert!(html.contains("id=\"presetCancelBtn\""), "missing #presetCancelBtn");
-    assert!(html.contains("id=\"presetSaveBtn\""), "missing #presetSaveBtn");
+    assert!(
+        html.contains("id=\"presetEditModal\""),
+        "missing #presetEditModal"
+    );
+    assert!(
+        html.contains("preset-modal-body"),
+        "missing .preset-modal-body class"
+    );
+    assert!(
+        html.contains("id=\"presetCancelBtn\""),
+        "missing #presetCancelBtn"
+    );
+    assert!(
+        html.contains("id=\"presetSaveBtn\""),
+        "missing #presetSaveBtn"
+    );
 
     // 2. Preset inspect modal has required id and buttons
-    assert!(html.contains("id=\"presetInspectModal\""), "missing #presetInspectModal");
-    assert!(html.contains("id=\"inspectCloseBtn\""), "missing #inspectCloseBtn");
+    assert!(
+        html.contains("id=\"presetInspectModal\""),
+        "missing #presetInspectModal"
+    );
+    assert!(
+        html.contains("id=\"inspectCloseBtn\""),
+        "missing #inspectCloseBtn"
+    );
 
     // 3. Onboarding modal has close button so user is never trapped
-    assert!(html.contains("id=\"onboardingModal\""), "missing #onboardingModal");
-    assert!(html.contains("id=\"onboardingCloseBtn\""), "missing #onboardingCloseBtn");
+    assert!(
+        html.contains("id=\"onboardingModal\""),
+        "missing #onboardingModal"
+    );
+    assert!(
+        html.contains("id=\"onboardingCloseBtn\""),
+        "missing #onboardingCloseBtn"
+    );
 
     // 4. Multi-point sequence has full-width class so it spans grid properly
-    assert!(html.contains("preset-form-group full-width"), "multi-point sequence must be full-width");
-    assert!(html.contains("id=\"prPointsCanvas\""), "missing #prPointsCanvas");
+    assert!(
+        html.contains("preset-form-group full-width"),
+        "multi-point sequence must be full-width"
+    );
+    assert!(
+        html.contains("id=\"prPointsCanvas\""),
+        "missing #prPointsCanvas"
+    );
 
     // 5. Recording overlay has pointer-events:none so it doesn't intercept clicks
-    assert!(html.contains("pointer-events:none"), "recordingOverlay must have pointer-events:none");
+    assert!(
+        html.contains("pointer-events:none"),
+        "recordingOverlay must have pointer-events:none"
+    );
 }
 
 #[test]
@@ -77,19 +110,46 @@ fn test_main_js_escape_and_backdrop_handlers() {
     let js = String::from_utf8_lossy(&bytes);
 
     // 1. Escape key handler must check Escape and hide modals
-    assert!(js.contains("e.key !== \"Escape\""), "missing Escape key handler check");
-    assert!(js.contains("presetEditModal"), "Escape key handler must handle presetEditModal");
-    assert!(js.contains("presetInspectModal"), "Escape key handler must handle presetInspectModal");
-    assert!(js.contains("onboardingModal"), "Escape key handler must handle onboardingModal");
+    assert!(
+        js.contains("e.key !== \"Escape\""),
+        "missing Escape key handler check"
+    );
+    assert!(
+        js.contains("presetEditModal"),
+        "Escape key handler must handle presetEditModal"
+    );
+    assert!(
+        js.contains("presetInspectModal"),
+        "Escape key handler must handle presetInspectModal"
+    );
+    assert!(
+        js.contains("onboardingModal"),
+        "Escape key handler must handle onboardingModal"
+    );
 
     // 2. Backdrop click handler must bind to modals
-    assert!(js.contains("bindBackdropClose"), "missing bindBackdropClose helper");
-    assert!(js.contains("bindBackdropClose(\"presetEditModal\")"), "presetEditModal must have backdrop close");
-    assert!(js.contains("bindBackdropClose(\"presetInspectModal\")"), "presetInspectModal must have backdrop close");
+    assert!(
+        js.contains("bindBackdropClose"),
+        "missing bindBackdropClose helper"
+    );
+    assert!(
+        js.contains("bindBackdropClose(\"presetEditModal\")"),
+        "presetEditModal must have backdrop close"
+    );
+    assert!(
+        js.contains("bindBackdropClose(\"presetInspectModal\")"),
+        "presetInspectModal must have backdrop close"
+    );
 
     // 3. Visual editor must also have Escape handler and backdrop click
-    assert!(js.contains("onVeKeydown"), "visual editor must have Escape key listener");
-    assert!(js.contains("visualEditorBackdrop"), "visual editor backdrop must be dismissible");
+    assert!(
+        js.contains("onVeKeydown"),
+        "visual editor must have Escape key listener"
+    );
+    assert!(
+        js.contains("visualEditorBackdrop"),
+        "visual editor backdrop must be dismissible"
+    );
 }
 
 #[test]
@@ -100,28 +160,70 @@ fn test_stats_js_and_immediate_updates() {
     // Counting lives in Rust (stats_agg.rs via stats_tick); the page keeps
     // only the Canvas chart, DOM paint and the localStorage backup.
     let stats_key = tauri::utils::assets::AssetKey::from("stats.js");
-    let stats_bytes = ctx.assets().get(&stats_key).expect("stats.js must be embedded");
+    let stats_bytes = ctx
+        .assets()
+        .get(&stats_key)
+        .expect("stats.js must be embedded");
     let stats_code = String::from_utf8_lossy(&stats_bytes);
-    assert!(stats_code.contains("StatsEngine"), "stats.js must export StatsEngine");
-    assert!(stats_code.contains("recordSessionTick"), "stats.js must have recordSessionTick");
-    assert!(stats_code.contains("drawStatsChart"), "stats.js must have drawStatsChart");
-    assert!(stats_code.contains("saveToLocalStorage"), "stats.js must have localStorage backup");
-    assert!(stats_code.contains("stats_tick"), "stats.js must fold ticks through the stats_tick command");
-    assert!(stats_code.contains("get_session_stats"), "stats.js must mirror session counters from the backend");
+    assert!(
+        stats_code.contains("StatsEngine"),
+        "stats.js must export StatsEngine"
+    );
+    assert!(
+        stats_code.contains("recordSessionTick"),
+        "stats.js must have recordSessionTick"
+    );
+    assert!(
+        stats_code.contains("drawStatsChart"),
+        "stats.js must have drawStatsChart"
+    );
+    assert!(
+        stats_code.contains("saveToLocalStorage"),
+        "stats.js must have localStorage backup"
+    );
+    assert!(
+        stats_code.contains("stats_tick"),
+        "stats.js must fold ticks through the stats_tick command"
+    );
+    assert!(
+        stats_code.contains("get_session_stats"),
+        "stats.js must mirror session counters from the backend"
+    );
     // No page-side counting anymore — that was the second copy of the truth.
-    assert!(!stats_code.contains("statsDirty"), "page-side dirty flag must stay deleted — Rust owns flushing");
-    assert!(!stats_code.contains("lastFinalizedClicks"), "page-side finalize guard must stay deleted — Rust owns finalize");
+    assert!(
+        !stats_code.contains("statsDirty"),
+        "page-side dirty flag must stay deleted — Rust owns flushing"
+    );
+    assert!(
+        !stats_code.contains("lastFinalizedClicks"),
+        "page-side finalize guard must stay deleted — Rust owns finalize"
+    );
     // Session lifecycle invariants now live in stats_agg.rs unit tests.
     let agg_src = include_str!("../src/stats_agg.rs");
-    assert!(agg_src.contains("is_junk"), "stats_agg.rs must filter junk runs from history");
-    assert!(agg_src.contains("history.len() > 50"), "stats_agg.rs history must stay ring-capped at 50");
-    assert!(agg_src.contains("Late echo"), "stats_agg.rs finalize must no-op on late idle echoes");
+    assert!(
+        agg_src.contains("is_junk"),
+        "stats_agg.rs must filter junk runs from history"
+    );
+    assert!(
+        agg_src.contains("history.len() > 50"),
+        "stats_agg.rs history must stay ring-capped at 50"
+    );
+    assert!(
+        agg_src.contains("Late echo"),
+        "stats_agg.rs finalize must no-op on late idle echoes"
+    );
 
     // 2. index.html must load stats.js
     let html_key = tauri::utils::assets::AssetKey::from("index.html");
-    let html_bytes = ctx.assets().get(&html_key).expect("index.html not embedded");
+    let html_bytes = ctx
+        .assets()
+        .get(&html_key)
+        .expect("index.html not embedded");
     let html = String::from_utf8_lossy(&html_bytes);
-    assert!(html.contains("<script src=\"stats.js\"></script>"), "index.html must include stats.js");
+    assert!(
+        html.contains("<script src=\"stats.js\"></script>"),
+        "index.html must include stats.js"
+    );
 
     // 3. main.js must update mode display immediately without restart
     let js_key = tauri::utils::assets::AssetKey::from("main.js");
@@ -147,29 +249,76 @@ fn test_uipi_manager_and_elevation_assets() {
 
     // 1. uipi_manager.js must be present in embedded assets
     let uipi_key = tauri::utils::assets::AssetKey::from("uipi_manager.js");
-    let uipi_bytes = ctx.assets().get(&uipi_key).expect("uipi_manager.js must be embedded");
+    let uipi_bytes = ctx
+        .assets()
+        .get(&uipi_key)
+        .expect("uipi_manager.js must be embedded");
     let uipi_code = String::from_utf8_lossy(&uipi_bytes);
-    assert!(uipi_code.contains("UipiManager"), "uipi_manager.js must export UipiManager");
-    assert!(uipi_code.contains("check_elevation"), "uipi_manager.js must invoke check_elevation");
-    assert!(uipi_code.contains("restart_as_admin"), "uipi_manager.js must invoke restart_as_admin");
-    assert!(uipi_code.contains("set_always_run_as_admin"), "uipi_manager.js must invoke set_always_run_as_admin");
+    assert!(
+        uipi_code.contains("UipiManager"),
+        "uipi_manager.js must export UipiManager"
+    );
+    assert!(
+        uipi_code.contains("check_elevation"),
+        "uipi_manager.js must invoke check_elevation"
+    );
+    assert!(
+        uipi_code.contains("restart_as_admin"),
+        "uipi_manager.js must invoke restart_as_admin"
+    );
+    // Single-owner rule: the registry write lives ONLY in save_app_config
+    // (Rust, on change). uipi_manager.js must route through the throttled
+    // save bridge instead of invoking set_always_run_as_admin directly
+    // (that double-write raced the save and dropped the disk flag).
+    assert!(
+        uipi_code.contains("__nanoclickSaveThrottled"),
+        "uipi_manager.js must persist via the throttled save bridge"
+    );
+    assert!(
+        !uipi_code.contains("set_always_run_as_admin"),
+        "uipi_manager.js must NOT invoke set_always_run_as_admin directly (single owner: save_app_config)"
+    );
 
     // 2. index.html must load uipi_manager.js and have UI elements
     let html_key = tauri::utils::assets::AssetKey::from("index.html");
-    let html_bytes = ctx.assets().get(&html_key).expect("index.html not embedded");
+    let html_bytes = ctx
+        .assets()
+        .get(&html_key)
+        .expect("index.html not embedded");
     let html = String::from_utf8_lossy(&html_bytes);
-    assert!(html.contains("<script src=\"uipi_manager.js\"></script>"), "index.html must include uipi_manager.js");
-    assert!(html.contains("id=\"adminStatusBadge\""), "index.html must have #adminStatusBadge");
-    assert!(html.contains("id=\"alwaysRunAsAdminCheckbox\""), "index.html must have #alwaysRunAsAdminCheckbox");
-    assert!(html.contains("id=\"uipiModal\""), "index.html must have #uipiModal");
-    assert!(html.contains("id=\"uipiRestartAdminBtn\""), "index.html must have #uipiRestartAdminBtn");
+    assert!(
+        html.contains("<script src=\"uipi_manager.js\"></script>"),
+        "index.html must include uipi_manager.js"
+    );
+    assert!(
+        html.contains("id=\"adminStatusBadge\""),
+        "index.html must have #adminStatusBadge"
+    );
+    assert!(
+        html.contains("id=\"alwaysRunAsAdminCheckbox\""),
+        "index.html must have #alwaysRunAsAdminCheckbox"
+    );
+    assert!(
+        html.contains("id=\"uipiModal\""),
+        "index.html must have #uipiModal"
+    );
+    assert!(
+        html.contains("id=\"uipiRestartAdminBtn\""),
+        "index.html must have #uipiRestartAdminBtn"
+    );
 
     // 3. style.css must style UIPI components
     let css_key = tauri::utils::assets::AssetKey::from("style.css");
     let css_bytes = ctx.assets().get(&css_key).expect("style.css not embedded");
     let css = String::from_utf8_lossy(&css_bytes);
-    assert!(css.contains(".admin-status-badge"), "style.css must have .admin-status-badge");
-    assert!(css.contains(".uipi-modal-card"), "style.css must have .uipi-modal-card");
+    assert!(
+        css.contains(".admin-status-badge"),
+        "style.css must have .admin-status-badge"
+    );
+    assert!(
+        css.contains(".uipi-modal-card"),
+        "style.css must have .uipi-modal-card"
+    );
 }
 
 #[test]
@@ -178,20 +327,40 @@ fn test_i18n_assets_and_dictionary_keys() {
 
     // 1. i18n.js must be embedded and export I18nEngine
     let i18n_key = tauri::utils::assets::AssetKey::from("i18n.js");
-    let i18n_bytes = ctx.assets().get(&i18n_key).expect("i18n.js must be embedded");
+    let i18n_bytes = ctx
+        .assets()
+        .get(&i18n_key)
+        .expect("i18n.js must be embedded");
     let i18n_code = String::from_utf8_lossy(&i18n_bytes);
-    assert!(i18n_code.contains("I18nEngine"), "i18n.js must export I18nEngine");
-    assert!(i18n_code.contains("applyTranslations"), "i18n.js must have applyTranslations");
-    assert!(i18n_code.contains("setLanguage"), "i18n.js must have setLanguage");
+    assert!(
+        i18n_code.contains("I18nEngine"),
+        "i18n.js must export I18nEngine"
+    );
+    assert!(
+        i18n_code.contains("applyTranslations"),
+        "i18n.js must have applyTranslations"
+    );
+    assert!(
+        i18n_code.contains("setLanguage"),
+        "i18n.js must have setLanguage"
+    );
 
     // 2. ua.json and en.json must be embedded; ru.json must be GONE
     let ua_key = tauri::utils::assets::AssetKey::from("locales/ua.json");
-    let ua_bytes = ctx.assets().get(&ua_key).expect("locales/ua.json must be embedded");
-    let ua_val: serde_json::Value = serde_json::from_slice(&ua_bytes).expect("ua.json must be valid JSON");
+    let ua_bytes = ctx
+        .assets()
+        .get(&ua_key)
+        .expect("locales/ua.json must be embedded");
+    let ua_val: serde_json::Value =
+        serde_json::from_slice(&ua_bytes).expect("ua.json must be valid JSON");
 
     let en_key = tauri::utils::assets::AssetKey::from("locales/en.json");
-    let en_bytes = ctx.assets().get(&en_key).expect("locales/en.json must be embedded");
-    let en_val: serde_json::Value = serde_json::from_slice(&en_bytes).expect("en.json must be valid JSON");
+    let en_bytes = ctx
+        .assets()
+        .get(&en_key)
+        .expect("locales/en.json must be embedded");
+    let en_val: serde_json::Value =
+        serde_json::from_slice(&en_bytes).expect("en.json must be valid JSON");
 
     let ru_key = tauri::utils::assets::AssetKey::from("locales/ru.json");
     assert!(
@@ -204,36 +373,96 @@ fn test_i18n_assets_and_dictionary_keys() {
 
     // 3. Perfect dictionary key symmetry across the sovereign pair (UA, EN)
     for k in ua_map.keys() {
-        assert!(en_map.contains_key(k), "en.json is missing key '{}' present in ua.json", k);
+        assert!(
+            en_map.contains_key(k),
+            "en.json is missing key '{}' present in ua.json",
+            k
+        );
     }
     for k in en_map.keys() {
-        assert!(ua_map.contains_key(k), "ua.json is missing key '{}' present in en.json", k);
+        assert!(
+            ua_map.contains_key(k),
+            "ua.json is missing key '{}' present in en.json",
+            k
+        );
     }
 
     // 4. Dictionary volume must exceed 150 keys (comprehensive coverage)
-    assert!(ua_map.len() >= 150, "Dictionaries must contain at least 150 keys, got {}", ua_map.len());
+    assert!(
+        ua_map.len() >= 150,
+        "Dictionaries must contain at least 150 keys, got {}",
+        ua_map.len()
+    );
 
     // 5. index.html must load i18n.js and include data-i18n across all sections
     let html_key = tauri::utils::assets::AssetKey::from("index.html");
-    let html_bytes = ctx.assets().get(&html_key).expect("index.html not embedded");
+    let html_bytes = ctx
+        .assets()
+        .get(&html_key)
+        .expect("index.html not embedded");
     let html = String::from_utf8_lossy(&html_bytes);
-    assert!(html.contains("<script src=\"i18n.js\"></script>"), "index.html must include i18n.js");
+    assert!(
+        html.contains("<script src=\"i18n.js\"></script>"),
+        "index.html must include i18n.js"
+    );
     // Sovereign pair segment: the 2-option <select> is gone, [EN|UA] buttons rule.
-    assert!(html.contains("id=\"languageSegment\""), "index.html must have #languageSegment");
-    assert!(!html.contains("id=\"languageSelect\""), "dead languageSelect must be gone");
-    assert!(!html.contains("id=\"presetUiLanguage\""), "dead presetUiLanguage select must be gone");
-    assert!(html.contains("id=\"presetUiLanguageSegment\""), "preset modal must have its own segment");
-    assert!(html.contains("data-i18n=\"settings_lang_label\""), "index.html must have data-i18n for language label");
-    assert!(html.contains("data-i18n=\"dash_click_rate\""), "index.html must have dash_click_rate");
-    assert!(html.contains("data-i18n=\"presets_header_title\""), "index.html must have presets_header_title");
-    assert!(html.contains("data-i18n=\"automation_header\""), "index.html must have automation_header");
-    assert!(html.contains("data-i18n=\"hotkeys_header\""), "index.html must have hotkeys_header");
-    assert!(html.contains("data-i18n=\"stats_header\""), "index.html must have stats_header");
-    assert!(html.contains("data-i18n=\"about_header\""), "index.html must have about_header");
-    assert!(html.contains("data-i18n=\"uipi_modal_title\""), "index.html must have uipi_modal_title");
+    assert!(
+        html.contains("id=\"languageSegment\""),
+        "index.html must have #languageSegment"
+    );
+    assert!(
+        !html.contains("id=\"languageSelect\""),
+        "dead languageSelect must be gone"
+    );
+    assert!(
+        !html.contains("id=\"presetUiLanguage\""),
+        "dead presetUiLanguage select must be gone"
+    );
+    assert!(
+        html.contains("id=\"presetUiLanguageSegment\""),
+        "preset modal must have its own segment"
+    );
+    assert!(
+        html.contains("data-i18n=\"settings_lang_label\""),
+        "index.html must have data-i18n for language label"
+    );
+    assert!(
+        html.contains("data-i18n=\"dash_click_rate\""),
+        "index.html must have dash_click_rate"
+    );
+    assert!(
+        html.contains("data-i18n=\"presets_header_title\""),
+        "index.html must have presets_header_title"
+    );
+    assert!(
+        html.contains("data-i18n=\"automation_header\""),
+        "index.html must have automation_header"
+    );
+    assert!(
+        html.contains("data-i18n=\"hotkeys_header\""),
+        "index.html must have hotkeys_header"
+    );
+    assert!(
+        html.contains("data-i18n=\"stats_header\""),
+        "index.html must have stats_header"
+    );
+    assert!(
+        html.contains("data-i18n=\"about_header\""),
+        "index.html must have about_header"
+    );
+    assert!(
+        html.contains("data-i18n=\"uipi_modal_title\""),
+        "index.html must have uipi_modal_title"
+    );
     // Sovereign pair: no Russian option or onboarding button may survive.
-    assert!(!html.contains("value=\"ru\""), "index.html must not offer a ru locale");
-    assert!(!html.contains("data-lang=\"ru\""), "onboarding must not offer a ru button");
+    assert!(
+        !html.contains("value=\"ru\""),
+        "index.html must not offer a ru locale"
+    );
+    assert!(
+        !html.contains("data-lang=\"ru\""),
+        "onboarding must not offer a ru button"
+    );
     assert!(
         !i18n_code.contains("\"ru\""),
         "i18n.js whitelist must not mention ru"
@@ -246,52 +475,131 @@ fn test_overlay_assets_and_capabilities() {
 
     // 1. overlay.html must be present and load overlay.css & overlay.js
     let html_key = tauri::utils::assets::AssetKey::from("overlay.html");
-    let html_bytes = ctx.assets().get(&html_key).expect("overlay.html must be embedded");
+    let html_bytes = ctx
+        .assets()
+        .get(&html_key)
+        .expect("overlay.html must be embedded");
     let html = String::from_utf8_lossy(&html_bytes);
-    assert!(html.contains("overlay.css"), "overlay.html must link overlay.css");
-    assert!(html.contains("overlay.js"), "overlay.html must link overlay.js");
-    assert!(html.contains("rippleCanvas"), "overlay.html must have #rippleCanvas");
+    assert!(
+        html.contains("overlay.css"),
+        "overlay.html must link overlay.css"
+    );
+    assert!(
+        html.contains("overlay.js"),
+        "overlay.html must link overlay.js"
+    );
+    assert!(
+        html.contains("rippleCanvas"),
+        "overlay.html must have #rippleCanvas"
+    );
 
     // 2. overlay.css must define transparent background and canvas layout
     // (ripple is a Canvas 2D renderer — no DOM keyframes anymore)
     let css_key = tauri::utils::assets::AssetKey::from("overlay.css");
-    let css_bytes = ctx.assets().get(&css_key).expect("overlay.css must be embedded");
+    let css_bytes = ctx
+        .assets()
+        .get(&css_key)
+        .expect("overlay.css must be embedded");
     let css = String::from_utf8_lossy(&css_bytes);
-    assert!(css.contains("background: transparent"), "overlay.css must enforce transparency");
-    assert!(css.contains("pointer-events: none"), "overlay.css must be pointer-events: none");
-    assert!(css.contains("rippleCanvas"), "overlay.css must style #rippleCanvas");
+    assert!(
+        css.contains("background: transparent"),
+        "overlay.css must enforce transparency"
+    );
+    assert!(
+        css.contains("pointer-events: none"),
+        "overlay.css must be pointer-events: none"
+    );
+    assert!(
+        css.contains("rippleCanvas"),
+        "overlay.css must style #rippleCanvas"
+    );
 
     // 3. overlay.js must handle DPI scaling and overlay_ready
     let js_key = tauri::utils::assets::AssetKey::from("overlay.js");
-    let js_bytes = ctx.assets().get(&js_key).expect("overlay.js must be embedded");
+    let js_bytes = ctx
+        .assets()
+        .get(&js_key)
+        .expect("overlay.js must be embedded");
     let js = String::from_utf8_lossy(&js_bytes);
-    assert!(js.contains("spawn-ripple"), "overlay.js must listen for spawn-ripple event");
-    assert!(js.contains("devicePixelRatio"), "overlay.js must correct for DPI scaling");
-    assert!(js.contains("overlay_ready"), "overlay.js must invoke overlay_ready signal");
+    assert!(
+        js.contains("spawn-ripple"),
+        "overlay.js must listen for spawn-ripple event"
+    );
+    assert!(
+        js.contains("devicePixelRatio"),
+        "overlay.js must correct for DPI scaling"
+    );
+    assert!(
+        js.contains("overlay_ready"),
+        "overlay.js must invoke overlay_ready signal"
+    );
 
-    // 4. main.js must invoke toggle_overlay and must not have legacy mousemove listener
+    // 4. ONE owner for the satellite windows: both checkboxes save, and the
+    // save path (save_app_config) toggles. No direct invoke may remain — the
+    // fast-path raced the save and flashed an empty WebView (DWM white flash).
     let main_js_key = tauri::utils::assets::AssetKey::from("main.js");
-    let main_js_bytes = ctx.assets().get(&main_js_key).expect("main.js must be embedded");
+    let main_js_bytes = ctx
+        .assets()
+        .get(&main_js_key)
+        .expect("main.js must be embedded");
     let main_js = String::from_utf8_lossy(&main_js_bytes);
-    assert!(main_js.contains("toggle_overlay"), "main.js must invoke toggle_overlay");
-    assert!(!main_js.contains("document.addEventListener(\"mousemove\""), "main.js must not contain obsolete mousemove listener");
+    assert!(
+        !main_js.contains("invoke(\"toggle_overlay\", { show"),
+        "ONE owner: the ripple checkbox saves, save_app_config toggles"
+    );
+    assert!(
+        !main_js.contains("document.addEventListener(\"mousemove\""),
+        "main.js must not contain obsolete mousemove listener"
+    );
+    assert!(
+        !main_js.contains("invoke(\"toggle_hud_window\", { show"),
+        "ONE owner: the HUD checkbox saves, save_app_config toggles"
+    );
+    assert!(
+        main_js.contains("listen(\"satellite-toggle-result\""),
+        "a deferred satellite must explain itself with a toast"
+    );
 
     // 5. index.html must no longer have embedded rippleContainer
     let index_key = tauri::utils::assets::AssetKey::from("index.html");
-    let index_bytes = ctx.assets().get(&index_key).expect("index.html must be embedded");
+    let index_bytes = ctx
+        .assets()
+        .get(&index_key)
+        .expect("index.html must be embedded");
     let index_html = String::from_utf8_lossy(&index_bytes);
-    assert!(!index_html.contains("<div id=\"rippleContainer\""), "index.html must not contain legacy rippleContainer");
+    assert!(
+        !index_html.contains("<div id=\"rippleContainer\""),
+        "index.html must not contain legacy rippleContainer"
+    );
 
     // 6. tauri.conf.json must declare ONLY the main window at boot (lazy overlay/hud)
     let tauri_conf = include_str!("../tauri.conf.json");
-    assert!(tauri_conf.contains("NanoClick"), "tauri.conf.json must declare main window");
-    assert!(tauri_conf.contains("\"windows\""), "tauri.conf.json must declare windows");
-    assert!(!tauri_conf.contains("overlay.html"), "tauri.conf.json must NOT pre-create overlay (lazy via ensure_overlay_window)");
-    assert!(!tauri_conf.contains("hud.html"), "tauri.conf.json must NOT pre-create hud (lazy via ensure_hud_window)");
+    assert!(
+        tauri_conf.contains("NanoClick"),
+        "tauri.conf.json must declare main window"
+    );
+    assert!(
+        tauri_conf.contains("\"windows\""),
+        "tauri.conf.json must declare windows"
+    );
+    assert!(
+        !tauri_conf.contains("overlay.html"),
+        "tauri.conf.json must NOT pre-create overlay (lazy via ensure_overlay_window)"
+    );
+    assert!(
+        !tauri_conf.contains("hud.html"),
+        "tauri.conf.json must NOT pre-create hud (lazy via ensure_hud_window)"
+    );
 
     let cap_default = include_str!("../capabilities/default.json");
-    assert!(cap_default.contains("\"overlay\""), "capabilities/default.json must include overlay window");
-    assert!(cap_default.contains("\"hud\""), "capabilities/default.json must include hud window");
+    assert!(
+        cap_default.contains("\"overlay\""),
+        "capabilities/default.json must include overlay window"
+    );
+    assert!(
+        cap_default.contains("\"hud\""),
+        "capabilities/default.json must include hud window"
+    );
 }
 
 /// Lazy-creation wiring: secondary WebViews must be built at runtime, never
@@ -299,45 +607,118 @@ fn test_overlay_assets_and_capabilities() {
 #[test]
 fn test_lazy_windows_built_at_runtime() {
     let overlay_src = include_str!("../src/overlay.rs");
-    assert!(overlay_src.contains("ensure_overlay_window"), "overlay.rs must expose ensure_overlay_window");
-    assert!(overlay_src.contains("WebviewWindowBuilder::new"), "overlay.rs must build overlay via WebviewWindowBuilder");
-    assert!(overlay_src.contains("overlay.html"), "overlay.rs must load overlay.html at runtime");
-    assert!(overlay_src.contains("win.destroy()") || overlay_src.contains("win.destroy"), "toggle_overlay(false) must destroy the WebView to free RAM");
+    assert!(
+        overlay_src.contains("ensure_overlay_window"),
+        "overlay.rs must expose ensure_overlay_window"
+    );
+    assert!(
+        overlay_src.contains("WebviewWindowBuilder::new"),
+        "overlay.rs must build overlay via WebviewWindowBuilder"
+    );
+    assert!(
+        overlay_src.contains("overlay.html"),
+        "overlay.rs must load overlay.html at runtime"
+    );
+    assert!(
+        overlay_src.contains("win.destroy()") || overlay_src.contains("win.destroy"),
+        "toggle_overlay(false) must destroy the WebView to free RAM"
+    );
 
     let lib_src = include_str!("../src/lib.rs");
-    assert!(lib_src.contains("ensure_hud_window"), "lib.rs must expose ensure_hud_window");
-    assert!(lib_src.contains("hud.html"), "lib.rs must load hud.html at runtime");
-    assert!(lib_src.contains("no WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"), "lib.rs must document why no extra browser flags are set");
+    assert!(
+        lib_src.contains("ensure_hud_window"),
+        "lib.rs must expose ensure_hud_window"
+    );
+    assert!(
+        lib_src.contains("hud.html"),
+        "lib.rs must load hud.html at runtime"
+    );
+    assert!(
+        lib_src.contains("no WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"),
+        "lib.rs must document why no extra browser flags are set"
+    );
 
     let sched_src = include_str!("../src/scheduler.rs");
-    assert!(sched_src.contains("ensure_overlay_window"), "scheduler must pre-create overlay on click-start (background thread)");
+    assert!(
+        sched_src.contains("ensure_satellite")
+            && sched_src.contains("\"overlay\""),
+        "scheduler must pre-create overlay on click-start (background thread, via the satellite facade)"
+    );
 }
 
 /// Last-Known-Good wiring: golden snapshots + quarantine + notice queues.
 #[test]
 fn test_last_good_black_box_wiring() {
     let defaults_src = include_str!("../src/defaults/mod.rs");
-    assert!(defaults_src.contains("config.last_good.json"), "must define LKG snapshot file name");
-    assert!(defaults_src.contains("refresh_last_good_snapshot"), "save path must refresh snapshot");
-    assert!(defaults_src.contains("load_last_good_snapshot"), "must restore LKG on corruption");
-    assert!(defaults_src.contains(".broken-"), "must quarantine broken file with timestamp");
-    assert!(defaults_src.contains("restored_from_last_good"), "must report LKG vs factory source");
+    assert!(
+        defaults_src.contains("config.last_good.json"),
+        "must define LKG snapshot file name"
+    );
+    assert!(
+        defaults_src.contains("refresh_last_good_snapshot"),
+        "save path must refresh snapshot"
+    );
+    assert!(
+        defaults_src.contains("load_last_good_snapshot"),
+        "must restore LKG on corruption"
+    );
+    assert!(
+        defaults_src.contains(".broken-"),
+        "must quarantine broken file with timestamp"
+    );
+    assert!(
+        defaults_src.contains("restored_from_last_good"),
+        "must report LKG vs factory source"
+    );
 
     let lib_src = include_str!("../src/lib.rs");
-    assert!(lib_src.contains("get_startup_notices"), "lib.rs must expose queue drain command");
-    assert!(lib_src.contains("poll_file_toasts"), "lib.rs must expose toast drain command");
-    assert!(lib_src.contains("startup_notices"), "AppState must carry notice queue");
-    assert!(lib_src.contains("file_toasts"), "AppState must carry toast queue");
-    assert!(lib_src.contains("WatcherState"), "save commands must mark own writes");
-    assert!(lib_src.contains("load_with_action"), "boot must capture healing action");
-    assert!(lib_src.contains("NoticeLevel"), "must define granular notice levels");
-    assert!(lib_src.contains("AppNotice"), "must define AppNotice payload");
+    assert!(
+        lib_src.contains("get_startup_notices"),
+        "lib.rs must expose queue drain command"
+    );
+    assert!(
+        lib_src.contains("poll_file_toasts"),
+        "lib.rs must expose toast drain command"
+    );
+    assert!(
+        lib_src.contains("startup_notices"),
+        "AppState must carry notice queue"
+    );
+    assert!(
+        lib_src.contains("file_toasts"),
+        "AppState must carry toast queue"
+    );
+    assert!(
+        lib_src.contains("WatcherState"),
+        "save commands must mark own writes"
+    );
+    assert!(
+        lib_src.contains("load_with_action"),
+        "boot must capture healing action"
+    );
+    assert!(
+        lib_src.contains("NoticeLevel"),
+        "must define granular notice levels"
+    );
+    assert!(
+        lib_src.contains("AppNotice"),
+        "must define AppNotice payload"
+    );
     assert!(lib_src.contains("Critical"), "critical level must exist");
-    assert!(lib_src.contains("macros_healing_notice"), "macros healing must feed the queue");
-    assert!(lib_src.contains("file_health_notice"), "watcher verdicts must feed toasts");
+    assert!(
+        lib_src.contains("macros_healing_notice"),
+        "macros healing must feed the queue"
+    );
+    assert!(
+        lib_src.contains("file_health_notice"),
+        "watcher verdicts must feed toasts"
+    );
 
     let cm_src = include_str!("../src/config_manager.rs");
-    assert!(cm_src.contains("load_with_action"), "ConfigManager must expose load_with_action");
+    assert!(
+        cm_src.contains("load_with_action"),
+        "ConfigManager must expose load_with_action"
+    );
 
     let main_js = {
         let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
@@ -345,13 +726,34 @@ fn test_last_good_black_box_wiring() {
         let bytes = ctx.assets().get(&key).expect("main.js must be embedded");
         String::from_utf8_lossy(&bytes).into_owned()
     };
-    assert!(main_js.contains("get_startup_notices"), "main.js must drain notice queue");
-    assert!(main_js.contains("poll_file_toasts"), "main.js must poll toast queue");
-    assert!(main_js.contains("showDeadboltQueue"), "main.js must chain queue in order");
-    assert!(main_js.contains("deadboltModal"), "main.js must build deadbolt modal");
-    assert!(main_js.contains("deadboltOk"), "modal must have mandatory OK button");
-    assert!(main_js.contains("resolveNoticeText"), "notices must resolve i18n keys");
-    assert!(main_js.contains("showFileToast"), "watcher verdicts must toast non-blocking");
+    assert!(
+        main_js.contains("get_startup_notices"),
+        "main.js must drain notice queue"
+    );
+    assert!(
+        main_js.contains("poll_file_toasts"),
+        "main.js must poll toast queue"
+    );
+    assert!(
+        main_js.contains("showDeadboltQueue"),
+        "main.js must chain queue in order"
+    );
+    assert!(
+        main_js.contains("deadboltModal"),
+        "main.js must build deadbolt modal"
+    );
+    assert!(
+        main_js.contains("deadboltOk"),
+        "modal must have mandatory OK button"
+    );
+    assert!(
+        main_js.contains("resolveNoticeText"),
+        "notices must resolve i18n keys"
+    );
+    assert!(
+        main_js.contains("showFileToast"),
+        "watcher verdicts must toast non-blocking"
+    );
 }
 
 /// Remember-window-position wiring: BEHAVIOR checkbox -> config fields ->
@@ -359,20 +761,50 @@ fn test_last_good_black_box_wiring() {
 #[test]
 fn test_remember_window_position_wiring() {
     let cm_src = include_str!("../src/config_manager.rs");
-    assert!(cm_src.contains("remember_window_position"), "UiSettings must carry remember flag");
-    assert!(cm_src.contains("window_x"), "UiSettings must carry window_x");
-    assert!(cm_src.contains("window_y"), "UiSettings must carry window_y");
+    assert!(
+        cm_src.contains("remember_window_position"),
+        "UiSettings must carry remember flag"
+    );
+    assert!(
+        cm_src.contains("window_x"),
+        "UiSettings must carry window_x"
+    );
+    assert!(
+        cm_src.contains("window_y"),
+        "UiSettings must carry window_y"
+    );
 
     let lib_src = include_str!("../src/lib.rs");
-    assert!(lib_src.contains("outer_position"), "save_app_config must capture outer_position");
-    assert!(lib_src.contains("remember_window_position"), "save/restore must respect the flag");
-    assert!(lib_src.contains("get_screen_size"), "boot restore must sanitize against virtual screen");
-    assert!(lib_src.contains("set_position"), "boot restore must set_position when inside screen");
-    assert!(lib_src.contains("win.center()") || lib_src.contains(".center()"), "off-screen save must fall back to center");
+    assert!(
+        lib_src.contains("outer_position"),
+        "save_app_config must capture outer_position"
+    );
+    assert!(
+        lib_src.contains("remember_window_position"),
+        "save/restore must respect the flag"
+    );
+    assert!(
+        lib_src.contains("get_screen_size"),
+        "boot restore must sanitize against virtual screen"
+    );
+    assert!(
+        lib_src.contains("set_position"),
+        "boot restore must set_position when inside screen"
+    );
+    assert!(
+        lib_src.contains("win.center()") || lib_src.contains(".center()"),
+        "off-screen save must fall back to center"
+    );
 
     let defaults_src = include_str!("../src/defaults/mod.rs");
-    assert!(defaults_src.contains("remember_window_position"), "repair must preserve the flag");
-    assert!(defaults_src.contains("window_x"), "repair must handle window_x");
+    assert!(
+        defaults_src.contains("remember_window_position"),
+        "repair must preserve the flag"
+    );
+    assert!(
+        defaults_src.contains("window_x"),
+        "repair must handle window_x"
+    );
 
     let html = {
         let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
@@ -380,8 +812,14 @@ fn test_remember_window_position_wiring() {
         let bytes = ctx.assets().get(&key).expect("index.html must be embedded");
         String::from_utf8_lossy(&bytes).into_owned()
     };
-    assert!(html.contains("rememberPosCheckbox"), "BEHAVIOR card must have the checkbox");
-    assert!(html.contains("settings_remember_pos"), "checkbox must use i18n key");
+    assert!(
+        html.contains("rememberPosCheckbox"),
+        "BEHAVIOR card must have the checkbox"
+    );
+    assert!(
+        html.contains("settings_remember_pos"),
+        "checkbox must use i18n key"
+    );
 
     let main_js = {
         let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
@@ -389,8 +827,14 @@ fn test_remember_window_position_wiring() {
         let bytes = ctx.assets().get(&key).expect("main.js must be embedded");
         String::from_utf8_lossy(&bytes).into_owned()
     };
-    assert!(main_js.contains("rememberPosCheckbox"), "main.js must hydrate/collect the checkbox");
-    assert!(main_js.contains("remember_window_position"), "main.js must sync the config field");
+    assert!(
+        main_js.contains("rememberPosCheckbox"),
+        "main.js must hydrate/collect the checkbox"
+    );
+    assert!(
+        main_js.contains("remember_window_position"),
+        "main.js must sync the config field"
+    );
 }
 
 /// Focus-loss auto-pause wiring: BEHAVIOR checkbox -> UiSettings/Config field
@@ -398,25 +842,55 @@ fn test_remember_window_position_wiring() {
 #[test]
 fn test_focus_loss_guard_wiring() {
     let cm_src = include_str!("../src/config_manager.rs");
-    assert!(cm_src.contains("pause_on_focus_loss"), "UiSettings must carry pause_on_focus_loss (default false)");
+    assert!(
+        cm_src.contains("pause_on_focus_loss"),
+        "UiSettings must carry pause_on_focus_loss (default false)"
+    );
 
     let cfg_src = include_str!("../src/config.rs");
-    assert!(cfg_src.contains("pause_on_focus_loss"), "runtime Config must map pause_on_focus_loss");
+    assert!(
+        cfg_src.contains("pause_on_focus_loss"),
+        "runtime Config must map pause_on_focus_loss"
+    );
 
     let sched_src = include_str!("../src/scheduler.rs");
-    assert!(sched_src.contains("pub struct FocusGuard"), "FocusGuard state machine must exist");
-    assert!(sched_src.contains("focus_guard_arc.arm("), "run start must arm the guard with the session exe");
-    assert!(sched_src.contains("focus_guard_arc.should_pause("), "click loop must poll the guard");
-    assert!(sched_src.contains("focus_guard_arc.disarm();"), "run end must disarm the session");
-    assert!(sched_src.contains("focus-loss-paused"), "pause must notify the UI");
+    assert!(
+        sched_src.contains("pub struct FocusGuard"),
+        "FocusGuard state machine must exist"
+    );
+    assert!(
+        sched_src.contains("focus_guard_arc.arm("),
+        "run start must arm the guard with the session exe"
+    );
+    assert!(
+        sched_src.contains("focus_guard_arc.should_pause("),
+        "click loop must poll the guard"
+    );
+    assert!(
+        sched_src.contains("focus_guard_arc.disarm();"),
+        "run end must disarm the session"
+    );
+    assert!(
+        sched_src.contains("focus-loss-paused"),
+        "pause must notify the UI"
+    );
     // Own-window contract: returning to NanoClick never pauses, leaving it
     // (even via Alt+Tab from our own window) stops. A plain config save
     // must not wipe a live session (stats flush every ~5 s while clicking).
-    assert!(sched_src.contains("is_own_exe"), "guard must exempt our own window");
-    assert!(sched_src.contains("own_exe_name"), "own exe must resolve from current_exe");
+    assert!(
+        sched_src.contains("is_own_exe"),
+        "guard must exempt our own window"
+    );
+    assert!(
+        sched_src.contains("own_exe_name"),
+        "own exe must resolve from current_exe"
+    );
 
     let plat_src = include_str!("../src/platform/mod.rs");
-    assert!(plat_src.contains("pub fn own_exe_name"), "platform must expose own_exe_name");
+    assert!(
+        plat_src.contains("pub fn own_exe_name"),
+        "platform must expose own_exe_name"
+    );
 
     let html = {
         let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
@@ -424,8 +898,14 @@ fn test_focus_loss_guard_wiring() {
         let bytes = ctx.assets().get(&key).expect("index.html must be embedded");
         String::from_utf8_lossy(&bytes).into_owned()
     };
-    assert!(html.contains("pauseFocusLossCheckbox"), "BEHAVIOR card must have the focus-loss checkbox");
-    assert!(html.contains("settings_pause_focus_loss"), "checkbox must use i18n key");
+    assert!(
+        html.contains("pauseFocusLossCheckbox"),
+        "BEHAVIOR card must have the focus-loss checkbox"
+    );
+    assert!(
+        html.contains("settings_pause_focus_loss"),
+        "checkbox must use i18n key"
+    );
 
     let main_js = {
         let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
@@ -433,8 +913,14 @@ fn test_focus_loss_guard_wiring() {
         let bytes = ctx.assets().get(&key).expect("main.js must be embedded");
         String::from_utf8_lossy(&bytes).into_owned()
     };
-    assert!(main_js.contains("pause_on_focus_loss"), "main.js must hydrate/collect the flag");
-    assert!(main_js.contains("focus-loss-paused"), "main.js must toast the auto-pause reason");
+    assert!(
+        main_js.contains("pause_on_focus_loss"),
+        "main.js must hydrate/collect the flag"
+    );
+    assert!(
+        main_js.contains("focus-loss-paused"),
+        "main.js must toast the auto-pause reason"
+    );
 
     // Typing-ms persistence: spinner `input` ticks (not just `change` on
     // blur/Enter) must reach the throttled save pipeline, or the value is
@@ -442,23 +928,50 @@ fn test_focus_loss_guard_wiring() {
     let guard_js = {
         let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
         let key = tauri::utils::assets::AssetKey::from("settings_guard.js");
-        let bytes = ctx.assets().get(&key).expect("settings_guard.js must be embedded");
+        let bytes = ctx
+            .assets()
+            .get(&key)
+            .expect("settings_guard.js must be embedded");
         String::from_utf8_lossy(&bytes).into_owned()
     };
-    assert!(guard_js.contains("typingFreezeInput"), "guard must wire the ms input");
-    assert!(guard_js.contains("typing_pause_ms"), "guard must sync the ms field");
-    assert!(guard_js.contains("\"input\""), "spinner ticks must save without blur");
+    assert!(
+        guard_js.contains("typingFreezeInput"),
+        "guard must wire the ms input"
+    );
+    assert!(
+        guard_js.contains("typing_pause_ms"),
+        "guard must sync the ms field"
+    );
+    assert!(
+        guard_js.contains("\"input\""),
+        "spinner ticks must save without blur"
+    );
 
     // Instant-stop watcher: a ~50 ms thread (direct lookup, no TTL cache)
     // wakes the sleeping click loop via the stop event; the emit stays
     // exactly-once (watcher vs loop claim).
     let guard_src = include_str!("../src/guard/mod.rs");
-    assert!(guard_src.contains("FOCUS_WATCH_MS"), "watch cadence must be named");
+    assert!(
+        guard_src.contains("FOCUS_WATCH_MS"),
+        "watch cadence must be named"
+    );
     let watch_src = include_str!("../src/guard/focus_watch.rs");
-    assert!(watch_src.contains("pub fn spawn_focus_watcher"), "watcher must exist");
-    assert!(watch_src.contains("pub struct FocusWatchStop"), "stop signal must exist");
-    assert!(sched_src.contains("spawn_focus_watcher"), "run must spawn watcher");
-    assert!(sched_src.contains("focus_watch_stop"), "loop must drain watcher");
+    assert!(
+        watch_src.contains("pub fn spawn_focus_watcher"),
+        "watcher must exist"
+    );
+    assert!(
+        watch_src.contains("pub struct FocusWatchStop"),
+        "stop signal must exist"
+    );
+    assert!(
+        sched_src.contains("spawn_focus_watcher"),
+        "run must spawn watcher"
+    );
+    assert!(
+        sched_src.contains("focus_watch_stop"),
+        "loop must drain watcher"
+    );
 }
 
 /// Background-memory guard wiring (v1.1.0).
@@ -621,11 +1134,15 @@ fn test_main_js_has_no_duplicate_top_level_declarations() {
 /// main.js` (script mode) and the whole test suite stayed green on a completely
 /// unusable build.
 ///
-/// Strategy: extract every `<script src="…">` from the embedded HTML, then
-/// syntax-check each file with Node using the SAME parse mode the browser will
-/// use — `.mjs` for `type="module"` scripts, `.js` for classic ones. This is
+/// Strategy: check EVERY embedded `*.js` with Node using the SAME parse mode
+/// the browser will use — `.mjs` for `type="module"` scripts (discovered via
+/// `<script src>` in the embedded HTML), `.js` for everything else, including
+/// files no html references yet (a broken-but-unreferenced file is a landmine
+/// for the next include). This is
 /// V8's own parser, so it catches everything the renderer would reject:
 /// duplicate declarations, reserved words, bad regex, unbalanced braces.
+///
+/// This mirrors `scripts/check-js-syntax.ps1` (same two passes, same modes).
 ///
 /// Node is mandatory. There is no GitHub Actions workflow in this repository
 /// (`.github/` holds only images), so the enforcement points are: this test,
@@ -646,23 +1163,33 @@ fn test_frontend_js_syntax_is_valid() {
     // ── 1. Discover the scripts and their parse mode from the HTML ──────
     let mut scripts: Vec<(String, bool)> = Vec::new(); // (file, is_module)
     for page in ["index.html", "hud.html", "overlay.html"] {
-        let Some(html) = read_asset(page) else { continue };
+        let Some(html) = read_asset(page) else {
+            continue;
+        };
         for tag in html.split("<script").skip(1) {
             let Some(end) = tag.find('>') else { continue };
             let attrs = &tag[..end];
-            let Some(src_at) = attrs.find("src=") else { continue };
+            let Some(src_at) = attrs.find("src=") else {
+                continue;
+            };
             let rest = attrs[src_at + 4..].trim_start();
             let Some(quote) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else {
                 continue;
             };
             let rest = &rest[quote.len_utf8()..];
-            let Some(close) = rest.find(quote) else { continue };
+            let Some(close) = rest.find(quote) else {
+                continue;
+            };
             let file = rest[..close].trim().to_string();
             if !file.ends_with(".js") {
                 continue;
             }
             let is_module = attrs.contains("type=\"module\"") || attrs.contains("type='module'");
-            if !scripts.iter().any(|(f, _)| *f == file) {
+            if let Some(slot) = scripts.iter_mut().find(|(f, _)| *f == file) {
+                // A file loaded as a module ANYWHERE is a module (strictest
+                // mode wins — a duplicate declaration is fatal there).
+                slot.1 |= is_module;
+            } else {
                 scripts.push((file, is_module));
             }
         }
@@ -671,6 +1198,26 @@ fn test_frontend_js_syntax_is_valid() {
         scripts.iter().any(|(f, _)| f == "main.js"),
         "index.html must load main.js — the discovery scan found: {scripts:?}"
     );
+    // ── 1b. Every embedded *.js joins the gate, referenced or not ───────
+    // A broken-but-unreferenced file is a landmine for the next include.
+    // `read_asset` returns None for non-embedded names (skipped here — the
+    // html pass above already fails a referenced-but-missing file).
+    for candidate in [
+        "main.js",
+        "boot_guard.js",
+        "hud.js",
+        "i18n.js",
+        "overlay.js",
+        "sequence_editor.js",
+        "settings_guard.js",
+        "sound_manager.js",
+        "stats.js",
+        "uipi_manager.js",
+    ] {
+        if !scripts.iter().any(|(f, _)| f == candidate) {
+            scripts.push((candidate.to_string(), false));
+        }
+    }
 
     // ── 2. Node availability ───────────────────────────────────────────
     let strict = std::env::var("NANOCLICK_JS_SYNTAX_STRICT")
@@ -698,12 +1245,18 @@ fn test_frontend_js_syntax_is_valid() {
     let mut failures: Vec<String> = Vec::new();
     for (file, is_module) in &scripts {
         let Some(source) = read_asset(file) else {
-            failures.push(format!("{file}: listed in HTML but NOT embedded in the build"));
+            failures.push(format!(
+                "{file}: listed in HTML but NOT embedded in the build"
+            ));
             continue;
         };
         // `.mjs` forces module mode; `.js` in a bare temp dir is a classic
         // script — exactly matching how the HTML loads each file.
-        let path = tmp_dir.join(format!("{}.{}", file.replace('/', "_"), if *is_module { "mjs" } else { "js" }));
+        let path = tmp_dir.join(format!(
+            "{}.{}",
+            file.replace('/', "_"),
+            if *is_module { "mjs" } else { "js" }
+        ));
         std::fs::write(&path, &source).expect("write temp script");
         let out = std::process::Command::new("node")
             .arg("--check")
@@ -748,7 +1301,8 @@ fn test_frontend_pages_load_boot_guard_before_modules() {
     };
 
     // ── 1. The guard is embedded and reports through the Rust log ──────────
-    let guard = read_asset("boot_guard.js").expect("boot_guard.js must be embedded in the frontend");
+    let guard =
+        read_asset("boot_guard.js").expect("boot_guard.js must be embedded in the frontend");
     for needle in [
         "__nanoclick_boot_guard_installed__",
         "__TAURI_INTERNALS__",
@@ -756,14 +1310,21 @@ fn test_frontend_pages_load_boot_guard_before_modules() {
         "debug_log",
         "nanoclick-boot-failure",
     ] {
-        assert!(guard.contains(needle), "boot_guard.js must contain `{needle}`");
+        assert!(
+            guard.contains(needle),
+            "boot_guard.js must contain `{needle}`"
+        );
     }
 
     // ── 2. Every page: classic guard tag, loaded before the first module ────
     let pages = [
         ("index.html", "__nanoclick_boot_ok__", "main.js"),
         ("hud.html", "__nanoclick_hud_boot_ok__", "hud.js"),
-        ("overlay.html", "__nanoclick_overlay_boot_ok__", "overlay.js"),
+        (
+            "overlay.html",
+            "__nanoclick_overlay_boot_ok__",
+            "overlay.js",
+        ),
     ];
     for (page, flag, page_script) in pages {
         let html = read_asset(page).unwrap_or_else(|| panic!("{page} must be embedded"));
@@ -791,7 +1352,8 @@ fn test_frontend_pages_load_boot_guard_before_modules() {
                 "{page}: boot_guard.js must be loaded BEFORE the first module script"
             );
         }
-        let page_src = read_asset(page_script).unwrap_or_else(|| panic!("{page_script} must be embedded"));
+        let page_src =
+            read_asset(page_script).unwrap_or_else(|| panic!("{page_script} must be embedded"));
         assert!(
             page_src.contains(flag),
             "{page_script} must raise the boot flag `{flag}` — otherwise the watchdog fires on a healthy boot"
@@ -920,7 +1482,10 @@ fn test_boot_guard_behaviour_on_node() {
     let guard = {
         let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
         let key = tauri::utils::assets::AssetKey::from("boot_guard.js");
-        let bytes = ctx.assets().get(&key).expect("boot_guard.js must be embedded");
+        let bytes = ctx
+            .assets()
+            .get(&key)
+            .expect("boot_guard.js must be embedded");
         String::from_utf8_lossy(&bytes).into_owned()
     };
 
@@ -946,18 +1511,49 @@ fn test_boot_guard_behaviour_on_node() {
 
     // ── dead module: the watchdog must fire ───────────────────────────────
     let dead = run("dead");
-    assert_eq!(dead["guardInstalled"], serde_json::Value::Bool(true), "guard must install itself: {dead}");
-    assert_eq!(dead["bootReports"], 1, "a missing handshake must be reported exactly once: {dead}");
-    assert_eq!(dead["banner"], serde_json::Value::Bool(true), "a dead module must show the banner: {dead}");
-    assert_eq!(dead["crashReports"], 1, "the same crash fired twice must be deduped: {dead}");
-    assert_eq!(dead["resourceReports"], 1, "a 404 script must be reported: {dead}");
-    assert_eq!(dead["rejectReports"], 1, "an unhandled rejection must be reported: {dead}");
-    assert_eq!(dead["levels"], serde_json::json!(["error"]), "every report must be level \"error\": {dead}");
+    assert_eq!(
+        dead["guardInstalled"],
+        serde_json::Value::Bool(true),
+        "guard must install itself: {dead}"
+    );
+    assert_eq!(
+        dead["bootReports"], 1,
+        "a missing handshake must be reported exactly once: {dead}"
+    );
+    assert_eq!(
+        dead["banner"],
+        serde_json::Value::Bool(true),
+        "a dead module must show the banner: {dead}"
+    );
+    assert_eq!(
+        dead["crashReports"], 1,
+        "the same crash fired twice must be deduped: {dead}"
+    );
+    assert_eq!(
+        dead["resourceReports"], 1,
+        "a 404 script must be reported: {dead}"
+    );
+    assert_eq!(
+        dead["rejectReports"], 1,
+        "an unhandled rejection must be reported: {dead}"
+    );
+    assert_eq!(
+        dead["levels"],
+        serde_json::json!(["error"]),
+        "every report must be level \"error\": {dead}"
+    );
 
     // ── healthy boot: no false alarm ──────────────────────────────────────
     let healthy = run("healthy");
-    assert_eq!(healthy["bootReports"], 0, "a healthy boot must not trip the watchdog: {healthy}");
-    assert_eq!(healthy["banner"], serde_json::Value::Bool(false), "no banner on a healthy boot: {healthy}");
+    assert_eq!(
+        healthy["bootReports"], 0,
+        "a healthy boot must not trip the watchdog: {healthy}"
+    );
+    assert_eq!(
+        healthy["banner"],
+        serde_json::Value::Bool(false),
+        "no banner on a healthy boot: {healthy}"
+    );
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
@@ -1094,7 +1690,8 @@ fn test_theme_null_guards_on_node() {
         String::from_utf8_lossy(&bytes).into_owned()
     };
 
-    let tmp_dir = std::env::temp_dir().join(format!("nanoclick_theme_guard_{}", std::process::id()));
+    let tmp_dir =
+        std::env::temp_dir().join(format!("nanoclick_theme_guard_{}", std::process::id()));
     std::fs::create_dir_all(&tmp_dir).expect("temp dir for the theme-guard harness");
     std::fs::write(tmp_dir.join("main.js"), &main_js).expect("write main.js copy");
     std::fs::write(tmp_dir.join("harness.js"), THEME_GUARD_HARNESS).expect("write the harness");
@@ -1111,9 +1708,21 @@ fn test_theme_null_guards_on_node() {
     let verdict: serde_json::Value =
         serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim())
             .unwrap_or_else(|e| panic!("harness must print one JSON line: {e}"));
-    assert_eq!(verdict["applyThemeFound"], serde_json::Value::Bool(true), "applyTheme must exist: {verdict}");
-    assert_eq!(verdict["swatchFound"], serde_json::Value::Bool(true), "updateSwatchActiveState must exist: {verdict}");
-    assert_eq!(verdict["crashes"], serde_json::json!([]), "null-guard inputs must never throw: {verdict}");
+    assert_eq!(
+        verdict["applyThemeFound"],
+        serde_json::Value::Bool(true),
+        "applyTheme must exist: {verdict}"
+    );
+    assert_eq!(
+        verdict["swatchFound"],
+        serde_json::Value::Bool(true),
+        "updateSwatchActiveState must exist: {verdict}"
+    );
+    assert_eq!(
+        verdict["crashes"],
+        serde_json::json!([]),
+        "null-guard inputs must never throw: {verdict}"
+    );
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
@@ -1148,11 +1757,17 @@ fn test_notice_i18n_symmetry() {
         let asset = format!("locales/{locale}.json");
         let key = tauri::utils::assets::AssetKey::from(asset.as_str());
         let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
-        let bytes = ctx.assets().get(&key).unwrap_or_else(|| panic!("{locale}.json must be embedded"));
+        let bytes = ctx
+            .assets()
+            .get(&key)
+            .unwrap_or_else(|| panic!("{locale}.json must be embedded"));
         let text = String::from_utf8_lossy(&bytes);
         let v: serde_json::Value = serde_json::from_str(&text).expect("locale must be valid JSON");
         for k in keys {
-            assert!(v.get(k).is_some_and(|x| x.is_string()), "locale {locale} missing notice key {k}");
+            assert!(
+                v.get(k).is_some_and(|x| x.is_string()),
+                "locale {locale} missing notice key {k}"
+            );
         }
     }
 }
@@ -1197,7 +1812,10 @@ fn test_tauri_common_controls_v6_stays_disabled() {
         }
     }
 
-    assert!(inside, "the `tauri = {{ ... }}` dependency block must exist");
+    assert!(
+        inside,
+        "the `tauri = {{ ... }}` dependency block must exist"
+    );
     assert!(
         dep.contains("default-features = false"),
         "`tauri` must opt out of its default features — that set enables common-controls-v6"
@@ -1329,7 +1947,9 @@ fn test_native_tray_and_lifetime_wiring() {
 #[test]
 fn test_deep_sleep_and_frontend_watchdog_wiring() {
     fn section<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
-        let from = src.find(start).unwrap_or_else(|| panic!("`{start}` not found"));
+        let from = src
+            .find(start)
+            .unwrap_or_else(|| panic!("`{start}` not found"));
         match src[from..].find(end) {
             Some(i) => &src[from..from + i],
             None => &src[from..],
@@ -1441,7 +2061,7 @@ fn test_deep_sleep_and_frontend_watchdog_wiring() {
     for locale in ["ua.json", "en.json"] {
         let dict = match locale {
             "ua.json" => include_str!("../../src/locales/ua.json"),
-                        _ => include_str!("../../src/locales/en.json"),
+            _ => include_str!("../../src/locales/en.json"),
         };
         assert!(
             dict.contains("settings_tray_life"),
@@ -1473,7 +2093,9 @@ fn test_deep_sleep_and_frontend_watchdog_wiring() {
 #[test]
 fn test_tray_ui_state_sync_wiring() {
     fn section<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
-        let from = src.find(start).unwrap_or_else(|| panic!("`{start}` not found"));
+        let from = src
+            .find(start)
+            .unwrap_or_else(|| panic!("`{start}` not found"));
         match src[from..].find(end) {
             Some(i) => &src[from..from + i],
             None => &src[from..],
@@ -1581,7 +2203,7 @@ fn test_tray_ui_state_sync_wiring() {
     for locale in ["ua.json", "en.json"] {
         let dict = match locale {
             "ua.json" => include_str!("../../src/locales/ua.json"),
-                        _ => include_str!("../../src/locales/en.json"),
+            _ => include_str!("../../src/locales/en.json"),
         };
         assert!(
             dict.contains("tray_blocked_work_mode") && dict.contains("tray_blocked_typing"),
@@ -1651,7 +2273,9 @@ fn test_tray_mode_menu_and_persisted_mode_switch() {
 #[test]
 fn test_tray_hardening_and_input_diagnostics_wiring() {
     fn section<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
-        let from = src.find(start).unwrap_or_else(|| panic!("`{start}` not found"));
+        let from = src
+            .find(start)
+            .unwrap_or_else(|| panic!("`{start}` not found"));
         match src[from..].find(end) {
             Some(i) => &src[from..from + i],
             None => &src[from..],
@@ -1676,19 +2300,28 @@ fn test_tray_hardening_and_input_diagnostics_wiring() {
     );
 
     // ── F2: HUD/overlay must not linger on screen ───────────────────────────
+    // Ghost-killer: tray paths DESTROY satellites (hide() leaves WebView2
+    // helpers alive + a stray show() resurrects the ghost).
     assert!(
-        lib_src.contains("fn hide_secondary_windows") && lib_src.contains("fn show_secondary_windows"),
-        "the secondary windows must follow the main window into and out of the tray (F2)"
+        lib_src.contains("fn destroy_secondary_windows")
+            && lib_src.contains("fn show_secondary_windows"),
+        "the secondary windows must die with the main window into the tray and rebuild on restore (F2)"
     );
     assert!(
-        lib_src.contains("hide_secondary_windows(&app_handle)"),
-        "the close/hide path must use it"
+        lib_src.contains("destroy_secondary_windows(&app_handle)"),
+        "the close/hide path must destroy them"
     );
 
     // ── F3: remember the window SIZE, not just the position ─────────────────
     for needle in ["window_w", "window_h"] {
-        assert!(cm_src.contains(needle), "UiSettings must carry {needle} (F3)");
-        assert!(defaults_src.contains(needle), "the repair must handle {needle}");
+        assert!(
+            cm_src.contains(needle),
+            "UiSettings must carry {needle} (F3)"
+        );
+        assert!(
+            defaults_src.contains(needle),
+            "the repair must handle {needle}"
+        );
     }
     assert!(
         lib_src.contains("inner_size()") && lib_src.contains("set_size("),
@@ -1701,6 +2334,115 @@ fn test_tray_hardening_and_input_diagnostics_wiring() {
         "the Open path must claim the foreground, or set_focus() is dropped (F5)"
     );
 
+    // ── F6: the tray owns no satellite state of its own ────────────────────
+    // `toggle_hud_from_tray` goes through the same facade as the checkbox
+    // (`toggle_hud_window` → F6 gate + bulkhead + rollback) and never drops
+    // the result: busy/deferred is reported, not painted over.
+    let tray_hud = section(
+        lib_src,
+        "pub(crate) fn toggle_hud_from_tray",
+        "/// Flip Work / Autoclicker mode",
+    );
+    assert!(
+        tray_hud.contains("toggle_hud_window(app.clone(), show)"),
+        "the tray HUD path must go through the facade toggle, not a direct build"
+    );
+    assert!(
+        tray_hud.contains("emit_satellite_toggle_result(app, \"hud\", false, \"busy\")"),
+        "a refused tray toggle must lock the page checkbox via satellite-toggle-result"
+    );
+    assert!(
+        !tray_hud.contains("let applied = main_window_visible"),
+        "no second visibility predicate in the tray (the F6 gate lives inside the toggle)"
+    );
+    assert!(
+        tray_src.contains("MENU_ID_TOGGLE_HUD, super::check_flags(hud)"),
+        "the tray menu must show the live HUD check mark, not a blind item"
+    );
+    assert!(
+        lib_src.contains("fn tray_hud_visible"),
+        "the HUD menu state needs one reader (persisted config, main thread)"
+    );
+    // ── F7: the 5 config writers share one bulkhead ──────────────────────
+    // save_app_config, reset-to-defaults, tray HUD toggle, tray mode
+    // toggle, visibility stamp: every load→save window goes through
+    // stability::config_node, or parallel saves last-write-wins.
+    // (Start markers are fn signatures; the end search begins AFTER the
+    // marker itself, or a bare `fn ...` marker would self-match.)
+    for fun in [
+        "fn save_app_config(",
+        "fn reset_config_to_defaults(",
+        "pub(crate) fn toggle_hud_from_tray(",
+        "pub(crate) fn apply_mode_toggle(",
+        "fn persist_window_visibility(",
+    ] {
+        let from = lib_src.find(fun).unwrap_or_else(|| panic!("{fun} moved"));
+        let tail = &lib_src[from + fun.len()..];
+        let end = tail
+            .find("\nfn ")
+            .map(|i| from + fun.len() + i)
+            .unwrap_or(lib_src.len());
+        let body = &lib_src[from..end];
+        assert!(
+            body.contains("stability::config_node()"),
+            "config writer {fun} must take the config bulkhead"
+        );
+        // Admission gate: `scoped()` owns the guard lifecycle (commit on Ok,
+        // explicit abort on Err), so `?` inside its closure cannot leak an
+        // implicit drop. A bare `?` OUTSIDE `scoped()` — after a manual
+        // `enter_auto()` — drops the guard without settle and feeds the
+        // ImplicitDrop streak (measured 2026-10-14, root cause of the
+        // "ripple toggle breaks the backend" bug).
+        // Rule: manual `enter_auto()` paths must settle every exit with
+        // `commit()`/`abort()`; `scoped()` paths satisfy this by construction.
+        // This check finds manual guards and verifies each settles.
+        let uses_scoped = body.contains("node.scoped(") || body.contains(".scoped(");
+        let after_enter = body.find("enter_auto").map(|i| &body[i..]).unwrap_or("");
+        // Count `?` usage on fallible calls (exclude `?` inside strings/comments heuristically)
+        let has_bare_question = after_enter.contains(")?") || after_enter.contains(")?;");
+        if has_bare_question && !uses_scoped {
+            assert!(
+                body.contains("config_guard.abort(") || body.contains(".abort(\""),
+                "config writer {fun} uses `?` after taking config_guard but has no \
+                 explicit config_guard.abort() call — any early exit via `?` causes \
+                 ImplicitDrop which accumulates into BulkheadFull and freezes saves. \
+                 Settle the guard explicitly, or migrate the writer to node.scoped()"
+            );
+        }
+        // Bulkhead-hold guard (measured 2026-10-14, log BulkheadFull on
+        // save→update-check→deep-sleep): window side-effects (overlay/HUD
+        // toggles, emits) must run AFTER the scope commits, never while
+        // the bulkhead is held. A slow WebView create under the guard turns
+        // the next save into BulkheadFull.
+        // `scoped()` writers satisfy this structurally: toggles live after
+        // the `match outcome` that unpacks the committed scope.
+        if fun != "fn persist_window_visibility("
+            && (body.contains("toggle_overlay") || body.contains("toggle_hud_window"))
+        {
+            let uses_scoped = body.contains("node.scoped(") || body.contains(".scoped(");
+            if uses_scoped {
+                let scope_end = body.find("match outcome").unwrap_or_else(|| {
+                    panic!("config writer {fun} uses scoped() but never unpacks its outcome")
+                });
+                let tail_after_scope = &body[scope_end..];
+                assert!(
+                    tail_after_scope.contains("toggle_overlay")
+                        || tail_after_scope.contains("toggle_hud_window"),
+                    "config writer {fun} must toggle overlay/HUD AFTER the scoped outcome"
+                );
+            } else {
+                let commit_pos = body.find("config_guard.commit()").unwrap_or_else(|| {
+                    panic!("config writer {fun} touches windows but never commits the guard")
+                });
+                let tail_after_commit = &body[commit_pos..];
+                assert!(
+                    tail_after_commit.contains("toggle_overlay")
+                        || tail_after_commit.contains("toggle_hud_window"),
+                    "config writer {fun} must commit config_guard BEFORE overlay/HUD toggles"
+                );
+            }
+        }
+    }
     // ── Tray: live state, balloon feedback, reload/restart ──────────────────
     assert!(
         tray_src.contains("clicking_item_flags") && tray_src.contains("tip_text"),
@@ -1719,7 +2461,8 @@ fn test_tray_hardening_and_input_diagnostics_wiring() {
         "the menu needs Reload interface + Restart app"
     );
     assert!(
-        lib_src.contains("fn reload_interface_from_tray") && lib_src.contains("fn restart_app_from_tray"),
+        lib_src.contains("fn reload_interface_from_tray")
+            && lib_src.contains("fn restart_app_from_tray"),
         "both new menu actions must exist"
     );
     // The reload decision must stay a pure, single-sourced function (no inline
@@ -1730,6 +2473,21 @@ fn test_tray_hardening_and_input_diagnostics_wiring() {
         lib_src.contains("fn reload_strategy")
             && lib_src.contains("reload_strategy(app.get_webview_window(\"main\").is_some())"),
         "the reload branch decision must be pure and used by the handler"
+    );
+    // Ghost-killer: tray paths must DESTROY satellites, never hide them.
+    // hide() leaves the WebView2 helpers alive (~120 MB) and a stray show()
+    // resurrects the ghost. Restore rebuilds from the saved preference.
+    assert!(
+        lib_src.contains("fn destroy_secondary_windows"),
+        "ghost-killer `destroy_secondary_windows` must exist"
+    );
+    assert!(
+        !lib_src.contains("fn hide_secondary_windows"),
+        "dead `hide_secondary_windows` must be gone (destroy, not hide)"
+    );
+    assert!(
+        !lib_src.contains("hide_secondary_windows(&"),
+        "no tray path may hide satellites — destroy them"
     );
     let restart = section(
         lib_src,
@@ -1742,7 +2500,8 @@ fn test_tray_hardening_and_input_diagnostics_wiring() {
         "the shutdown latch must be set before restart()"
     );
     assert!(
-        restart.find("stop_tray()").unwrap_or(usize::MAX) < restart.find("app.restart()").unwrap_or(0),
+        restart.find("stop_tray()").unwrap_or(usize::MAX)
+            < restart.find("app.restart()").unwrap_or(0),
         "the tray icon must be removed before the process image changes"
     );
 
@@ -1769,15 +2528,15 @@ fn test_tray_hardening_and_input_diagnostics_wiring() {
     };
     let html = include_str!("../../src/index.html");
     assert!(
-        main_js.contains("dumpInputDiagBtn") && main_js.contains("invoke(\"dump_input_diagnostics\")"),
+        main_js.contains("dumpInputDiagBtn")
+            && main_js.contains("invoke(\"dump_input_diagnostics\")"),
         "main.js must offer the diagnostics dump"
     );
     // A freshly recorded binding that shares its firing trigger with another
     // action must say so: the field config proved one press can silently fire
     // two actions (toggle="1" + mode_switch="*+1").
     assert!(
-        main_js.contains("hotkeyTriggerOf")
-            && main_js.contains("shares its trigger with"),
+        main_js.contains("hotkeyTriggerOf") && main_js.contains("shares its trigger with"),
         "the recorder must warn when a new binding shares its trigger with another action"
     );
     assert!(
@@ -1805,7 +2564,7 @@ fn test_tray_hardening_and_input_diagnostics_wiring() {
     for locale in ["ua.json", "en.json"] {
         let dict = match locale {
             "ua.json" => include_str!("../../src/locales/ua.json"),
-                        _ => include_str!("../../src/locales/en.json"),
+            _ => include_str!("../../src/locales/en.json"),
         };
         for key in [
             "settings_tray_life",
@@ -1912,7 +2671,8 @@ fn test_tauri_config_is_valid_json_and_version_matches() {
 #[test]
 fn test_tauri_identifier_avoids_the_bundle_extension_suffix() {
     let raw = include_str!("../tauri.conf.json");
-    let cfg: serde_json::Value = serde_json::from_str(raw).expect("tauri.conf.json must be valid JSON");
+    let cfg: serde_json::Value =
+        serde_json::from_str(raw).expect("tauri.conf.json must be valid JSON");
     let identifier = cfg["identifier"]
         .as_str()
         .expect("tauri.conf.json must carry a string `identifier`");
@@ -2066,7 +2826,7 @@ fn test_auto_stop_timer_has_one_owner() {
     for locale in ["ua.json", "en.json"] {
         let dict = match locale {
             "ua.json" => include_str!("../../src/locales/ua.json"),
-                        _ => include_str!("../../src/locales/en.json"),
+            _ => include_str!("../../src/locales/en.json"),
         };
         for key in [
             "unit_dur_ms_short",
@@ -2172,7 +2932,9 @@ fn test_auto_stop_mode_is_the_single_armed_trigger() {
             .find(fname)
             .unwrap_or_else(|| panic!("{fname} must exist"));
         let body = &norm[start..];
-        let end = body.find("\n}\n").expect("a paint helper must be a function");
+        let end = body
+            .find("\n}\n")
+            .expect("a paint helper must be a function");
         let body = &body[..end];
         assert!(
             !body.contains("disabled") && !body.contains("pointerEvents"),
@@ -2259,7 +3021,9 @@ fn test_biometric_outlier_and_technique_wiring() {
         "the hesitation must be a pure helper so rate/shape is unit-testable"
     );
     assert!(
-        sched_src.contains("interval_ns = outlier_interval_ns(&mut rng, base_ns, interval_ns, outlier_prob)"),
+        sched_src.contains(
+            "interval_ns = outlier_interval_ns(&mut rng, base_ns, interval_ns, outlier_prob)"
+        ),
         "the outlier applies AFTER Bates on the computed interval"
     );
     assert!(
@@ -2288,7 +3052,12 @@ fn test_biometric_outlier_and_technique_wiring() {
     // + pinned mode + current locale) — it must NOT carry a static data-i18n
     // key, or applyTranslations() overwrites the dynamic text and freezes the
     // badge after any locale switch (see the language-changed repaint below).
-    for id in ["techniqueBadge", "techniqueMenu", "outlierRange", "outlierInput"] {
+    for id in [
+        "techniqueBadge",
+        "techniqueMenu",
+        "outlierRange",
+        "outlierInput",
+    ] {
         assert!(html.contains(id), "dashboard needs `{id}`");
     }
     assert!(
@@ -2330,7 +3099,7 @@ fn test_biometric_outlier_and_technique_wiring() {
     for locale in ["ua.json", "en.json"] {
         let dict = match locale {
             "ua.json" => include_str!("../../src/locales/ua.json"),
-                        _ => include_str!("../../src/locales/en.json"),
+            _ => include_str!("../../src/locales/en.json"),
         };
         for key in [
             "dash_outlier_prob",
@@ -2377,8 +3146,10 @@ fn test_preset_scope_model_matches_backend_and_frontend() {
             && cm_src.contains("#[serde(default = \"default_preset_scope\")]"),
         "a preset from an older build must deserialize as engine-only, not as an empty snapshot"
     );
-    assert!(main_js.contains("engine: src.engine !== false,"),
-        "the page's scope normalizer must default `engine` to ON, like PresetScope::default()");
+    assert!(
+        main_js.contains("engine: src.engine !== false,"),
+        "the page's scope normalizer must default `engine` to ON, like PresetScope::default()"
+    );
     for key in ["guards", "hotkeys", "ui"] {
         assert!(
             main_js.contains(&format!("{key}: !!src.{key},")),
@@ -2387,8 +3158,14 @@ fn test_preset_scope_model_matches_backend_and_frontend() {
     }
     for (snapshot, field) in [
         ("GuardSnapshot", "pub guard_settings: Option<GuardSnapshot>"),
-        ("HotkeySnapshot", "pub hotkey_settings: Option<HotkeySnapshot>"),
-        ("PresetUiSnapshot", "pub ui_settings: Option<PresetUiSnapshot>"),
+        (
+            "HotkeySnapshot",
+            "pub hotkey_settings: Option<HotkeySnapshot>",
+        ),
+        (
+            "PresetUiSnapshot",
+            "pub ui_settings: Option<PresetUiSnapshot>",
+        ),
     ] {
         assert!(
             cm_src.contains(&format!("pub struct {snapshot}")),
@@ -2421,8 +3198,16 @@ fn test_preset_scope_model_matches_backend_and_frontend() {
     );
 
     // The modal must offer the four checkboxes; engine is pinned ON.
-    for id in ["presetScopeEngine", "presetScopeGuards", "presetScopeHotkeys", "presetScopeUi"] {
-        assert!(html.contains(&format!("id=\"{id}\"")), "the scope panel needs #{id}");
+    for id in [
+        "presetScopeEngine",
+        "presetScopeGuards",
+        "presetScopeHotkeys",
+        "presetScopeUi",
+    ] {
+        assert!(
+            html.contains(&format!("id=\"{id}\"")),
+            "the scope panel needs #{id}"
+        );
     }
     assert!(
         html.contains("id=\"presetScopeEngine\" class=\"custom-checkbox\" checked disabled"),
@@ -2468,7 +3253,10 @@ fn test_preset_editor_limits_match_dashboard() {
         "clickLimitMax: 1000000",
         "holdDurationMin: 10",
     ] {
-        assert!(main_js.contains(literal), "PRESET_LIMITS must carry `{literal}`");
+        assert!(
+            main_js.contains(literal),
+            "PRESET_LIMITS must carry `{literal}`"
+        );
     }
     // The DOM must agree with the constants, or the browser clamps silently.
     assert!(
@@ -2488,8 +3276,16 @@ fn test_preset_editor_limits_match_dashboard() {
         "hold pause must match the dashboard floor (10 ms)"
     );
     // The engine fields that were missing from the modal entirely.
-    for id in ["presetHesitation", "presetJitterRadius", "presetTechniqueSelect", "presetGuiLock"] {
-        assert!(html.contains(&format!("id=\"{id}\"")), "the modal must expose #{id}");
+    for id in [
+        "presetHesitation",
+        "presetJitterRadius",
+        "presetTechniqueSelect",
+        "presetGuiLock",
+    ] {
+        assert!(
+            html.contains(&format!("id=\"{id}\"")),
+            "the modal must expose #{id}"
+        );
     }
     // …and the narrow import clamps must be gone for good.
     assert!(
@@ -2502,8 +3298,6 @@ fn test_preset_editor_limits_match_dashboard() {
         "one normalizer must gate every preset entry point (load, edit, import, apply)"
     );
 }
-
-
 
 /// A preset must never capture or rebind the nine preset SLOTS: a slot maps to a
 /// preset id, so storing the slots inside a preset is recursive — a preset could
@@ -2576,10 +3370,7 @@ fn test_preset_field_coverage_matches_engine_settings() {
         // Skip the declaration line itself: slicing from `pub struct …` would make
         // the FIRST extracted "field" the literal `struct EngineSettings {`.
         let decl = "pub struct EngineSettings {";
-        let start = cm_src
-            .find(decl)
-            .expect("EngineSettings must exist")
-            + decl.len();
+        let start = cm_src.find(decl).expect("EngineSettings must exist") + decl.len();
         let rest = &cm_src[start..];
         let end = rest.find("\n}").expect("EngineSettings must be a struct");
         &rest[..end]
@@ -2595,10 +3386,7 @@ fn test_preset_field_coverage_matches_engine_settings() {
     // missing field further down.
     for field in &fields {
         assert!(
-            !field.is_empty()
-                && field
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_'),
+            !field.is_empty() && field.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
             "field extraction produced `{field}`, which is not an identifier — \
              the slice still contains something other than field declarations"
         );
@@ -2612,10 +3400,22 @@ fn test_preset_field_coverage_matches_engine_settings() {
     // Engine fields NOT copied 1:1 by the engine group, each with its reason.
     // Keep this list honest: it is what would otherwise let a field slip in.
     let exemptions = [
-        ("stop_duration_unit", "display-only; the preset has its own field"),
-        ("stop_duration_min", "pre-1.3 migration input, handled explicitly in both paths"),
-        ("sequence_points", "carried as `PresetItem::points` (the multi-point canvas)"),
-        ("hotkey_debounce_ms", "belongs to the hotkeys group (HotkeySnapshot)"),
+        (
+            "stop_duration_unit",
+            "display-only; the preset has its own field",
+        ),
+        (
+            "stop_duration_min",
+            "pre-1.3 migration input, handled explicitly in both paths",
+        ),
+        (
+            "sequence_points",
+            "carried as `PresetItem::points` (the multi-point canvas)",
+        ),
+        (
+            "hotkey_debounce_ms",
+            "belongs to the hotkeys group (HotkeySnapshot)",
+        ),
     ];
 
     let sched_engine = &sched_src[sched_src
@@ -2661,15 +3461,28 @@ fn test_preset_field_coverage_matches_engine_settings() {
     );
 
     // The group snapshots must cover their own settings too.
-    for field in ["typing_pause_ms", "pause_on_focus_loss", "app_filter_mode", "app_filter_list"] {
+    for field in [
+        "typing_pause_ms",
+        "pause_on_focus_loss",
+        "app_filter_mode",
+        "app_filter_list",
+    ] {
         assert!(
             cm_src.contains(&format!("pub {field}")),
             "GuardSnapshot must carry `{field}`"
         );
     }
     for field in [
-        "toggle", "mode_switch", "emergency_stop", "speed_up", "slow_down",
-        "capture_pos", "record_toggle", "record_hotkey", "key_ttl_ms", "smart_record",
+        "toggle",
+        "mode_switch",
+        "emergency_stop",
+        "speed_up",
+        "slow_down",
+        "capture_pos",
+        "record_toggle",
+        "record_hotkey",
+        "key_ttl_ms",
+        "smart_record",
     ] {
         assert!(
             cm_src.contains(&format!("pub {field}")),
@@ -2677,7 +3490,11 @@ fn test_preset_field_coverage_matches_engine_settings() {
         );
     }
     for field in [
-        "accent_color", "always_on_top", "visual_ripple", "show_hud", "show_notifications",
+        "accent_color",
+        "always_on_top",
+        "visual_ripple",
+        "show_hud",
+        "show_notifications",
     ] {
         assert!(
             cm_src.contains(&format!("pub {field}")),
@@ -2732,7 +3549,6 @@ fn test_preset_scope_sections_are_painted_not_hidden() {
         "a scope section is collapsed, never `hidden` — the inherited value must stay visible"
     );
 }
-
 
 /// A truncated asset blob is reported as a MISSING asset, and no rebuild heals it.
 ///
@@ -2794,7 +3610,9 @@ fn test_embedded_asset_blobs_are_not_truncated() {
 #[test]
 fn test_remember_window_state_wiring() {
     fn section<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
-        let from = src.find(start).unwrap_or_else(|| panic!("`{start}` not found"));
+        let from = src
+            .find(start)
+            .unwrap_or_else(|| panic!("`{start}` not found"));
         match src[from..].find(end) {
             Some(i) => &src[from..from + i],
             None => &src[from..],
@@ -2815,7 +3633,10 @@ fn test_remember_window_state_wiring() {
     }
     let factory = include_str!("../src/defaults/default_config.json");
     for key in ["remember_last_window_state", "window_was_visible"] {
-        assert!(factory.contains(key), "the factory default must contain `{key}`");
+        assert!(
+            factory.contains(key),
+            "the factory default must contain `{key}`"
+        );
     }
 
     let lib_src = include_str!("../src/lib.rs");
@@ -2881,7 +3702,11 @@ fn test_remember_window_state_wiring() {
         "the page must never write the backend-owned visibility flag"
     );
     // The overridden row is painted, never disabled (AGENTS.md §2.13).
-    let painter = section(&main_js, "function paintRememberStateLock", "if (startMinimizedCheckbox)");
+    let painter = section(
+        &main_js,
+        "function paintRememberStateLock",
+        "if (startMinimizedCheckbox)",
+    );
     assert!(
         painter.contains("timer-option--locked")
             && !painter.contains("disabled")
@@ -2891,7 +3716,7 @@ fn test_remember_window_state_wiring() {
     for locale in ["ua.json", "en.json"] {
         let dict = match locale {
             "ua.json" => include_str!("../../src/locales/ua.json"),
-                        _ => include_str!("../../src/locales/en.json"),
+            _ => include_str!("../../src/locales/en.json"),
         };
         for key in ["settings_remember_state", "settings_remember_state_tip"] {
             assert!(dict.contains(key), "{locale} must translate {key}");
@@ -2908,7 +3733,9 @@ fn test_remember_window_state_wiring() {
 #[test]
 fn test_secondary_windows_never_outlive_the_main_window() {
     fn section<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
-        let from = src.find(start).unwrap_or_else(|| panic!("`{start}` not found"));
+        let from = src
+            .find(start)
+            .unwrap_or_else(|| panic!("`{start}` not found"));
         match src[from..].find(end) {
             Some(i) => &src[from..from + i],
             None => &src[from..],
@@ -2932,7 +3759,11 @@ fn test_secondary_windows_never_outlive_the_main_window() {
         toggle_hud.contains("main_window_visible"),
         "toggle_hud_window must not create a standalone HUD"
     );
-    let show_secondary = section(lib_src, "fn show_secondary_windows", "fn should_minimize_to_tray");
+    let show_secondary = section(
+        lib_src,
+        "fn show_secondary_windows",
+        "fn should_minimize_to_tray",
+    );
     assert!(
         show_secondary.contains("get_webview_window(\"main\").is_none()"),
         "the restore path must refuse to build satellites without a main window"
@@ -2963,6 +3794,23 @@ fn test_secondary_windows_never_outlive_the_main_window() {
         !rebuild.contains("ensure_overlay_window"),
         "the rebuild must leave satellite restoration to `show_secondary_windows` (one owner)"
     );
+    // Honest toggles: a deferred satellite is a TYPED outcome, not a silent Ok.
+    assert!(
+        overlay_src.contains("pub enum SatelliteToggle"),
+        "toggle_overlay must answer Applied / DeferredTray / AlreadyThere"
+    );
+    assert!(
+        toggle_hud.contains("SatelliteToggle::DeferredTray"),
+        "toggle_hud_window must type its deferred path"
+    );
+    assert!(
+        toggle_hud.contains("\"warn\"") && overlay_src.contains("\"warn\""),
+        "a deferred satellite must log at warn (release-visible), never info"
+    );
+    assert!(
+        lib_src.contains("emit_satellite_toggle_result"),
+        "the save path must tell the page how the toggle landed"
+    );
 }
 
 /// Quit must leave nothing behind: no re-entrant shutdown, no window that was only
@@ -2970,7 +3818,9 @@ fn test_secondary_windows_never_outlive_the_main_window() {
 #[test]
 fn test_shutdown_is_idempotent_and_stops_the_backend_before_the_windows() {
     fn section<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
-        let from = src.find(start).unwrap_or_else(|| panic!("`{start}` not found"));
+        let from = src
+            .find(start)
+            .unwrap_or_else(|| panic!("`{start}` not found"));
         match src[from..].find(end) {
             Some(i) => &src[from..from + i],
             None => &src[from..],
@@ -3026,7 +3876,9 @@ fn test_shutdown_is_idempotent_and_stops_the_backend_before_the_windows() {
 #[test]
 fn test_nothing_resurrects_a_window_the_user_put_in_the_tray() {
     fn section<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
-        let from = src.find(start).unwrap_or_else(|| panic!("`{start}` not found"));
+        let from = src
+            .find(start)
+            .unwrap_or_else(|| panic!("`{start}` not found"));
         match src[from..].find(end) {
             Some(i) => &src[from..from + i],
             None => &src[from..],
@@ -3057,7 +3909,7 @@ fn test_nothing_resurrects_a_window_the_user_put_in_the_tray() {
     let persist = section(
         lib_src,
         "fn persist_window_visibility",
-        "fn hide_secondary_windows",
+        "fn destroy_secondary_windows",
     );
     assert!(
         persist.contains("MAIN_IN_TRAY.store(!visible"),
@@ -3110,7 +3962,9 @@ fn test_nothing_resurrects_a_window_the_user_put_in_the_tray() {
         "TRAY_SUSPEND_ARMED must be cleared in frontend_ready() once the new page is live"
     );
     assert!(
-        ready_fn.find("TRAY_SUSPEND_ARMED.store(false").unwrap_or(usize::MAX)
+        ready_fn
+            .find("TRAY_SUSPEND_ARMED.store(false")
+            .unwrap_or(usize::MAX)
             < ready_fn.find("SHOW_ON_READY").unwrap_or(usize::MAX),
         "the armed flag must be cleared before any window show in frontend_ready"
     );
@@ -3140,13 +3994,94 @@ fn test_click_start_never_spins_up_a_webview_in_the_tray() {
         .find("main_window_visible")
         .expect("the click-start pre-create must ask whether the main window is on screen");
     let create = pre_create
-        .find("ensure_overlay_window")
+        .find("ensure_satellite")
         .expect("the pre-create must still build the overlay when the UI is visible");
     assert!(
         gate < create,
         "the visibility gate must come BEFORE the WebView is created, or the tray spin-up \
          happens anyway"
     );
+}
+
+/// The ripple path out of the hot loop: the click loop pushes into a lock-free
+/// ring, a 25 FPS worker owns the clock + the IPC emit. No Mutex, no
+/// SystemTime, no emit in the click loop — the last Zero-Jitter contact gone.
+#[test]
+fn test_ripple_ring_is_lock_free_and_worker_owned() {
+    let overlay_src = include_str!("../src/overlay.rs");
+    let sched_src = include_str!("../src/scheduler.rs");
+    let lib_src = include_str!("../src/lib.rs");
+    // The ring exists and the loop pushes through it.
+    assert!(
+        overlay_src.contains("fn ripple_ring()")
+            && overlay_src.contains("pub fn push_click_ripple"),
+        "overlay.rs must expose the lock-free ripple ring + its push entry"
+    );
+    assert!(
+        sched_src.contains("push_click_ripple"),
+        "the click loop must push into the ring, never emit directly"
+    );
+    // Nothing banned survives on the click-loop side of the bridge.
+    assert!(
+        !overlay_src.contains("static RIPPLE_BATCH")
+            && !overlay_src.contains("static LAST_RIPPLE_EMIT_MS"),
+        "the Mutex batch + SystemTime throttle must be gone from overlay.rs"
+    );
+    assert!(
+        !overlay_src.contains("pub fn emit_click_ripple"),
+        "no direct emit entry may remain for the loop to call"
+    );
+    // Scope the check to the closure BODY only (not the comment above it,
+    // not the status emit below it): slice between the closure signature and
+    // its closing `};`.
+    let loop_fn = {
+        let src = sched_src;
+        let from = src
+            .find("let emit_ripple_if_enabled")
+            .expect("the ripple closure must exist");
+        let rest = &src[from..];
+        let end = rest.find("};").expect("the ripple closure must end");
+        &rest[..end]
+    };
+    assert!(
+        !loop_fn.contains("Mutex::")
+            && !loop_fn.contains("SystemTime::now")
+            && !loop_fn.contains(".emit("),
+        "the ripple closure must not lock, clock, or emit — push only"
+    );
+    // One worker owns the drain: spawned once in setup, 40 ms cadence.
+    assert!(
+        overlay_src.contains("pub fn spawn_ripple_drain_worker")
+            && lib_src.contains("spawn_ripple_drain_worker"),
+        "setup must spawn the ripple drain worker once per process"
+    );
+    assert!(
+        overlay_src.contains("Duration::from_millis(40)"),
+        "the drain worker keeps the 25 FPS coalescing cadence"
+    );
+    // Diagnostics answer "the toggle does nothing" from the log.
+    assert!(
+        overlay_src.contains("pub fn overlay_diag_dump") && lib_src.contains("overlay_diag_dump()"),
+        "dump_input_diagnostics must drain the overlay ring too"
+    );
+    // HUD honesty: a born-while-idle HUD paints the live atomic, not "0".
+    assert!(
+        lib_src.contains("emit_status_now(&app, if state.scheduler.is_active()")
+            || lib_src.contains("emit_status_now(\n                &app,")
+            || lib_src.contains("state.scheduler.emit_status_now("),
+        "hud_ready / toggle_hud_window must push the live counter on create"
+    );
+    // i18n symmetry for the deferred toasts.
+    for locale in ["ua.json", "en.json"] {
+        let dict = match locale {
+            "ua.json" => include_str!("../../src/locales/ua.json"),
+            _ => include_str!("../../src/locales/en.json"),
+        };
+        assert!(
+            dict.contains("satellite_deferred_ripple") && dict.contains("satellite_deferred_hud"),
+            "{locale} must translate both deferred-satellite toasts"
+        );
+    }
 }
 
 /// The tray master switch owns BOTH flags — and it must not lie about them.
@@ -3159,7 +4094,9 @@ fn test_click_start_never_spins_up_a_webview_in_the_tray() {
 #[test]
 fn test_tray_switch_reports_both_flags() {
     fn section<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
-        let from = src.find(start).unwrap_or_else(|| panic!("`{start}` not found"));
+        let from = src
+            .find(start)
+            .unwrap_or_else(|| panic!("`{start}` not found"));
         match src[from..].find(end) {
             Some(i) => &src[from..from + i],
             None => &src[from..],
@@ -3190,7 +4127,11 @@ fn test_tray_switch_reports_both_flags() {
          \"close quits the app\" on the very first save"
     );
     // The legacy state is explained, not silent.
-    let hint = section(&main_js, "function paintTrayLifeHint", "if (trayLifeCheckbox) trayLifeCheckbox.addEventListener");
+    let hint = section(
+        &main_js,
+        "function paintTrayLifeHint",
+        "if (trayLifeCheckbox) trayLifeCheckbox.addEventListener",
+    );
     assert!(
         hint.contains("trayLifeHint") && hint.contains("settings_tray_life_mixed_hint"),
         "a minimize-only config must render the hint that says deep sleep is off"
@@ -3206,7 +4147,7 @@ fn test_tray_switch_reports_both_flags() {
     for locale in ["ua.json", "en.json"] {
         let dict = match locale {
             "ua.json" => include_str!("../../src/locales/ua.json"),
-                        _ => include_str!("../../src/locales/en.json"),
+            _ => include_str!("../../src/locales/en.json"),
         };
         assert!(
             dict.contains("settings_tray_life_mixed_hint"),
@@ -3221,7 +4162,10 @@ fn test_tray_switch_reports_both_flags() {
         "the reason a close did not free memory must be explainable"
     );
     assert!(
-        lib_src.matches("deep_sleep_skip_reason(&app_handle)").count() >= 2,
+        lib_src
+            .matches("deep_sleep_skip_reason(&app_handle)")
+            .count()
+            >= 2,
         "both the close and the minimize path must log why deep sleep was skipped"
     );
 }
@@ -3280,7 +4224,9 @@ fn test_no_config_save_before_hydration() {
 #[test]
 fn test_config_snapshot_before_the_first_save() {
     fn section<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
-        let from = src.find(start).unwrap_or_else(|| panic!("`{start}` not found"));
+        let from = src
+            .find(start)
+            .unwrap_or_else(|| panic!("`{start}` not found"));
         match src[from..].find(end) {
             Some(i) => &src[from..from + i],
             None => &src[from..],
@@ -3317,7 +4263,11 @@ fn test_config_snapshot_before_the_first_save() {
         snap < write,
         "the snapshot must be taken BEFORE the write — after it the previous state is gone"
     );
-    let persist = section(lib_src, "fn persist_window_visibility", "fn hide_secondary_windows");
+    let persist = section(
+        lib_src,
+        "fn persist_window_visibility",
+        "fn destroy_secondary_windows",
+    );
     assert!(
         persist.contains("ensure_session_config_backup"),
         "the backend's own config write needs the same insurance"
@@ -3330,7 +4280,7 @@ fn test_config_snapshot_before_the_first_save() {
     for locale in ["ua.json", "en.json"] {
         let dict = match locale {
             "ua.json" => include_str!("../../src/locales/ua.json"),
-                        _ => include_str!("../../src/locales/en.json"),
+            _ => include_str!("../../src/locales/en.json"),
         };
         for key in [
             "notice_cfg_backup_title",
@@ -3351,7 +4301,9 @@ fn test_config_snapshot_before_the_first_save() {
 #[test]
 fn test_recorded_macro_is_persisted_without_a_host_prompt() {
     fn section<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
-        let from = src.find(start).unwrap_or_else(|| panic!("`{start}` not found"));
+        let from = src
+            .find(start)
+            .unwrap_or_else(|| panic!("`{start}` not found"));
         let rest = &src[from..];
         let to = rest
             .find(end)
@@ -3413,7 +4365,7 @@ fn test_recorded_macro_is_persisted_without_a_host_prompt() {
     for locale in ["ua.json", "en.json"] {
         let dict = match locale {
             "ua.json" => include_str!("../../src/locales/ua.json"),
-                        _ => include_str!("../../src/locales/en.json"),
+            _ => include_str!("../../src/locales/en.json"),
         };
         assert!(
             dict.contains("toast_macro_recorded"),
@@ -3433,7 +4385,9 @@ fn test_recorded_macro_is_persisted_without_a_host_prompt() {
 #[test]
 fn test_preset_writes_are_verified_and_cannot_be_silent() {
     fn section<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
-        let from = src.find(start).unwrap_or_else(|| panic!("`{start}` not found"));
+        let from = src
+            .find(start)
+            .unwrap_or_else(|| panic!("`{start}` not found"));
         let rest = &src[from..];
         let to = rest
             .find(end)
@@ -3501,7 +4455,11 @@ fn test_preset_writes_are_verified_and_cannot_be_silent() {
     );
 
     // 3. Rendering must not mutate the library: "no presets" has to be representable.
-    let grid = section(&js, "function renderPresetsGrid", "\n  // Build the whole grid");
+    let grid = section(
+        &js,
+        "function renderPresetsGrid",
+        "\n  // Build the whole grid",
+    );
     assert!(
         grid.contains("presetsEmptyState"),
         "the empty state must stay reachable"
@@ -3549,7 +4507,7 @@ fn test_preset_writes_are_verified_and_cannot_be_silent() {
     for locale in ["ua.json", "en.json"] {
         let dict = match locale {
             "ua.json" => include_str!("../../src/locales/ua.json"),
-                        _ => include_str!("../../src/locales/en.json"),
+            _ => include_str!("../../src/locales/en.json"),
         };
         for key in [
             "save_failed",
@@ -3575,7 +4533,9 @@ fn test_preset_writes_are_verified_and_cannot_be_silent() {
 #[test]
 fn test_app_profile_poller_is_mtime_gated() {
     fn section<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
-        let from = src.find(start).unwrap_or_else(|| panic!("`{start}` not found"));
+        let from = src
+            .find(start)
+            .unwrap_or_else(|| panic!("`{start}` not found"));
         match src[from..].find(end) {
             Some(i) => &src[from..from + i],
             None => &src[from..],
@@ -3656,21 +4616,29 @@ fn test_all_production_set_intervals_are_gated_by_every_visible() {
     // (The position picker used to be here — it streams position-picker-tick
     // from a Rust thread now, no setInterval at all.)
     let known_prefixes = [
-        "return setInterval(",             // implementation of everyVisible() itself
+        "return setInterval(",            // implementation of everyVisible() itself
         "_logFlushTimer = setInterval(",  // debug-mode only; cleared in setDebugMode(false)
-        "resetTimer = setInterval(",       // one-shot reset confirm; cleared on exit
-        "startDelayTimer = setInterval(",  // start-delay countdown; cleared on stop/start
-        "onboardingTimer = setInterval(",  // onboarding wizard; cleared on close
+        "resetTimer = setInterval(",      // one-shot reset confirm; cleared on exit
+        "startDelayTimer = setInterval(", // start-delay countdown; cleared on stop/start
+        "onboardingTimer = setInterval(", // onboarding wizard; cleared on close
     ];
 
     let mut naked: Vec<(usize, String)> = Vec::new();
 
     for (lineno, line) in js.lines().enumerate() {
         let t = line.trim();
-        if t.starts_with("//") || t.starts_with("/*") || t.starts_with("*") { continue; }
-        if t.contains("everyVisible(") { continue; }
-        if !t.contains("setInterval(") { continue; }
-        if known_prefixes.iter().any(|p| t.contains(p)) { continue; }
+        if t.starts_with("//") || t.starts_with("/*") || t.starts_with("*") {
+            continue;
+        }
+        if t.contains("everyVisible(") {
+            continue;
+        }
+        if !t.contains("setInterval(") {
+            continue;
+        }
+        if known_prefixes.iter().any(|p| t.contains(p)) {
+            continue;
+        }
         naked.push((lineno + 1, t.to_string()));
     }
 
@@ -3770,8 +4738,7 @@ fn the_binding_shield_is_applied_on_every_reparse() {
     let helper = "apply_binding_shield(&scheduler, &bindings);";
     let calls = src.matches(helper).count();
     assert_eq!(
-        calls,
-        2,
+        calls, 2,
         "the binding shield must be applied on startup AND after a re-parse \
          (found {calls} call sites). `seen_version` is seeded with the current \
          version, so the re-parse block never runs at boot — a startup-only \
@@ -3783,7 +4750,10 @@ fn the_binding_shield_is_applied_on_every_reparse() {
         .find("let mut bindings = {")
         .expect("the hook must build initial bindings at startup");
     let first = src[start..].find(helper).expect("startup shield call") + start;
-    assert!(first > start, "the startup call must follow the initial bindings");
+    assert!(
+        first > start,
+        "the startup call must follow the initial bindings"
+    );
 
     let reparse = src
         .find("if current_version != seen_version {")
@@ -3846,7 +4816,7 @@ fn ignored_keys_roundtrip_through_config() {
     // get_config -> set_config is a real round-trip; dropping the list there
     // would erase the user's keys on the next save.
     assert!(
-        sched.contains("typing_ignore_keys: self.typing_ignore_keys.lock().unwrap().clone()"),
+        sched.contains("typing_ignore_keys: self.typing_ignore_keys.safe_lock().clone()"),
         "get_config must hand the list back so a round-trip preserves it"
     );
     assert!(
@@ -4025,7 +4995,11 @@ fn the_key_policy_takes_no_lock_on_the_hot_path() {
         .split("pub struct KeyPolicy")
         .nth(1)
         .expect("KeyPolicy must exist");
-    let fields: String = struct_body.split('}').next().unwrap_or_default().to_string();
+    let fields: String = struct_body
+        .split('}')
+        .next()
+        .unwrap_or_default()
+        .to_string();
     for forbidden in ["Mutex", "RwLock", "lock()", "String", "Vec<"] {
         assert!(
             !fields.contains(forbidden),
@@ -4136,7 +5110,11 @@ fn matches_in_window_hotkey(binding_str: &str, current_key: &str, held_keys: &[&
         .filter(|s| !s.is_empty())
         .collect();
     for group in groups {
-        let parts: Vec<&str> = group.split('+').map(str::trim).filter(|s| !s.is_empty()).collect();
+        let parts: Vec<&str> = group
+            .split('+')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
         if parts.is_empty() {
             continue;
         }
@@ -4195,7 +5173,11 @@ fn test_in_window_hotkey_single_letter_matches() {
 fn test_in_window_hotkey_case_insensitivity() {
     assert!(matches_in_window_hotkey("r", "R", &["R"]));
     assert!(matches_in_window_hotkey("R", "r", &["r"]));
-    assert!(matches_in_window_hotkey("Ctrl+Alt+m", "M", &["ctrl", "alt", "m"]));
+    assert!(matches_in_window_hotkey(
+        "Ctrl+Alt+m",
+        "M",
+        &["ctrl", "alt", "m"]
+    ));
 }
 
 #[test]
@@ -4209,15 +5191,31 @@ fn test_in_window_hotkey_chord_star_plus_one() {
 #[test]
 fn test_in_window_hotkey_chord_ctrl_alt_m() {
     // Mode switch combo `Ctrl+Alt+M`
-    assert!(matches_in_window_hotkey("Ctrl+Alt+M", "M", &["Ctrl", "Alt", "M"]));
-    assert!(matches_in_window_hotkey("Ctrl+Alt+M", "M", &["ControlLeft", "AltLeft", "M"]));
+    assert!(matches_in_window_hotkey(
+        "Ctrl+Alt+M",
+        "M",
+        &["Ctrl", "Alt", "M"]
+    ));
+    assert!(matches_in_window_hotkey(
+        "Ctrl+Alt+M",
+        "M",
+        &["ControlLeft", "AltLeft", "M"]
+    ));
     // Missing Alt
-    assert!(!matches_in_window_hotkey("Ctrl+Alt+M", "M", &["ControlLeft", "M"]));
+    assert!(!matches_in_window_hotkey(
+        "Ctrl+Alt+M",
+        "M",
+        &["ControlLeft", "M"]
+    ));
 }
 
 #[test]
 fn test_in_window_hotkey_chord_rejects_missing_modifiers() {
-    assert!(!matches_in_window_hotkey("Ctrl+Shift+R", "R", &["Ctrl", "R"]));
+    assert!(!matches_in_window_hotkey(
+        "Ctrl+Shift+R",
+        "R",
+        &["Ctrl", "R"]
+    ));
     assert!(!matches_in_window_hotkey("Ctrl+=", "=", &["="]));
 }
 
@@ -4467,9 +5465,6 @@ fn test_hotkey_toggle_bypasses_gui_lock_and_stops_immediately() {
     );
 }
 
-
-
-
 #[test]
 fn test_context_menu_is_suppressed_on_all_pages() {
     // The Chromium/WebView2 native right-click context menu must be disabled on
@@ -4478,13 +5473,22 @@ fn test_context_menu_is_suppressed_on_all_pages() {
     // window open the context menu — it steals the foreground, the focus-loss
     // guard stops the clicker, and the toggle hotkey cannot reach the page while
     // the menu is open.
-    let main_js    = include_str!("../../src/main.js");
-    let hud_js     = include_str!("../../src/hud.js");
+    let main_js = include_str!("../../src/main.js");
+    let hud_js = include_str!("../../src/hud.js");
     let overlay_js = include_str!("../../src/overlay.js");
     let needle = r#"window.addEventListener("contextmenu", (e) => e.preventDefault(), true)"#;
-    assert!(main_js.contains(needle),    "main.js must suppress contextmenu at capture phase");
-    assert!(hud_js.contains(needle),     "hud.js must suppress contextmenu at capture phase");
-    assert!(overlay_js.contains(needle), "overlay.js must suppress contextmenu at capture phase");
+    assert!(
+        main_js.contains(needle),
+        "main.js must suppress contextmenu at capture phase"
+    );
+    assert!(
+        hud_js.contains(needle),
+        "hud.js must suppress contextmenu at capture phase"
+    );
+    assert!(
+        overlay_js.contains(needle),
+        "overlay.js must suppress contextmenu at capture phase"
+    );
 }
 
 #[test]
@@ -4496,39 +5500,95 @@ fn test_capture_flow_never_hangs() {
     let capture_rs = include_str!("../src/platform/capture.rs");
     let lib_rs = include_str!("../src/lib.rs");
     // No page-side timer chain in the capture path.
-    assert!(!guard_js.contains("this._captureTimer = setTimeout"), "capture must not count down with setTimeout");
+    assert!(
+        !guard_js.contains("this._captureTimer = setTimeout"),
+        "capture must not count down with setTimeout"
+    );
     // All four events wired with race-free id filtering (mine() accepts the
     // first tick while _captureId is still null — otherwise the fast Rust
     // thread loses tick #1 before invoke() resolves).
-    for ev in ["capture-tick", "capture-done", "capture-error", "capture-cancelled"] {
-        assert!(guard_js.contains(ev), "settings_guard.js must listen for the capture event");
-        assert!(capture_rs.contains(ev), "capture.rs must emit the capture event");
+    for ev in [
+        "capture-tick",
+        "capture-done",
+        "capture-error",
+        "capture-cancelled",
+    ] {
+        assert!(
+            guard_js.contains(ev),
+            "settings_guard.js must listen for the capture event"
+        );
+        assert!(
+            capture_rs.contains(ev),
+            "capture.rs must emit the capture event"
+        );
     }
-    assert!(guard_js.contains("const mine = (p)"), "id filter must accept pre-resolve ticks via mine()");
-    assert!(!guard_js.contains("p.id !== this._captureId"), "bare id filter drops the first tick — must stay deleted");
+    assert!(
+        guard_js.contains("const mine = (p)"),
+        "id filter must accept pre-resolve ticks via mine()"
+    );
+    assert!(
+        !guard_js.contains("p.id !== this._captureId"),
+        "bare id filter drops the first tick — must stay deleted"
+    );
     // Cancel path: reachable single guard, button NEVER disabled (a disabled
     // button swallows the second click, making cancel physically impossible).
-    assert!(guard_js.contains("if (this._capturing)"), "second click while running must reach cancelCapture");
-    assert!(guard_js.contains("cancel_native_app_capture"), "cancel button must invoke cancel_native_app_capture");
-    assert!(guard_js.contains("settings_capture_cancel"), "cancel state needs a localized label");
-    assert!(guard_js.contains("btn-cancel"), "cancel state needs red styling, not disabled");
-    assert!(!guard_js.contains("btn.disabled = true"), "capture button must never be disabled");
-    assert!(guard_js.contains("_endCapture"), "every capture exit must funnel through _endCapture");
-    assert!(guard_js.contains("settings_capture_own_window"), "own-window capture must explain Alt+Tab, not hang");
-    assert!(lib_rs.contains("start_native_app_capture"), "lib.rs must register start_native_app_capture");
-    assert!(lib_rs.contains("cancel_native_app_capture"), "lib.rs must register cancel_native_app_capture");
+    assert!(
+        guard_js.contains("if (this._capturing)"),
+        "second click while running must reach cancelCapture"
+    );
+    assert!(
+        guard_js.contains("cancel_native_app_capture"),
+        "cancel button must invoke cancel_native_app_capture"
+    );
+    assert!(
+        guard_js.contains("settings_capture_cancel"),
+        "cancel state needs a localized label"
+    );
+    assert!(
+        guard_js.contains("btn-cancel"),
+        "cancel state needs red styling, not disabled"
+    );
+    assert!(
+        !guard_js.contains("btn.disabled = true"),
+        "capture button must never be disabled"
+    );
+    assert!(
+        guard_js.contains("_endCapture"),
+        "every capture exit must funnel through _endCapture"
+    );
+    assert!(
+        guard_js.contains("settings_capture_own_window"),
+        "own-window capture must explain Alt+Tab, not hang"
+    );
+    assert!(
+        lib_rs.contains("start_native_app_capture"),
+        "lib.rs must register start_native_app_capture"
+    );
+    assert!(
+        lib_rs.contains("cancel_native_app_capture"),
+        "lib.rs must register cancel_native_app_capture"
+    );
     // Own-window honesty + cancel styling + i18n symmetry (UA/EN pair).
     let css = include_str!("../../src/style.css");
-    assert!(css.contains(".preset-modal-btn.btn-cancel"), "cancel button needs red btn-cancel styling");
+    assert!(
+        css.contains(".preset-modal-btn.btn-cancel"),
+        "cancel button needs red btn-cancel styling"
+    );
     for locale in ["en", "ua"] {
         let dict = match locale {
             "ua" => include_str!("../../src/locales/ua.json"),
-                        _ => include_str!("../../src/locales/en.json"),
+            _ => include_str!("../../src/locales/en.json"),
         };
-        assert!(dict.contains("settings_capture_cancel"), "locale must carry settings_capture_cancel");
+        assert!(
+            dict.contains("settings_capture_cancel"),
+            "locale must carry settings_capture_cancel"
+        );
     }
     // Old one-shot command is gone — only the native session remains.
-    assert!(!lib_rs.contains("capture_foreground_app"), "dead capture_foreground_app must stay deleted");
+    assert!(
+        !lib_rs.contains("capture_foreground_app"),
+        "dead capture_foreground_app must stay deleted"
+    );
 }
 
 #[test]
@@ -4537,15 +5597,36 @@ fn test_position_picker_streams_from_rust() {
     // thread; the page only paints. The old setInterval(50ms) poll kept the
     // renderer awake with 20 IPC round-trips per second.
     let main_js = include_str!("../../src/main.js");
-    assert!(main_js.contains("start_position_picker_stream"), "page must start the Rust picker stream");
-    assert!(main_js.contains("stop_position_picker_stream"), "page must stop the Rust picker stream");
-    assert!(main_js.contains("position-picker-tick"), "page must paint position-picker-tick events");
-    assert!(!main_js.contains("pickPosInterval = setInterval"), "page-side picker polling must stay deleted");
+    assert!(
+        main_js.contains("start_position_picker_stream"),
+        "page must start the Rust picker stream"
+    );
+    assert!(
+        main_js.contains("stop_position_picker_stream"),
+        "page must stop the Rust picker stream"
+    );
+    assert!(
+        main_js.contains("position-picker-tick"),
+        "page must paint position-picker-tick events"
+    );
+    assert!(
+        !main_js.contains("pickPosInterval = setInterval"),
+        "page-side picker polling must stay deleted"
+    );
     let capture_rs = include_str!("../src/platform/capture.rs");
-    assert!(capture_rs.contains("position-picker-tick"), "capture.rs must emit position-picker-tick");
+    assert!(
+        capture_rs.contains("position-picker-tick"),
+        "capture.rs must emit position-picker-tick"
+    );
     let lib_rs = include_str!("../src/lib.rs");
-    assert!(lib_rs.contains("start_position_picker_stream"), "lib.rs must register start_position_picker_stream");
-    assert!(lib_rs.contains("stop_position_picker_stream"), "lib.rs must register stop_position_picker_stream");
+    assert!(
+        lib_rs.contains("start_position_picker_stream"),
+        "lib.rs must register start_position_picker_stream"
+    );
+    assert!(
+        lib_rs.contains("stop_position_picker_stream"),
+        "lib.rs must register stop_position_picker_stream"
+    );
 }
 
 #[test]
@@ -4553,13 +5634,28 @@ fn test_ids_are_minted_by_rust() {
     // new_unique_id owns uniqueness (counter high-bits + time low-bits):
     // Date.now()+Math.random in the page collided across two tabs.
     let main_js = include_str!("../../src/main.js");
-    assert!(main_js.contains("new_unique_id"), "page must mint ids through new_unique_id");
-    assert!(!main_js.contains("\"preset_\" + Date.now()"), "page must not mint preset ids with Date.now");
-    assert!(!main_js.contains("`preset_${Date.now()"), "page must not mint import ids with Date.now");
+    assert!(
+        main_js.contains("new_unique_id"),
+        "page must mint ids through new_unique_id"
+    );
+    assert!(
+        !main_js.contains("\"preset_\" + Date.now()"),
+        "page must not mint preset ids with Date.now"
+    );
+    assert!(
+        !main_js.contains("`preset_${Date.now()"),
+        "page must not mint import ids with Date.now"
+    );
     let cmds_rs = include_str!("../src/commands/tauri_commands.rs");
-    assert!(cmds_rs.contains("pub fn new_unique_id"), "backend must expose new_unique_id");
+    assert!(
+        cmds_rs.contains("pub fn new_unique_id"),
+        "backend must expose new_unique_id"
+    );
     let lib_rs = include_str!("../src/lib.rs");
-    assert!(lib_rs.contains("new_unique_id"), "lib.rs must register new_unique_id");
+    assert!(
+        lib_rs.contains("new_unique_id"),
+        "lib.rs must register new_unique_id"
+    );
 }
 
 #[test]
@@ -4567,22 +5663,46 @@ fn test_update_dismissal_is_backend_owned() {
     // config.ui.update_dismissed_version survives reinstalls and deep-sleep
     // rebuilds; localStorage did neither.
     let main_js = include_str!("../../src/main.js");
-    assert!(main_js.contains("dismiss_update_version"), "page must persist dismissal via dismiss_update_version");
-    assert!(main_js.contains("get_update_dismissed_version"), "page must read dismissal from the backend");
-    assert!(!main_js.contains("UPDATE_DISMISS_KEY"), "localStorage dismissal key must stay deleted");
+    assert!(
+        main_js.contains("dismiss_update_version"),
+        "page must persist dismissal via dismiss_update_version"
+    );
+    assert!(
+        main_js.contains("get_update_dismissed_version"),
+        "page must read dismissal from the backend"
+    );
+    assert!(
+        !main_js.contains("UPDATE_DISMISS_KEY"),
+        "localStorage dismissal key must stay deleted"
+    );
     let cm_src = include_str!("../src/config_manager.rs");
-    assert!(cm_src.contains("update_dismissed_version"), "UiSettings must carry update_dismissed_version");
+    assert!(
+        cm_src.contains("update_dismissed_version"),
+        "UiSettings must carry update_dismissed_version"
+    );
     let lib_rs = include_str!("../src/lib.rs");
-    assert!(lib_rs.contains("dismiss_update_version"), "lib.rs must register dismiss_update_version");
+    assert!(
+        lib_rs.contains("dismiss_update_version"),
+        "lib.rs must register dismiss_update_version"
+    );
 }
 
 #[test]
 fn test_stats_counting_lives_in_rust() {
     // stats_tick folds the 66 ms tick into SessionStats; the page mirrors.
     let lib_rs = include_str!("../src/lib.rs");
-    assert!(lib_rs.contains("stats_tick"), "lib.rs must register stats_tick");
-    assert!(lib_rs.contains("get_session_stats"), "lib.rs must register get_session_stats");
-    assert!(lib_rs.contains("session_stats"), "AppState must carry session_stats");
+    assert!(
+        lib_rs.contains("stats_tick"),
+        "lib.rs must register stats_tick"
+    );
+    assert!(
+        lib_rs.contains("get_session_stats"),
+        "lib.rs must register get_session_stats"
+    );
+    assert!(
+        lib_rs.contains("session_stats"),
+        "AppState must carry session_stats"
+    );
 }
 
 #[test]
@@ -4594,38 +5714,113 @@ fn test_suggest_reads_from_ram() {
     let guard_js = include_str!("../../src/settings_guard.js");
     let platform_rs = include_str!("../src/platform/mod.rs");
     let lib_rs = include_str!("../src/lib.rs");
-    assert!(!guard_js.contains("_catalogLoading"), "dead _catalogLoading flag must stay deleted");
-    assert!(!guard_js.contains("_loadCatalog"), "dead _loadCatalog must stay deleted");
-    assert!(!guard_js.contains("list_installed_and_running_apps"), "old full-scan command must stay deleted");
-    assert!(guard_js.contains("_searchCatalog"), "suggest must go through _searchCatalog");
-    assert!(guard_js.contains("settings_app_picker_loading"), "unready catalogue must paint Loading, not Nothing found");
+    assert!(
+        !guard_js.contains("_catalogLoading"),
+        "dead _catalogLoading flag must stay deleted"
+    );
+    assert!(
+        !guard_js.contains("_loadCatalog"),
+        "dead _loadCatalog must stay deleted"
+    );
+    assert!(
+        !guard_js.contains("list_installed_and_running_apps"),
+        "old full-scan command must stay deleted"
+    );
+    assert!(
+        guard_js.contains("_searchCatalog"),
+        "suggest must go through _searchCatalog"
+    );
+    assert!(
+        guard_js.contains("settings_app_picker_loading"),
+        "unready catalogue must paint Loading, not Nothing found"
+    );
     // Defect 1 (fatal TypeError): _computeSuggest must ALWAYS return an array —
     // the {empty:true} object crashed .map() on first focus before warm-up.
-    assert!(!guard_js.contains("return { empty: true }"), "{{empty:true}} return crashes .map() — must stay deleted");
-    assert!(guard_js.contains("_lastCatalogReady"), "Loading vs Empty must be distinguished by a ready flag");
+    assert!(
+        !guard_js.contains("return { empty: true }"),
+        "{{empty:true}} return crashes .map() — must stay deleted"
+    );
+    assert!(
+        guard_js.contains("_lastCatalogReady"),
+        "Loading vs Empty must be distinguished by a ready flag"
+    );
     // Defect 4 (double filtering): Rust owns scan+rank+limit; the page maps only.
-    assert!(!guard_js.contains("const LIMIT = 80"), "page-side LIMIT re-cap must stay deleted — Rust caps at 30");
-    assert!(!guard_js.contains("seen.has(exe)"), "page-side dedup must stay deleted — Rust dedups");
+    assert!(
+        !guard_js.contains("const LIMIT = 80"),
+        "page-side LIMIT re-cap must stay deleted — Rust caps at 30"
+    );
+    assert!(
+        !guard_js.contains("seen.has(exe)"),
+        "page-side dedup must stay deleted — Rust dedups"
+    );
     // Defect 5.2 (blur race): mousedown flag, not a 120 ms setTimeout.
-    assert!(guard_js.contains("_suggestMouseDown"), "blur race must be bridged by a mousedown flag");
-    assert!(!guard_js.contains("setTimeout(() => this._hideSuggest()"), "120 ms blur setTimeout must stay deleted");
+    assert!(
+        guard_js.contains("_suggestMouseDown"),
+        "blur race must be bridged by a mousedown flag"
+    );
+    assert!(
+        !guard_js.contains("setTimeout(() => this._hideSuggest()"),
+        "120 ms blur setTimeout must stay deleted"
+    );
     // Defect 5.1 (status poll): visibility-gated, 1 s — not a blind 400 ms burn.
-    assert!(guard_js.contains("document.hidden"), "status poll must skip IPC while the page is hidden");
-    assert!(!guard_js.contains("_renderStatus(), 400"), "400 ms status poll must stay deleted");
+    assert!(
+        guard_js.contains("document.hidden"),
+        "status poll must skip IPC while the page is hidden"
+    );
+    assert!(
+        !guard_js.contains("_renderStatus(), 400"),
+        "400 ms status poll must stay deleted"
+    );
     // Lag/leak pass: debounced keystrokes, generation token, precomputed keys.
-    assert!(guard_js.contains("_scheduleSuggest"), "keystrokes must go through a debounced scheduler");
-    assert!(guard_js.contains("_suggestSeq"), "stale suggest replies must die on a generation token");
-    assert!(guard_js.contains("_suggestInflight"), "parallel search_apps bursts must be single-flight");
-    assert!(platform_rs.contains("CATALOG_WARM_STARTED"), "warm-up must be once-guarded, not just documented");
-    assert!(platform_rs.contains("label_lc"), "search must compare precomputed lowercase, not allocate per keystroke");
-    assert!(!platform_rs.contains("out.iter().any(|e| e.label.eq_ignore_ascii_case"), "O(n²) page-side-style dedup must stay deleted");
+    assert!(
+        guard_js.contains("_scheduleSuggest"),
+        "keystrokes must go through a debounced scheduler"
+    );
+    assert!(
+        guard_js.contains("_suggestSeq"),
+        "stale suggest replies must die on a generation token"
+    );
+    assert!(
+        guard_js.contains("_suggestInflight"),
+        "parallel search_apps bursts must be single-flight"
+    );
+    assert!(
+        platform_rs.contains("CATALOG_WARM_STARTED"),
+        "warm-up must be once-guarded, not just documented"
+    );
+    assert!(
+        platform_rs.contains("label_lc"),
+        "search must compare precomputed lowercase, not allocate per keystroke"
+    );
+    assert!(
+        !platform_rs.contains("out.iter().any(|e| e.label.eq_ignore_ascii_case"),
+        "O(n²) page-side-style dedup must stay deleted"
+    );
     let main_js_pp = include_str!("../../src/main.js");
-    assert!(main_js_pp.contains("document.hidden && isPickingPos"), "picker stream must die when the page hides");
-    assert!(platform_rs.contains("OnceLock"), "catalogue must live in a std OnceLock (no new crates)");
-    assert!(platform_rs.contains("fn warm_up_catalog_async"), "platform must expose warm_up_catalog_async");
-    assert!(platform_rs.contains("fn search_apps"), "platform must expose search_apps");
-    assert!(lib_rs.contains("warm_up_catalog_async"), "setup() must warm the catalogue at boot");
-    assert!(lib_rs.contains("search_apps"), "lib.rs must register search_apps");
+    assert!(
+        main_js_pp.contains("document.hidden && isPickingPos"),
+        "picker stream must die when the page hides"
+    );
+    assert!(
+        platform_rs.contains("OnceLock"),
+        "catalogue must live in a std OnceLock (no new crates)"
+    );
+    assert!(
+        platform_rs.contains("fn warm_up_catalog_async"),
+        "platform must expose warm_up_catalog_async"
+    );
+    assert!(
+        platform_rs.contains("fn search_apps"),
+        "platform must expose search_apps"
+    );
+    assert!(
+        lib_rs.contains("warm_up_catalog_async"),
+        "setup() must warm the catalogue at boot"
+    );
+    assert!(
+        lib_rs.contains("search_apps"),
+        "lib.rs must register search_apps"
+    );
 }
 
 #[test]
@@ -4639,31 +5834,80 @@ fn test_backup_buttons_have_honest_states() {
     let html = include_str!("../../src/index.html");
     let cmds_rs = include_str!("../src/commands/tauri_commands.rs");
     // Microinteraction: compositor-only states exist and are used.
-    assert!(css.contains("is-busy::after"), "busy spinner must exist in CSS");
-    assert!(css.contains("@keyframes btn-spin"), "spinner keyframes must exist");
+    assert!(
+        css.contains("is-busy::after"),
+        "busy spinner must exist in CSS"
+    );
+    assert!(
+        css.contains("@keyframes btn-spin"),
+        "spinner keyframes must exist"
+    );
     assert!(css.contains("is-success"), "success pop must exist in CSS");
-    assert!(css.contains("prefers-reduced-motion"), "animations must respect reduced motion");
-    assert!(main_js.contains("setBtnBusy"), "backup buttons must carry busy states");
-    assert!(main_js.contains("flashBtnSuccess"), "backup buttons must flash success");
-    assert!(main_js.contains("backupBusy"), "parallel backup clicks must be single-flight");
+    assert!(
+        css.contains("prefers-reduced-motion"),
+        "animations must respect reduced motion"
+    );
+    assert!(
+        main_js.contains("setBtnBusy"),
+        "backup buttons must carry busy states"
+    );
+    assert!(
+        main_js.contains("flashBtnSuccess"),
+        "backup buttons must flash success"
+    );
+    assert!(
+        main_js.contains("backupBusy"),
+        "parallel backup clicks must be single-flight"
+    );
     // No blocking host dialogs in the backup flow — in-page modal instead.
-    assert!(main_js.contains("backupImportModal"), "import choice must live in an in-page modal");
-    assert!(html.contains("backupImportModal"), "import modal markup must exist");
-    assert!(main_js.contains("bindBackdropClose(\"presetEditModal\")"), "backdrop helper must stay intact");
-    assert!(!main_js.contains("confirm(getI18nText(\"dialog_confirm_restore_config\""), "host confirm() in backup path must stay deleted");
-    assert!(!main_js.contains("alert(getI18nText(\"dialog_alert_restore_backup_success\""), "host alert() in backup path must stay deleted");
+    assert!(
+        main_js.contains("backupImportModal"),
+        "import choice must live in an in-page modal"
+    );
+    assert!(
+        html.contains("backupImportModal"),
+        "import modal markup must exist"
+    );
+    assert!(
+        main_js.contains("bindBackdropClose(\"presetEditModal\")"),
+        "backdrop helper must stay intact"
+    );
+    assert!(
+        !main_js.contains("confirm(getI18nText(\"dialog_confirm_restore_config\""),
+        "host confirm() in backup path must stay deleted"
+    );
+    assert!(
+        !main_js.contains("alert(getI18nText(\"dialog_alert_restore_backup_success\""),
+        "host alert() in backup path must stay deleted"
+    );
     // Import size guards: page refuses before reading, backend refuses on IPC.
-    assert!(main_js.contains("MAX_BACKUP_BYTES"), "page must refuse oversize backup files early");
-    assert!(cmds_rs.contains("MAX_BACKUP_JSON_BYTES"), "import_full_backup must refuse oversize payloads");
+    assert!(
+        main_js.contains("MAX_BACKUP_BYTES"),
+        "page must refuse oversize backup files early"
+    );
+    assert!(
+        cmds_rs.contains("MAX_BACKUP_JSON_BYTES"),
+        "import_full_backup must refuse oversize payloads"
+    );
     // Escape must close the new modal too.
-    assert!(main_js.contains("backupImportModal"), "Escape handler must cover the import modal");
+    assert!(
+        main_js.contains("backupImportModal"),
+        "Escape handler must cover the import modal"
+    );
     // i18n symmetry for the new keys.
     for lang in ["en", "ua"] {
         let dict = match lang {
             "ua" => include_str!("../../src/locales/ua.json"),
             _ => include_str!("../../src/locales/en.json"),
         };
-        for key in ["backup_import_title", "backup_import_config", "backup_import_macros", "backup_import_confirm", "backup_import_too_large", "settings_btn_backup_working"] {
+        for key in [
+            "backup_import_title",
+            "backup_import_config",
+            "backup_import_macros",
+            "backup_import_confirm",
+            "backup_import_too_large",
+            "settings_btn_backup_working",
+        ] {
             assert!(dict.contains(key), "locale {lang} must carry {key}");
         }
     }
@@ -4676,42 +5920,107 @@ fn test_pixel_reports_honestly() {
     let cmds_rs = include_str!("../src/commands/tauri_commands.rs");
     let win_rs = include_str!("../src/platform/windows/mod.rs");
     let main_js = include_str!("../../src/main.js");
-    assert!(cmds_rs.contains("pub fn pick_screen_pixel"), "pick_screen_pixel command must exist");
-    assert!(cmds_rs.contains("get_pixel_rgba_safe"), "pick_screen_pixel must use the honest reader");
-    assert!(win_rs.contains("enum PixelError"), "windows backend must define PixelError");
-    assert!(win_rs.contains("OverlayCovered"), "overlay/DRM miss must be a named variant");
-    assert!(win_rs.contains("BitBlt"), "1x1 BitBlt fallback must exist before giving up");
-    assert!(main_js.contains("OVERLAY_COVERED"), "page must paint the overlay failure in the status line");
-    assert!(main_js.contains("settings_trigger_status_overlay"), "overlay failure needs a localized status string");
+    assert!(
+        cmds_rs.contains("pub fn pick_screen_pixel"),
+        "pick_screen_pixel command must exist"
+    );
+    assert!(
+        cmds_rs.contains("get_pixel_rgba_safe"),
+        "pick_screen_pixel must use the honest reader"
+    );
+    assert!(
+        win_rs.contains("enum PixelError"),
+        "windows backend must define PixelError"
+    );
+    assert!(
+        win_rs.contains("OverlayCovered"),
+        "overlay/DRM miss must be a named variant"
+    );
+    assert!(
+        win_rs.contains("BitBlt"),
+        "1x1 BitBlt fallback must exist before giving up"
+    );
+    assert!(
+        main_js.contains("OVERLAY_COVERED"),
+        "page must paint the overlay failure in the status line"
+    );
+    assert!(
+        main_js.contains("settings_trigger_status_overlay"),
+        "overlay failure needs a localized status string"
+    );
 }
-
 
 #[test]
 fn test_standardized_notification_protocol_and_store_wiring() {
     // Protocol integrity tripwire:
     // 1. Rust backend must expose the full notification command surface
     let lib_rs = include_str!("../src/lib.rs");
-    assert!(lib_rs.contains("get_notifications"), "lib.rs must register get_notifications");
-    assert!(lib_rs.contains("get_unread_notifications"), "lib.rs must register get_unread_notifications");
-    assert!(lib_rs.contains("mark_notifications_read"), "lib.rs must register mark_notifications_read");
-    assert!(lib_rs.contains("clear_notifications"), "lib.rs must register clear_notifications");
-    assert!(lib_rs.contains("push_client_notification"), "lib.rs must register push_client_notification");
-    assert!(lib_rs.contains("notification_store: Arc<NotificationStore>"), "AppState must carry notification_store");
+    assert!(
+        lib_rs.contains("get_notifications"),
+        "lib.rs must register get_notifications"
+    );
+    assert!(
+        lib_rs.contains("get_unread_notifications"),
+        "lib.rs must register get_unread_notifications"
+    );
+    assert!(
+        lib_rs.contains("mark_notifications_read"),
+        "lib.rs must register mark_notifications_read"
+    );
+    assert!(
+        lib_rs.contains("clear_notifications"),
+        "lib.rs must register clear_notifications"
+    );
+    assert!(
+        lib_rs.contains("push_client_notification"),
+        "lib.rs must register push_client_notification"
+    );
+    assert!(
+        lib_rs.contains("notification_store: Arc<NotificationStore>"),
+        "AppState must carry notification_store"
+    );
 
     // 2. notifications.rs must define the 6 categories and core types
     let notifs_rs = include_str!("../src/notifications.rs");
-    assert!(notifs_rs.contains("pub enum NotificationCategory"), "notifications.rs must define NotificationCategory");
-    assert!(notifs_rs.contains("pub enum NotificationCode"), "notifications.rs must define NotificationCode");
-    assert!(notifs_rs.contains("pub enum SoundCue"), "notifications.rs must define SoundCue");
-    assert!(notifs_rs.contains("pub struct NotificationStore"), "notifications.rs must define NotificationStore");
-    assert!(notifs_rs.contains("MAX_BUFFERED_NOTIFICATIONS: usize = 50;"), "notifications.rs must enforce 50-item ring buffer");
+    assert!(
+        notifs_rs.contains("pub enum NotificationCategory"),
+        "notifications.rs must define NotificationCategory"
+    );
+    assert!(
+        notifs_rs.contains("pub enum NotificationCode"),
+        "notifications.rs must define NotificationCode"
+    );
+    assert!(
+        notifs_rs.contains("pub enum SoundCue"),
+        "notifications.rs must define SoundCue"
+    );
+    assert!(
+        notifs_rs.contains("pub struct NotificationStore"),
+        "notifications.rs must define NotificationStore"
+    );
+    assert!(
+        notifs_rs.contains("MAX_BUFFERED_NOTIFICATIONS: usize = 50;"),
+        "notifications.rs must enforce 50-item ring buffer"
+    );
 
     // 3. Frontend synchronization
     let main_js = include_str!("../../src/main.js");
-    assert!(main_js.contains("syncPendingNotifications"), "main.js must define syncPendingNotifications");
-    assert!(main_js.contains("notification-created"), "main.js must listen for notification-created event");
-    assert!(main_js.contains("get_unread_notifications"), "main.js must fetch unread notifications");
-    assert!(main_js.contains("mark_notifications_read"), "main.js must mark processed notifications read");
+    assert!(
+        main_js.contains("syncPendingNotifications"),
+        "main.js must define syncPendingNotifications"
+    );
+    assert!(
+        main_js.contains("notification-created"),
+        "main.js must listen for notification-created event"
+    );
+    assert!(
+        main_js.contains("get_unread_notifications"),
+        "main.js must fetch unread notifications"
+    );
+    assert!(
+        main_js.contains("mark_notifications_read"),
+        "main.js must mark processed notifications read"
+    );
 }
 
 #[test]
@@ -4730,13 +6039,34 @@ fn test_sound_manager_assets_and_capabilities() {
     // Procedural sound engine:
     // 1. sound_manager.js must exist and implement the 6 procedural sound cues
     let sound_js = include_str!("../../src/sound_manager.js");
-    assert!(sound_js.contains("const SoundManager ="), "sound_manager.js must define SoundManager");
-    assert!(sound_js.contains(r#"case "start":"#), "SoundManager must support start chime");
-    assert!(sound_js.contains(r#"case "stop":"#), "SoundManager must support stop tone");
-    assert!(sound_js.contains(r#"case "success":"#), "SoundManager must support success arpeggio");
-    assert!(sound_js.contains(r#"case "warning":"#), "SoundManager must support warning chime");
-    assert!(sound_js.contains(r#"case "emergency":"#), "SoundManager must support emergency alarm");
-    assert!(sound_js.contains(r#"case "tick":"#), "SoundManager must support tick micro-blip");
+    assert!(
+        sound_js.contains("const SoundManager ="),
+        "sound_manager.js must define SoundManager"
+    );
+    assert!(
+        sound_js.contains(r#"case "start":"#),
+        "SoundManager must support start chime"
+    );
+    assert!(
+        sound_js.contains(r#"case "stop":"#),
+        "SoundManager must support stop tone"
+    );
+    assert!(
+        sound_js.contains(r#"case "success":"#),
+        "SoundManager must support success arpeggio"
+    );
+    assert!(
+        sound_js.contains(r#"case "warning":"#),
+        "SoundManager must support warning chime"
+    );
+    assert!(
+        sound_js.contains(r#"case "emergency":"#),
+        "SoundManager must support emergency alarm"
+    );
+    assert!(
+        sound_js.contains(r#"case "tick":"#),
+        "SoundManager must support tick micro-blip"
+    );
 
     // 2. index.html must load sound_manager.js
     let index_html = include_str!("../../src/index.html");
@@ -4771,9 +6101,18 @@ fn test_foreground_patrol_wiring_and_tray_invariant() {
         .find("unsafe extern \"system\" fn winevent_proc")
         .expect("winevent_proc must exist");
     let cb_body = &watch[cb..];
-    let cb_end = cb_body.find("\n}\n").map(|i| i + 3).unwrap_or(cb_body.len());
+    let cb_end = cb_body
+        .find("\n}\n")
+        .map(|i| i + 3)
+        .unwrap_or(cb_body.len());
     let cb_body = &cb_body[..cb_end];
-    for banned in ["debug_log_internal", ".emit(", "Mutex", "RwLock", "try_lock"] {
+    for banned in [
+        "debug_log_internal",
+        ".emit(",
+        "Mutex",
+        "RwLock",
+        "try_lock",
+    ] {
         assert!(
             !cb_body.contains(banned),
             "the WinEvent callback must never contain `{banned}` (system chain)"
@@ -4813,7 +6152,10 @@ fn test_foreground_patrol_wiring_and_tray_invariant() {
         "the patrol must start at boot next to the hotkey backend"
     );
     assert!(
-        lib_src.matches("platform::windows::stop_foreground_watch()").count() >= 2,
+        lib_src
+            .matches("platform::windows::stop_foreground_watch()")
+            .count()
+            >= 2,
         "the patrol must stop in shutdown_application AND RunEvent::Exit"
     );
 
@@ -4833,7 +6175,12 @@ fn test_foreground_patrol_wiring_and_tray_invariant() {
     ] {
         assert!(uipi.contains(needle), "uipi.rs must contain `{needle}`");
     }
-    for banned in ["ITaskService", "TaskScheduler", "CoCreateInstance", "winapi::"] {
+    for banned in [
+        "ITaskService",
+        "TaskScheduler",
+        "CoCreateInstance",
+        "winapi::",
+    ] {
         assert!(
             !uipi.contains(banned),
             "elevation must stay a schtasks CLI call — no COM (`{banned}`)"
@@ -4849,7 +6196,10 @@ fn test_foreground_patrol_wiring_and_tray_invariant() {
         "unregister_elevated_logon_task",
         "get_elevated_logon_task_registered",
     ] {
-        assert!(cmds.contains(needle), "tauri_commands.rs must expose `{needle}`");
+        assert!(
+            cmds.contains(needle),
+            "tauri_commands.rs must expose `{needle}`"
+        );
     }
     assert!(
         lib_src.contains("commands::register_elevated_logon_task"),
@@ -4859,7 +6209,10 @@ fn test_foreground_patrol_wiring_and_tray_invariant() {
     // 4. Frontend: the opt-in checkbox + both locales.
     let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
     let html_key = tauri::utils::assets::AssetKey::from("index.html");
-    let html_binding = ctx.assets().get(&html_key).expect("index.html not embedded");
+    let html_binding = ctx
+        .assets()
+        .get(&html_key)
+        .expect("index.html not embedded");
     let html = String::from_utf8_lossy(&html_binding);
     assert!(
         html.contains("id=\"uipiScheduledTaskCheckbox\""),
@@ -4877,7 +6230,10 @@ fn test_foreground_patrol_wiring_and_tray_invariant() {
         "scheduled_elevated_task",
         "syncScheduledTaskCheckbox",
     ] {
-        assert!(uipi_js.contains(needle), "uipi_manager.js must contain `{needle}`");
+        assert!(
+            uipi_js.contains(needle),
+            "uipi_manager.js must contain `{needle}`"
+        );
     }
     for locale in ["en", "ua"] {
         let asset = format!("locales/{locale}.json");
@@ -4886,8 +6242,8 @@ fn test_foreground_patrol_wiring_and_tray_invariant() {
             .assets()
             .get(&key)
             .unwrap_or_else(|| panic!("{locale}.json must be embedded"));
-        let v: serde_json::Value =
-            serde_json::from_str(&String::from_utf8_lossy(&bytes)).expect("locale must be valid JSON");
+        let v: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&bytes))
+            .expect("locale must be valid JSON");
         for k in ["uipi_scheduled_task_checkbox", "uipi_scheduled_task_hint"] {
             assert!(
                 v.get(k).is_some_and(|x| x.is_string()),
@@ -4915,7 +6271,10 @@ fn test_updater_hardening_and_portable_self_update() {
     let main_rs = include_str!("../src/main.rs");
     let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
     let main_key = tauri::utils::assets::AssetKey::from("main.js");
-    let main_binding = ctx.assets().get(&main_key).expect("main.js must be embedded");
+    let main_binding = ctx
+        .assets()
+        .get(&main_key)
+        .expect("main.js must be embedded");
     let main_js = String::from_utf8_lossy(&main_binding);
 
     // 1. NSIS teardown exists and is registered; dead relaunch is gone.
@@ -4946,7 +6305,10 @@ fn test_updater_hardening_and_portable_self_update() {
 
     // 2. Portable surface: commands registered, handover in main.rs.
     for needle in ["get_portable_update_info", "portable_self_update"] {
-        assert!(cmds_src.contains(needle), "tauri_commands.rs must expose `{needle}`");
+        assert!(
+            cmds_src.contains(needle),
+            "tauri_commands.rs must expose `{needle}`"
+        );
         assert!(
             lib_src.contains(&format!("commands::{needle}")),
             "the portable command `{needle}` must be registered in the invoke handler"
@@ -4957,7 +6319,8 @@ fn test_updater_hardening_and_portable_self_update() {
         "main.rs must drain the update handover before Tauri boots"
     );
     assert!(
-        uipi_src.contains("wait_for_parent_exit") && uipi_src.contains("cleanup_old_binary_deferred"),
+        uipi_src.contains("wait_for_parent_exit")
+            && uipi_src.contains("cleanup_old_binary_deferred"),
         "uipi.rs must own the parent-wait and the deferred .old cleanup"
     );
     assert!(
@@ -4992,14 +6355,19 @@ fn test_updater_hardening_and_portable_self_update() {
         .and_then(|v| v.as_array())
         .expect("plugins.updater.endpoints must exist");
     assert!(
-        endpoints.iter().any(|e| e
-            .as_str()
-            .is_some_and(|s| s.contains("github.com"))),
+        endpoints
+            .iter()
+            .any(|e| e.as_str().is_some_and(|s| s.contains("github.com"))),
         "the update endpoint must stay direct GitHub (Worker is radar-only)"
     );
 
     // 4. Frontend branches: NSIS + portable installers both wired.
-    for needle in ["installNsisUpdate", "installPortableUpdate", "update-progress", "isPortableRuntime"] {
+    for needle in [
+        "installNsisUpdate",
+        "installPortableUpdate",
+        "update-progress",
+        "isPortableRuntime",
+    ] {
         assert!(main_js.contains(needle), "main.js must contain `{needle}`");
     }
     assert!(
@@ -5009,12 +6377,11 @@ fn test_updater_hardening_and_portable_self_update() {
 
     // 5. Release pipeline signs + uploads the portable twin.
     let release_ps1 = include_str!("../../scripts/release.ps1");
-    for needle in [
-        "NanoClick-portable.exe.sig",
-        "portable",
-        "platforms",
-    ] {
-        assert!(release_ps1.contains(needle), "release.ps1 must handle `{needle}`");
+    for needle in ["NanoClick-portable.exe.sig", "portable", "platforms"] {
+        assert!(
+            release_ps1.contains(needle),
+            "release.ps1 must handle `{needle}`"
+        );
     }
 
     // 6. Radar: tray-aware backend ping, Worker is analytics-only.
@@ -5024,7 +6391,10 @@ fn test_updater_hardening_and_portable_self_update() {
         "RADAR_PING_INTERVAL_MS",
         "start_radar_ping",
     ] {
-        assert!(ping_src.contains(needle), "update_ping.rs must contain `{needle}`");
+        assert!(
+            ping_src.contains(needle),
+            "update_ping.rs must contain `{needle}`"
+        );
     }
     assert!(
         lib_src.contains("start_radar_ping"),
@@ -5046,7 +6416,10 @@ fn test_updater_hardening_and_portable_self_update() {
 fn test_settings_redesign_and_filter_highlight() {
     let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
     let html_key = tauri::utils::assets::AssetKey::from("index.html");
-    let html_binding = ctx.assets().get(&html_key).expect("index.html not embedded");
+    let html_binding = ctx
+        .assets()
+        .get(&html_key)
+        .expect("index.html not embedded");
     let html = String::from_utf8_lossy(&html_binding);
 
     // 1. Row 1 is three cards: Storage | System | Typing. BEHAVIOR is dead.
@@ -5106,8 +6479,15 @@ fn test_settings_redesign_and_filter_highlight() {
 
     // 4. settings_guard.js: delegated highlight listener + painter.
     let guard_js = include_str!("../../src/settings_guard.js");
-    for needle in ["_paintMode", "appFilterModeGroup", "addEventListener(\"change\""] {
-        assert!(guard_js.contains(needle), "settings_guard.js must contain `{needle}`");
+    for needle in [
+        "_paintMode",
+        "appFilterModeGroup",
+        "addEventListener(\"change\"",
+    ] {
+        assert!(
+            guard_js.contains(needle),
+            "settings_guard.js must contain `{needle}`"
+        );
     }
 
     // 5. style.css: 3-col grid + both segments + toggle switches + theme menu.
@@ -5122,7 +6502,10 @@ fn test_settings_redesign_and_filter_highlight() {
         ".theme-option",
         ".theme-dot",
     ] {
-        assert!(style_css.contains(needle), "style.css must contain `{needle}`");
+        assert!(
+            style_css.contains(needle),
+            "style.css must contain `{needle}`"
+        );
     }
     assert!(
         !style_css.contains("content: '✓'"),
@@ -5135,7 +6518,10 @@ fn test_settings_redesign_and_filter_highlight() {
             "ua.json" => include_str!("../../src/locales/ua.json"),
             _ => include_str!("../../src/locales/en.json"),
         };
-        for key in ["settings_group_system_window", "settings_group_typing_safety"] {
+        for key in [
+            "settings_group_system_window",
+            "settings_group_typing_safety",
+        ] {
             assert!(dict.contains(key), "{locale} must translate {key}");
         }
         assert!(
@@ -5148,7 +6534,352 @@ fn test_settings_redesign_and_filter_highlight() {
     // Rapid EN<->UA clicks used to stack one fetch per click (~12 KB each);
     // now revisits are cache hits and in-flight fetches are shared.
     let i18n_js = include_str!("../../src/i18n.js");
-    for needle in ["_cache", "_pending", "lang-swapping", "requestAnimationFrame"] {
+    for needle in [
+        "_cache",
+        "_pending",
+        "lang-swapping",
+        "requestAnimationFrame",
+    ] {
         assert!(i18n_js.contains(needle), "i18n.js must contain `{needle}`");
     }
+}
+
+/// Stage A — Satellite supervisor wiring (daemon-split plan §A).
+///
+/// Pins the three invariants of Stage A so they can never silently regress:
+///
+/// 1. `satellite.rs` exposes the full OOP supervisor API.
+/// 2. `lib.rs` setup wires both the env-var and the config-flag paths.
+/// 3. `overlay.rs` drain has a dual-mode path (OOP + in-process fallback).
+/// 4. Default is in-process (no silent regression for existing users).
+#[test]
+fn test_satellite_stage_a_supervisor_wiring() {
+    let sat_src = include_str!("../src/satellite.rs");
+    let lib_src = include_str!("../src/lib.rs");
+    let overlay_src = include_str!("../src/overlay.rs");
+
+    // 1. satellite.rs: full OOP API surface must exist.
+    for needle in [
+        "pub fn set_satellite_oop",
+        "pub fn satellite_oop_enabled",
+        "pub fn run_satellite_supervisor",
+        "pub fn satellite_send",
+        "SATELLITE_OOP",
+        "SatelliteChannel",
+        "OVERLAY_CHANNEL",
+        "HUD_CHANNEL",
+    ] {
+        assert!(
+            sat_src.contains(needle),
+            "satellite.rs must define `{needle}` (Stage A OOP supervisor API)"
+        );
+    }
+
+    // 2. Default is off: the literal `AtomicBool::new(false)` guards the
+    //    static — without it every release build would silently enable OOP.
+    assert!(
+        sat_src.contains("AtomicBool::new(false)"),
+        "SATELLITE_OOP must default to false (no silent breakage for existing users)"
+    );
+
+    // 3. lib.rs wires OOP activation from BOTH the env var and the config flag.
+    assert!(
+        lib_src.contains("NANOCLICK_OOP_SATELLITES"),
+        "lib.rs setup must check NANOCLICK_OOP_SATELLITES env var"
+    );
+    assert!(
+        lib_src.contains("oop_satellites"),
+        "lib.rs setup must check ui.oop_satellites config flag"
+    );
+    assert!(
+        lib_src.contains("set_satellite_oop(true)"),
+        "lib.rs must call set_satellite_oop(true) when OOP is enabled"
+    );
+    assert!(
+        lib_src.contains("run_satellite_supervisor"),
+        "lib.rs setup must launch the supervisor thread(s)"
+    );
+
+    // 4. overlay.rs drain has the dual-mode path: OOP → satellite_send,
+    //    fall-through to in-process. Both branches must exist.
+    assert!(
+        overlay_src.contains("satellite_oop_enabled()"),
+        "overlay.rs drain must check satellite_oop_enabled() for dual-mode"
+    );
+    assert!(
+        overlay_src.contains("satellite_send("),
+        "overlay.rs drain must call satellite_send in OOP mode"
+    );
+    assert!(
+        overlay_src.contains("get_webview_window(\"overlay\")"),
+        "overlay.rs drain must keep the in-process fallback path"
+    );
+
+    // 5. Supervisor loop: crash → restart, clean → stop.
+    assert!(
+        sat_src.contains("SatelliteExit::Crashed"),
+        "supervisor loop must handle SatelliteExit::Crashed (restart)"
+    );
+    assert!(
+        sat_src.contains("SatelliteExit::Clean"),
+        "supervisor loop must handle SatelliteExit::Clean (stop)"
+    );
+    assert!(
+        sat_src.contains("restarting in 200ms"),
+        "supervisor must back off 200ms between crash restarts"
+    );
+    assert!(
+        sat_src.contains("satellite-restarted"),
+        "supervisor must emit `satellite-restarted` event to main window on crash"
+    );
+
+    // 6. Channel disconnect on child death: old stdin must be cleared so
+    //    satellite_send returns false during the restart window.
+    assert!(
+        sat_src.contains("*guard = None"),
+        "supervisor must disconnect channel on child death (prevents stale writes)"
+    );
+}
+
+#[test]
+fn test_stage_b_ipc_contract_and_status_sink_wiring() {
+    // Stage B/C foundation tripwire: the daemon/UI split must not drift.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let read = |name: &str| {
+        std::fs::read_to_string(root.join(name)).unwrap_or_else(|_| panic!("src/{name} must exist"))
+    };
+    let ipc = read("ipc.rs");
+    let sink = read("status_sink.rs");
+    let tauri_sink = read("tauri_sink.rs");
+    let sched = read("scheduler.rs");
+    // 1. IPC envelope: JSON-lines request/response/event + satellite compat.
+    for needle in [
+        "pub struct IpcRequest",
+        "pub struct IpcResponse",
+        "pub struct DaemonEvent",
+        "fn encode(",
+        "fn decode(",
+        "encode_satellite_frame",
+        "DAEMON_PIPE_NAME",
+    ] {
+        assert!(ipc.contains(needle), "ipc.rs must contain `{needle}`");
+    }
+    // 2. Event names are byte-identical to the pages' listeners.
+    for needle in [
+        "\"status-update\"",
+        "\"hud-clicks\"",
+        "\"tray-action-result\"",
+        "\"satellite-toggle-result\"",
+    ] {
+        assert!(ipc.contains(needle), "ipc.rs must pin event `{needle}`");
+    }
+    // 3. StatusSink is Tauri-free (daemon_core compiles without Tauri).
+    assert!(
+        sink.contains("pub trait StatusSink"),
+        "status_sink.rs must define `StatusSink`"
+    );
+    assert!(
+        !sink.contains("tauri::") && !sink.contains("AppHandle"),
+        "status_sink.rs must stay Tauri-free (daemon_core boundary)"
+    );
+    // 4. Tauri adapter lives in its own file (never inside daemon_core).
+    assert!(
+        tauri_sink.contains("pub struct TauriSink"),
+        "tauri_sink.rs must define `TauriSink`"
+    );
+    assert!(
+        tauri_sink.contains("set_extra_sink") && tauri_sink.contains("mirror_status"),
+        "tauri_sink.rs must own the dual-write registry"
+    );
+    // 5. Central emit mirrors to the port AND keeps the Tauri path.
+    assert!(
+        sched.contains("mirror_hud") && sched.contains("mirror_status"),
+        "scheduler.rs central emit must dual-write to the StatusSink port"
+    );
+    assert!(
+        sched.contains("status_sink_twin_matches_tauri_payload"),
+        "scheduler.rs must pin sink/Tauri parity with a unit test"
+    );
+}
+
+#[test]
+fn test_stage_d_daemon_skeleton_wiring() {
+    // Stage D/E/F: daemon binary + transport + server + client + mutex +
+    // supervisor + handshake test.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let read = |name: &str| {
+        std::fs::read_to_string(root.join(name)).unwrap_or_else(|_| panic!("src/{name} must exist"))
+    };
+    let manifest = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
+    )
+    .expect("Cargo.toml must exist");
+    assert!(
+        manifest.contains("nanoclick-daemon"),
+        "Cargo.toml must declare the `nanoclick-daemon` binary"
+    );
+    let transport = read("daemon_transport.rs");
+    assert!(
+        transport.contains("pub fn read_line") && transport.contains("pub fn write_line"),
+        "transport must own JSON-lines framing"
+    );
+    let server = read("daemon_server.rs");
+    for needle in [
+        "pub struct DaemonState",
+        "pub fn handle_request",
+        "pub fn serve",
+        "\"toggle\"",
+        "\"toggle_mode\"",
+        "\"adjust_cps\"",
+        "\"get_full_state\"",
+        "\"activate_preset\"",
+        "\"emergency_stop\"",
+        "config_manager",
+    ] {
+        assert!(
+            server.contains(needle),
+            "daemon_server.rs must contain `{needle}`"
+        );
+    }
+    let client = read("daemon_client.rs");
+    assert!(
+        client.contains("pub fn call") && client.contains("IPC_TIMEOUT"),
+        "daemon_client.rs must proxy with a timeout"
+    );
+    let single = read("daemon_single.rs");
+    assert!(
+        single.contains("try_become_daemon") && single.contains("DAEMON_MUTEX_NAME"),
+        "daemon_single.rs must own the daemon mutex"
+    );
+    let entry = read("main-daemon.rs");
+    assert!(
+        entry.contains("try_become_daemon") && entry.contains("daemon_server::serve"),
+        "main-daemon.rs must lock single-instance then serve"
+    );
+    let sup = read("daemon_supervise.rs");
+    assert!(
+        sup.contains("supervise_ui") && sup.contains("UI_CHILD_FLAG"),
+        "daemon_supervise.rs must own the UI child supervisor"
+    );
+    assert!(
+        entry.contains("supervise_ui"),
+        "main-daemon.rs must spawn the UI supervisor"
+    );
+    let handshake = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/daemon_handshake.rs"),
+    )
+    .expect("tests/daemon_handshake.rs must exist");
+    for needle in [
+        "handshake_ping_state_toggle_over_tcp",
+        "kill_ui_connection_daemon_truth_survives",
+        "chaos_kill_ui_process_engine_keeps_running",
+    ] {
+        assert!(
+            handshake.contains(needle),
+            "daemon_handshake.rs must contain `{needle}`"
+        );
+    }
+}
+
+#[test]
+fn test_overlay_css_has_no_culling_optimizations() {
+    let ctx: tauri::Context<tauri::Wry> = tauri::generate_context!();
+    let key = tauri::utils::assets::AssetKey::from("overlay.css");
+    let bytes = ctx.assets().get(&key).expect("overlay.css not embedded");
+    let css = String::from_utf8_lossy(&bytes);
+
+    // Level 1 Static Analysis:
+    // Chromium transparency bug: `content-visibility: auto` or `contain: strict`
+    // on a transparent fullscreen window culls canvas painting if the element is treated
+    // as off-screen or empty, breaking visual click ripples.
+    assert!(
+        !css.contains("content-visibility"),
+        "overlay.css must not contain `content-visibility`!"
+    );
+    assert!(
+        !css.contains("contain: strict"),
+        "overlay.css must not contain `contain: strict`!"
+    );
+}
+
+#[test]
+fn test_save_app_config_is_non_blocking_and_offloads_satellite_build() {
+    fn section<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
+        let from = src
+            .find(start)
+            .unwrap_or_else(|| panic!("`{start}` not found"));
+        match src[from..].find(end) {
+            Some(i) => &src[from..from + i],
+            None => &src[from..],
+        }
+    }
+
+    let lib_src = include_str!("../src/lib.rs");
+
+    // Level 1 Timing & Non-blocking verification:
+    // save_app_config must NEVER run WebviewWindowBuilder::build synchronously on the UI thread.
+    // It settles the config scope first (scoped commit), then toggles satellites
+    // synchronously: the toggles go through the satellite bulkhead (busy under
+    // contention) and the F6 visibility gate (deferred in tray) without blocking
+    // on a WebView build.
+    let save_app = section(lib_src, "fn save_app_config(", "fn get_app_config");
+    assert!(
+        save_app.contains("node.scoped("),
+        "save_app_config must run the save inside node.scoped()"
+    );
+    assert!(
+        save_app.contains("match outcome"),
+        "save_app_config must unpack the scoped outcome before side-effects"
+    );
+    assert!(
+        save_app.contains("overlay::toggle_overlay(app.clone(), want_ripple)"),
+        "save_app_config handles the overlay toggle after the scope commits"
+    );
+    assert!(
+        save_app.contains("toggle_hud_window(app.clone(), want_hud)"),
+        "save_app_config handles the hud toggle after the scope commits"
+    );
+
+    // Also verify reset_config_to_defaults offloads satellite toggles
+    let reset_app = section(
+        lib_src,
+        "fn reset_config_to_defaults(",
+        "fn apply_mode_toggle",
+    );
+    assert!(
+        reset_app.contains("std::thread::spawn(move ||"),
+        "reset_config_to_defaults must also offload satellite toggles to background thread"
+    );
+}
+
+#[test]
+fn test_graceful_shutdown_destroys_satellites_before_main_exit() {
+    fn section<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
+        let from = src
+            .find(start)
+            .unwrap_or_else(|| panic!("`{start}` not found"));
+        match src[from..].find(end) {
+            Some(i) => &src[from..from + i],
+            None => &src[from..],
+        }
+    }
+
+    let lib_src = include_str!("../src/lib.rs");
+
+    // Level 3 Graceful Shutdown & Orphan Leak Test:
+    // shutdown_application must destroy secondary satellite windows (overlay and hud)
+    // BEFORE destroying the main window, so that WebView2 helper processes do not orphan.
+    let shut = section(lib_src, "fn shutdown_application", "fn toggle_hud_window");
+    assert!(
+        shut.contains("crate::overlay::destroy_satellite(app, label)"),
+        "shutdown_application must destroy satellites through the single-owner destructor"
+    );
+    assert!(
+        shut.contains("for label in [\"overlay\", \"hud\"]"),
+        "shutdown_application must destroy overlay and hud before main"
+    );
+    assert!(
+        shut.contains("SHUTTING_DOWN.swap(true"),
+        "shutdown_application must be re-entry safe"
+    );
 }

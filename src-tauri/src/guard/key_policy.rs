@@ -465,8 +465,14 @@ mod tests {
         for vk in GAMEPLAY_LETTERS {
             assert!(!policy.is_text_keypress(vk), "seed key 0x{vk:02X}");
         }
-        assert!(!policy.is_text_keypress(0x20), "Space must stay a gameplay key");
-        assert!(!policy.is_text_keypress(0x26), "ArrowUp must stay a gameplay key");
+        assert!(
+            !policy.is_text_keypress(0x20),
+            "Space must stay a gameplay key"
+        );
+        assert!(
+            !policy.is_text_keypress(0x26),
+            "ArrowUp must stay a gameplay key"
+        );
         assert!(policy.is_text_keypress(VK_J), "J is not in the seed");
         assert!(policy.is_text_keypress(0x54), "T is not in the seed");
     }
@@ -565,7 +571,9 @@ mod tests {
     /// Label round-trip: what the UI shows can be parsed back.
     #[test]
     fn labels_round_trip() {
-        for vk in [0x41u16, 0x5A, 0x30, 0x39, 0x60, 0x75, 0x20, 0x11, 0x01, 0x04] {
+        for vk in [
+            0x41u16, 0x5A, 0x30, 0x39, 0x60, 0x75, 0x20, 0x11, 0x01, 0x04,
+        ] {
             let label = key_label(vk);
             assert_eq!(
                 vk_from_label(&label),

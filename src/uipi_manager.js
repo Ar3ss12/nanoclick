@@ -57,35 +57,33 @@ const tI18n = (k, fb) => (window.I18nEngine ? window.I18nEngine.t(k, {}, fb) : f
     const cb = document.getElementById("alwaysRunAsAdminCheckbox");
     if (cb) {
       cb.checked = (config?.ui?.always_run_as_admin ?? false) || this.alwaysAdmin;
-      cb.addEventListener("change", async () => {
+      cb.addEventListener("change", () => {
         const enabled = cb.checked;
         if (config?.ui) config.ui.always_run_as_admin = enabled;
-        try {
-          if (window.__TAURI__?.core?.invoke) {
-            await window.__TAURI__.core.invoke("set_always_run_as_admin", { enabled });
-          }
-        } catch (err) {
-          console.error("[UIPI] Failed to update always_run_as_admin:", err);
+        // ONE owner: save_app_config (Rust) mirrors the flag into
+        // HKCU\...\Layers only when it changed. The direct invoke here used
+        // to race that save (double registry write per flip), and the
+        // window.saveConfig() call below it never existed (module-scoped
+        // function, invisible to this classic script) — so the flag reached
+        // the registry but never the disk, and the next unrelated save
+        // silently reverted it. Persist through the pipeline instead.
+        if (typeof window.__nanoclickSaveThrottled === "function") {
+          window.__nanoclickSaveThrottled();
         }
-        if (window.saveConfig) window.saveConfig();
       });
     }
 
     const modalCb = document.getElementById("uipiAlwaysAdminCheckbox");
     if (modalCb) {
       modalCb.checked = cb ? cb.checked : this.alwaysAdmin;
-      modalCb.addEventListener("change", async () => {
+      modalCb.addEventListener("change", () => {
         const enabled = modalCb.checked;
         if (cb) cb.checked = enabled;
         if (config?.ui) config.ui.always_run_as_admin = enabled;
-        try {
-          if (window.__TAURI__?.core?.invoke) {
-            await window.__TAURI__.core.invoke("set_always_run_as_admin", { enabled });
-          }
-        } catch (err) {
-          console.error("[UIPI] Failed to update always_run_as_admin:", err);
+        // Same single-owner rule as above: no direct registry invoke.
+        if (typeof window.__nanoclickSaveThrottled === "function") {
+          window.__nanoclickSaveThrottled();
         }
-        if (window.saveConfig) window.saveConfig();
       });
     }
 

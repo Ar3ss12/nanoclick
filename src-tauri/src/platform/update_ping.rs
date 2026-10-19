@@ -67,10 +67,7 @@ pub fn radar_needs_github_fallback(status: Option<u16>, transport_ok: bool) -> b
     if !transport_ok {
         return true;
     }
-    match status {
-        Some(200..=299) => false,
-        _ => true,
-    }
+    !matches!(status, Some(200..=299))
 }
 
 #[cfg(test)]

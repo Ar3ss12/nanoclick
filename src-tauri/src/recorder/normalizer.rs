@@ -155,12 +155,15 @@ fn rdp_simplify_moves(moves: &[RawEvent], epsilon: f64) -> Vec<RawEvent> {
     let dy = p_end.1 - p_start.1;
     let line_len_sq = dx * dx + dy * dy;
 
-    for i in 1..moves.len() - 1 {
-        let p = extract_pt(&moves[i]);
+    for (i, m) in moves.iter().enumerate().take(moves.len() - 1).skip(1) {
+        let p = extract_pt(m);
         let dist = if line_len_sq == 0.0 {
             ((p.0 - p_start.0).powi(2) + (p.1 - p_start.1).powi(2)).sqrt()
         } else {
-            let num = ((p_end.1 - p_start.1) * p.0 - (p_end.0 - p_start.0) * p.1 + p_end.0 * p_start.1 - p_end.1 * p_start.0).abs();
+            let num = ((p_end.1 - p_start.1) * p.0 - (p_end.0 - p_start.0) * p.1
+                + p_end.0 * p_start.1
+                - p_end.1 * p_start.0)
+                .abs();
             num / line_len_sq.sqrt()
         };
 
@@ -506,8 +509,18 @@ mod tests {
             ev_mouse_up(MouseButton::X2, 130),
         ];
         let actions = normalize(events);
-        assert!(actions.iter().any(|a| matches!(a, Action::MouseDown { button: MouseButton::X1 })));
-        assert!(actions.iter().any(|a| matches!(a, Action::MouseDown { button: MouseButton::X2 })));
+        assert!(actions.iter().any(|a| matches!(
+            a,
+            Action::MouseDown {
+                button: MouseButton::X1
+            }
+        )));
+        assert!(actions.iter().any(|a| matches!(
+            a,
+            Action::MouseDown {
+                button: MouseButton::X2
+            }
+        )));
     }
 
     #[test]
@@ -527,7 +540,9 @@ mod tests {
             },
         ];
         let actions = normalize(events);
-        assert!(actions.iter().any(|a| matches!(a, Action::KeyDown { mods: m, .. } if m.ctrl && m.shift)));
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, Action::KeyDown { mods: m, .. } if m.ctrl && m.shift)));
     }
 
     #[test]
@@ -538,6 +553,10 @@ mod tests {
             ev_mouse_move(12, 10, 10),
         ];
         let actions: Vec<Action> = events.into_iter().map(|e| e.to_action()).collect();
-        assert_eq!(actions.len(), 3, "precise mode should keep all raw move events");
+        assert_eq!(
+            actions.len(),
+            3,
+            "precise mode should keep all raw move events"
+        );
     }
 }

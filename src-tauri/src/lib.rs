@@ -2,18 +2,28 @@ mod commands;
 mod config;
 mod config_manager;
 mod core;
+pub mod daemon_client;
+pub mod daemon_server;
+pub mod daemon_single;
+pub mod daemon_supervise;
+pub mod daemon_transport;
 pub mod defaults;
 mod guard;
+pub mod ipc;
+pub mod notifications;
+mod overlay;
 mod persistence;
 pub mod platform;
 mod recorder;
+pub mod satellite;
 mod scheduler;
+pub mod stability;
 mod stats_agg;
-mod window_dispatch;
-mod overlay;
+mod status_sink;
+mod tauri_sink;
 mod tray;
 mod watcher;
-pub mod notifications;
+mod window_dispatch;
 pub use notifications::*;
 
 use config_manager::{AppConfig, ConfigManager};
@@ -81,16 +91,19 @@ pub struct AppNotice {
 fn healing_notice(action: &crate::defaults::SelfHealingAction) -> Option<AppNotice> {
     use crate::defaults::SelfHealingAction as A;
     match action {
-        A::RepairedAndPatched { backup_path, details } => Some(AppNotice {
+        A::RepairedAndPatched {
+            backup_path,
+            details,
+        } => Some(AppNotice {
             level: NoticeLevel::Warning,
             title: "notice_cfg_repaired_title".into(),
-            message: format!(
-                "notice_cfg_repaired_msg|{}",
-                details.len()
-            ),
+            message: format!("notice_cfg_repaired_msg|{}", details.len()),
             details: Some(backup_path.display().to_string()),
         }),
-        A::CorruptedAndRecovered { backup_path, restored_from_last_good } => {
+        A::CorruptedAndRecovered {
+            backup_path,
+            restored_from_last_good,
+        } => {
             let message = if *restored_from_last_good {
                 "notice_cfg_lkg_msg".into()
             } else {
@@ -138,10 +151,7 @@ fn macros_healing_notice(
 
 /// Runtime watcher verdict (observer only, never rewrites files).
 /// Titles/messages are i18n KEYS resolved by the frontend.
-fn file_health_notice(
-    file: &str,
-    verdict: &crate::watcher::FileHealth,
-) -> Option<AppNotice> {
+fn file_health_notice(file: &str, verdict: &crate::watcher::FileHealth) -> Option<AppNotice> {
     use crate::watcher::FileHealth as H;
     match verdict {
         H::ChangedValid => Some(AppNotice {
@@ -166,21 +176,26 @@ fn file_health_notice(
 /// `|` suffix carries a param (count or file name), details carry the path.
 #[tauri::command]
 fn get_startup_notices(state: State<'_, AppState>) -> Vec<AppNotice> {
-    state.startup_notices.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default()
+    state
+        .startup_notices
+        .lock()
+        .map(|mut q| std::mem::take(&mut *q))
+        .unwrap_or_default()
 }
 
 /// Non-blocking runtime toast queue (watcher verdicts). Unlike the boot
 /// Deadbolt queue, these auto-dismiss: observer info, never file rewrites.
 #[tauri::command]
 fn poll_file_toasts(state: State<'_, AppState>) -> Vec<AppNotice> {
-    state.file_toasts.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default()
+    state
+        .file_toasts
+        .lock()
+        .map(|mut q| std::mem::take(&mut *q))
+        .unwrap_or_default()
 }
 
 #[tauri::command]
-fn get_notifications(
-    state: State<'_, AppState>,
-    limit: Option<usize>,
-) -> Vec<AppNotification> {
+fn get_notifications(state: State<'_, AppState>, limit: Option<usize>) -> Vec<AppNotification> {
     state.notification_store.get_all(limit)
 }
 
@@ -190,10 +205,7 @@ fn get_unread_notifications(state: State<'_, AppState>) -> Vec<AppNotification> 
 }
 
 #[tauri::command]
-fn mark_notifications_read(
-    state: State<'_, AppState>,
-    ids: Vec<String>,
-) -> Result<(), String> {
+fn mark_notifications_read(state: State<'_, AppState>, ids: Vec<String>) -> Result<(), String> {
     state.notification_store.mark_read(&ids);
     Ok(())
 }
@@ -259,62 +271,90 @@ fn ensure_session_config_backup(app: &AppHandle) {
 }
 
 #[tauri::command]
-fn save_app_config(config: AppConfig, state: State<'_, AppState>, app: AppHandle) -> Result<AppConfig, String> {
-    // Insurance first: the previous file is copied aside before this session's first
-    // write, so a wrong-but-valid write (the class that cost a real profile) is always
-    // recoverable by hand.
-    ensure_session_config_backup(&app);
-    let _ = crate::platform::set_always_run_as_admin(config.ui.always_run_as_admin);
-    // Keep persisted UI prefs and the lazy WebViews in sync: toggling ripple/HUD
-    // in Settings must create/destroy the WebView on demand, not just flip a flag.
-    let prev = state.config_manager.load();
-    let mut config = config;
-    // Remember window position: capture outer_position() into the SAME atomic
-    // save (no extra file, no plugin). Best-effort: window may be absent in
-    // tests, remember may be OFF. Never fails the save.
-    if config.ui.remember_window_position {
-        if let Some(win) = app.get_webview_window("main") {
-            if let Ok(pos) = win.outer_position() {
-                config.ui.window_x = Some(pos.x);
-                config.ui.window_y = Some(pos.y);
-            }
-            // F3: the SIZE belongs to "remember" as well. Without it a rebuild
-            // (deep sleep) takes its geometry from tauri.conf.json and a window
-            // the user resized snaps back to the default size.
-            if let Ok(size) = win.inner_size() {
-                config.ui.window_w = Some(size.width as i32);
-                config.ui.window_h = Some(size.height as i32);
-            }
+fn save_app_config(
+    config: AppConfig,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AppConfig, String> {
+    // Config bulkhead (stability::config_node, max_in_flight(1)): the config
+    // writers race on load-save. The loser gets "config busy - retry" and the
+    // frontend retries once with a fresh collect. Scoped execution: the guard
+    // commits on Ok and aborts on Err, so no implicit-drop path exists here
+    // by construction. Rollback is a no-op: the disk is untouched until
+    // `config_manager.save()` inside the closure.
+    let node = crate::stability::config_node();
+    // Scope boundary: everything touching the config file and the scheduler
+    // mirror runs inside. Satellite create/destroy runs after commit.
+    let outcome: Result<(AppConfig, bool, bool, bool, bool), snubber::SnubberError<String>> = node
+        .scoped(
+            || {},
+            || -> Result<(AppConfig, bool, bool, bool, bool), String> {
+                // Previous file is copied aside before this session's first
+                // write, so a wrong-but-valid write stays recoverable by hand.
+                ensure_session_config_backup(&app);
+                let _ = crate::platform::set_always_run_as_admin(config.ui.always_run_as_admin);
+                let prev = state.config_manager.load();
+                let mut config = config;
+                // Window geometry is stamped from the live window into the
+                // same atomic save (no extra file, no plugin). Best-effort:
+                // the window may be absent in tests, remember may be off.
+                if config.ui.remember_window_position {
+                    if let Some(win) = app.get_webview_window("main") {
+                        if let Ok(pos) = win.outer_position() {
+                            config.ui.window_x = Some(pos.x);
+                            config.ui.window_y = Some(pos.y);
+                        }
+                        // Size is part of "remember": without it a rebuild
+                        // (deep sleep) falls back to tauri.conf.json geometry
+                        // and discards the user's resize.
+                        if let Ok(size) = win.inner_size() {
+                            config.ui.window_w = Some(size.width as i32);
+                            config.ui.window_h = Some(size.height as i32);
+                        }
+                    }
+                } else {
+                    config.ui.window_x = None;
+                    config.ui.window_y = None;
+                    config.ui.window_w = None;
+                    config.ui.window_h = None;
+                }
+                // Visibility is stamped from the live window: the page never
+                // observes a tray hide or deep sleep, so its copy is stale by
+                // definition. `MAIN_IN_TRAY` outranks the live read because
+                // the close-time flush runs while the window is still shown.
+                config.ui.window_was_visible = !MAIN_IN_TRAY.load(Ordering::Acquire)
+                    && app
+                        .get_webview_window("main")
+                        .and_then(|w| w.is_visible().ok())
+                        .unwrap_or(false);
+                // Abort path: `scoped` converts this Err into an explicit
+                // abort. No implicit drop, no breaker streak.
+                state.config_manager.save(&config)?;
+                // The file observer marks our own write inside `save()`.
+                state
+                    .scheduler
+                    .set_config(config::Config::from(config.clone()));
+                let ripple_changed = config.ui.visual_ripple != prev.ui.visual_ripple;
+                let want_ripple = config.ui.visual_ripple;
+                let hud_changed = config.ui.show_hud != prev.ui.show_hud;
+                let want_hud = config.ui.show_hud;
+                Ok((config, ripple_changed, want_ripple, hud_changed, want_hud))
+            },
+        );
+    let (config, ripple_changed, want_ripple, hud_changed, want_hud) = match outcome {
+        Ok(v) => v,
+        Err(snubber::SnubberError::Admission(_)) => {
+            return Err("config busy - retry".into());
         }
-    } else {
-        // Remember OFF: don't hoard stale coordinates.
-        config.ui.window_x = None;
-        config.ui.window_y = None;
-        config.ui.window_w = None;
-        config.ui.window_h = None;
+        Err(snubber::SnubberError::Work(e)) => return Err(e),
+    };
+    // Post-commit side-effects (bulkhead released): satellite toggles run
+    // through their own bulkhead and may block on WebView2 init.
+    if ripple_changed {
+        let _ = overlay::toggle_overlay(app.clone(), want_ripple);
     }
-    // The "was the window visible?" flag is stamped from the LIVE window for the
-    // same reason the geometry is: the page never observes a tray hide or a deep
-    // sleep, so whatever it sent is stale by definition. `MAIN_IN_TRAY` is checked
-    // first because the page's close-time flush runs while the window is still on
-    // screen — without it that flush reported "visible" and undid the tray exit.
-    config.ui.window_was_visible = !MAIN_IN_TRAY.load(Ordering::Acquire)
-        && app
-            .get_webview_window("main")
-            .and_then(|w| w.is_visible().ok())
-            .unwrap_or(false);
-    state.config_manager.save(&config)?;
-    // OUR OWN echo is swallowed inside `ConfigManager::save()` (it marks before
-    // writing), so no call site has to remember it — the previous manual call
-    // here ran AFTER the write, which is one poll too late to be useful.
-    state
-        .scheduler
-        .set_config(config::Config::from(config.clone()));
-    if config.ui.visual_ripple != prev.ui.visual_ripple {
-        let _ = overlay::toggle_overlay(app.clone(), config.ui.visual_ripple);
-    }
-    if config.ui.show_hud != prev.ui.show_hud {
-        let _ = toggle_hud_window(app.clone(), config.ui.show_hud);
+    if hud_changed {
+        let _ = toggle_hud_window(app.clone(), want_hud);
     }
     Ok(config)
 }
@@ -336,7 +376,10 @@ fn complete_onboarding(state: State<'_, AppState>) -> Result<AppConfig, String> 
 }
 
 #[tauri::command]
-fn reset_config_to_defaults(state: State<'_, AppState>, app: AppHandle) -> Result<AppConfig, String> {
+fn reset_config_to_defaults(
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AppConfig, String> {
     let prev = state.config_manager.load();
     let app_cfg = state.config_manager.reset_to_defaults()?;
     state
@@ -543,8 +586,9 @@ fn get_debug_mode() -> bool {
 /// `Builder::on_before_exit` never applies to it — the only hook that runs
 /// there is Tauri's own `cleanup_before_exit()` (windows + webviews). Calling
 /// this command between `download()` and `install()` closes the gap:
-/// tray icon removed (no ghost), clicker stopped, LL hooks / recorder hooks /
-/// foreground patrol down — before the plugin's `process::exit(0)`.
+/// tray icon removed (no orphan icon left in the notification area), clicker
+/// stopped, LL hooks / recorder hooks / foreground patrol down — before the
+/// plugin's `process::exit(0)`.
 ///
 /// Deliberately NOT `shutdown_application`: windows stay alive (the installer
 /// kills the process itself) and no `app.exit()` is issued. If the install
@@ -563,7 +607,10 @@ pub(crate) fn teardown_before_nsis_install() {
     if let Some(exec) = crate::core::global() {
         exec.stop();
     }
-    debug_log_internal("warn", "[Updater] pre-install teardown done (tray/hooks/executor down)");
+    debug_log_internal(
+        "warn",
+        "[Updater] pre-install teardown done (tray/hooks/executor down)",
+    );
 }
 
 /// JS-facing wrapper: stop the scheduler through the managed state, then run
@@ -595,16 +642,25 @@ fn prepare_nsis_update(app: AppHandle) -> Result<(), String> {
 fn dump_input_diagnostics() -> usize {
     let hotkeys = crate::platform::hotkey_diag_dump();
     let toggles = crate::scheduler::toggle_diag_dump();
-    let total = hotkeys.len() + toggles.len();
+    let ripples = crate::overlay::overlay_diag_dump();
+    let total = hotkeys.len() + toggles.len() + ripples.len();
     debug_log_internal(
         "warn",
-        &format!("[Diag] input dump: hotkey_lines={} toggle_lines={total}", hotkeys.len()),
+        &format!(
+            "[Diag] input dump: hotkey_lines={} toggle_lines={} ripple_lines={}",
+            hotkeys.len(),
+            toggles.len(),
+            ripples.len(),
+        ),
     );
     for line in hotkeys {
         debug_log_internal("warn", &format!("[Diag] hotkey: {line}"));
     }
     for line in toggles {
         debug_log_internal("warn", &format!("[Diag] toggle: {line}"));
+    }
+    for line in ripples {
+        debug_log_internal("warn", &format!("[Diag] ripple: {line}"));
     }
     #[cfg(target_os = "windows")]
     {
@@ -953,6 +1009,16 @@ pub(crate) fn tray_clicking_active(app: &AppHandle) -> bool {
         .unwrap_or(false)
 }
 
+/// Is the HUD preference currently on?
+///
+/// Same rule as `tray_work_mode_active`: the persisted flag only, never a
+/// window handle — the tray pump calls this while opening the menu.
+pub(crate) fn tray_hud_visible(app: &AppHandle) -> bool {
+    app.try_state::<AppState>()
+        .map(|s| s.config_manager.load().ui.show_hud)
+        .unwrap_or(false)
+}
+
 /// Report a tray action to the user.
 ///
 /// A live page gets its own feedback (status-update → badge, `tray-action-result`
@@ -969,8 +1035,8 @@ fn report_tray_action(app: &AppHandle, msg: &str) {
 /// live — called on the Tauri main thread from the passive foreground
 /// patrol (`platform::windows::foreground_watch`).
 ///
-/// THE F10 INVARIANT LIVES HERE: a window the user put in the tray is NEVER
-/// resurrected by a block. Tray/deep-sleep gets `MessageBeep` (already played
+/// Invariant: a window the user placed in the tray is never shown again by a
+/// background block. Tray/deep-sleep gets `MessageBeep` (already played
 /// by the caller) + `NotificationStore` entry (already pushed) + a tray
 /// balloon; the UIPI modal waits inside the hidden page for the user's own
 /// return (`syncPendingNotifications`). ONLY a window that is already on
@@ -989,7 +1055,7 @@ pub(crate) fn foreground_alert_on_elevated_focus(app: &AppHandle) {
         );
         debug_log_internal(
             "warn",
-            "[UIPI] elevated focus while the window lives in the tray (balloon, no window resurrected)",
+            "[UIPI] elevated focus while the window lives in the tray (balloon, window stays hidden)",
         );
         return;
     }
@@ -1022,7 +1088,7 @@ fn uipi_blocked_in_tray() {
     );
     debug_log_internal(
         "warn",
-        "[UIPI] blocked click while the window lives in the tray (balloon, no window resurrected)",
+        "[UIPI] blocked click while the window lives in the tray (balloon, window stays hidden)",
     );
 }
 
@@ -1059,7 +1125,7 @@ pub(crate) fn reload_interface_from_tray(app: &AppHandle) {
         ReloadStrategy::ReloadPage => {
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.eval("window.__NANOCLICK_RELOADING__ = true; location.reload();");
-                // A reload resurrects the page, but the watchdog countdown belongs
+                // A reload recreates the page, but the watchdog countdown belongs
                 // to the previous one; a fresh watchdog keeps a second silent boot
                 // honest (and still never ends the process).
                 spawn_frontend_watchdog(app.clone());
@@ -1081,7 +1147,7 @@ pub(crate) fn reload_interface_from_tray(app: &AppHandle) {
 ///
 /// A page reload cannot fix a wedged backend, and with the WebView gone the
 /// user has no other way out than Quit → relaunch by hand. The tray icon is
-/// removed first so Windows never has to reap a ghost one.
+/// removed first so Windows never has to reap an orphan one.
 pub(crate) fn restart_app_from_tray(app: &AppHandle) {
     debug_log_internal("warn", "[Tray] restart requested from the menu");
     report_tray_action(app, "Restarting…");
@@ -1196,9 +1262,9 @@ fn show_secondary_windows(app: &AppHandle) {
     let cfg = state.config_manager.load();
     if cfg.ui.visual_ripple {
         if app.get_webview_window("overlay").is_none() {
-            // Created hidden; `overlay_ready` shows it once the transparent DOM
-            // has rendered (Zero-Flash, same rule as the boot path).
-            let _ = overlay::ensure_overlay_window(app);
+            // Created hidden through the single-owner facade; `overlay_ready`
+            // shows it once the transparent DOM has rendered (no white flash).
+            let _ = overlay::ensure_satellite(app, "overlay");
         } else if let Some(win) = app.get_webview_window("overlay") {
             let _ = win.show();
         }
@@ -1408,7 +1474,9 @@ fn deep_sleep_allowed_now(app: &AppHandle) -> bool {
         .try_state::<AppState>()
         .map(|s| s.scheduler.is_active())
         .unwrap_or(false);
-    let macro_running = crate::core::global().map(|e| e.is_running()).unwrap_or(false);
+    let macro_running = crate::core::global()
+        .map(|e| e.is_running())
+        .unwrap_or(false);
     let recording = app
         .try_state::<crate::commands::MacroState>()
         .map(|s| s.recorder.lock().map(|slot| slot.is_some()).unwrap_or(true))
@@ -1432,7 +1500,10 @@ fn deep_sleep_skip_reason(app: &AppHandle) -> &'static str {
     if state.scheduler.is_active() {
         return "the clicker is running";
     }
-    if crate::core::global().map(|e| e.is_running()).unwrap_or(false) {
+    if crate::core::global()
+        .map(|e| e.is_running())
+        .unwrap_or(false)
+    {
         return "a macro is running";
     }
     let recording = app
@@ -1539,7 +1610,7 @@ pub(crate) fn shutdown_application(app: &AppHandle) {
     persist_window_visibility(app, was_visible);
 
     // 1. Drop the tray icon before the windows go away, so Windows never has to
-    //    reap a ghost icon and the pump thread is joined while state is alive.
+    //    reap an orphan icon and the pump thread is joined while state is alive.
     stop_tray();
 
     // 2. STOP THE BACKEND FIRST — strictly before any window is destroyed. This is
@@ -1570,17 +1641,23 @@ pub(crate) fn shutdown_application(app: &AppHandle) {
     if let Some(state) = app.try_state::<AppState>() {
         let cfg = state.config_manager.load();
         crate::defaults::refresh_last_good_snapshot(&state.config_manager.config_path(), &cfg);
-        debug_log_internal("info", "[Shutdown] golden snapshot refreshed from the live config");
+        debug_log_internal(
+            "info",
+            "[Shutdown] golden snapshot refreshed from the live config",
+        );
     }
 
     // 3. Only now destroy the windows: satellites first, `main` LAST (it is the
     //    one the hooks and the page talk to). `hide()` is not enough here — it
     //    leaves the WebView2 helpers alive until the process image disappears
     //    (measured: hiding frees nothing, 122.8 MB stays resident).
-    for label in ["overlay", "hud", "main"] {
-        if let Some(win) = app.get_webview_window(label) {
-            let _ = win.destroy();
-        }
+    //    Single-owner destructor: no snubber guard (a toggle thread may hold
+    //    it while blocked on the event loop — taking it here deadlocks).
+    for label in ["overlay", "hud"] {
+        crate::overlay::destroy_satellite(app, label);
+    }
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.destroy();
     }
 
     // 4. Request Tauri runtime exit
@@ -1601,22 +1678,45 @@ pub(crate) fn shutdown_application(app: &AppHandle) {
 
 #[tauri::command]
 fn toggle_hud_window(app: AppHandle, show: bool) -> Result<(), String> {
+    // Scoped admission through the satellite bulkhead: a refused create is a
+    // planned abort, never a breaker trip.
+    let node = crate::stability::satellite_node();
+    let app_rb = app.clone();
+    let outcome: Result<(), snubber::SnubberError<String>> = node.scoped(
+        move || {
+            if let Some(win) = app_rb.get_webview_window("hud") {
+                let _ = win.destroy();
+            }
+        },
+        || toggle_hud_window_inner(app, show),
+    );
+    match outcome {
+        Ok(v) => Ok(v),
+        Err(snubber::SnubberError::Admission(_)) => {
+            Err("satellite busy — toggle in progress".into())
+        }
+        Err(snubber::SnubberError::Work(e)) => Err(e),
+    }
+}
+
+/// Inner HUD toggle (no admission: the scope lives on `toggle_hud_window`).
+fn toggle_hud_window_inner(app: AppHandle, show: bool) -> Result<(), String> {
     if show {
-        // F6: the HUD is a satellite of the main window, never a standalone one.
-        // While the app lives in the tray (main hidden, or destroyed by deep
-        // sleep) the preference is only stored — the window is built when the
-        // main window comes back (`restore_main_window`). Creating it here left an
+        // The HUD is a satellite of the main window, never standalone. While
+        // the app lives in the tray (main hidden, or released by deep sleep)
+        // the preference is only stored — the window is built when the main
+        // window returns (`restore_main_window`). Creating it here left an
         // always-on-top counter floating over the desktop with no owner.
         if !main_window_visible(&app) {
             debug_log_internal("info", "[HUD] show deferred: main window is not visible");
             return Ok(());
         }
         let already_existed = app.get_webview_window("hud").is_some();
-        ensure_hud_window(&app)?;
+        overlay::ensure_satellite(&app, "hud")?;
         if let Some(win) = app.get_webview_window("hud") {
             let _ = win.set_ignore_cursor_events(true);
-            // Fresh WebView: DON'T show yet — hud_ready() shows it once the DOM
-            // has rendered (avoids DWM white flash). Existing: show now.
+            // Fresh WebView: hidden until hud_ready() fires after DOM render
+            // (no white flash). Existing window: show immediately.
             if already_existed {
                 let _ = win.show();
             }
@@ -1624,41 +1724,17 @@ fn toggle_hud_window(app: AppHandle, show: bool) -> Result<(), String> {
         }
     } else if let Some(win) = app.get_webview_window("hud") {
         let _ = win.destroy();
-        debug_log_internal("info", "[HUD] hud window destroyed, WebView memory released");
+        debug_log_internal(
+            "info",
+            "[HUD] hud window destroyed, WebView memory released",
+        );
     }
     Ok(())
 }
 
-/// Lazily create the floating HUD WebView (hud.html).
-/// Idempotent: returns the existing window when already created.
+#[allow(dead_code)]
 fn ensure_hud_window(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
-    if let Some(win) = app.get_webview_window("hud") {
-        return Ok(win);
-    }
-    let win = tauri::WebviewWindowBuilder::new(
-        app,
-        "hud",
-        tauri::WebviewUrl::App("hud.html".into()),
-    )
-    .title("NanoClick HUD")
-    .transparent(true)
-    .inner_size(140.0, 40.0)
-    .always_on_top(true)
-    .decorations(false)
-    .shadow(false)
-    .skip_taskbar(true)
-    .resizable(false)
-    .focused(false)
-    .visible(false)
-    .build()
-    .map_err(|e| format!("hud create failed: {e}"))?;
-    {
-        use tauri::PhysicalPosition;
-        let _ = win.set_position(PhysicalPosition::new(60, 60));
-    }
-    let _ = win.set_ignore_cursor_events(true);
-    debug_log_internal("info", "[HUD] lazy-created on demand");
-    Ok(win)
+    overlay::ensure_satellite(app, "hud")
 }
 
 #[tauri::command]
@@ -1666,13 +1742,16 @@ fn hud_ready(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let cfg = state.config_manager.load();
     if let Some(win) = app.get_webview_window("hud") {
         let _ = win.set_ignore_cursor_events(true);
-        // F6: only with the main window on screen. This signal arrives after the
-        // HUD's DOM rendered, which can be AFTER the app went to the tray — a
-        // `show()` here used to put the floating counter back on the desktop
-        // while its owner claimed to be asleep.
+        // Only with the main window on screen. This signal arrives after the
+        // HUD DOM rendered, which can be after the app moved to the tray — a
+        // `show()` here would leave the floating counter on the desktop while
+        // its owner reports hidden.
         if cfg.ui.show_hud && main_window_visible(&app) {
             let _ = win.show();
-            debug_log_internal("info", "[HUD] hud_ready: restored HUD visibility from config");
+            debug_log_internal(
+                "info",
+                "[HUD] hud_ready: restored HUD visibility from config",
+            );
         }
     }
     Ok(())
@@ -1845,6 +1924,16 @@ pub fn run() {
         .setup(move |app| {
             let handle = app.handle().clone();
             crate::platform::set_global_app_handle(handle.clone());
+            // Ripple drain worker: one 40 ms thread per process. Drains the
+            // lock-free ripple ring pushed by the click loop and emits one
+            // coalesced `spawn-ripple` batch per tick (see overlay.rs).
+            crate::overlay::spawn_ripple_drain_worker(handle.clone());
+            // StatusSink wiring (Stage B/C dual-write): Tauri window emits +
+            // optional daemon IPC broadcast share one payload constructor, so
+            // the daemon and the monolith cannot drift apart.
+            crate::tauri_sink::set_extra_sink(std::sync::Arc::new(
+                crate::tauri_sink::TauriSink::new(handle.clone()),
+            ));
 
             // **v1.0 memory-pressure workaround**: the auto-created window
             // from `tauri.conf.json` spawned 5 WebView2 child processes that
@@ -2064,7 +2153,7 @@ pub fn run() {
             }
             // Passive foreground patrol: one Win32 event per foreground switch
             // (0% CPU between switches). Warns when automation is live and the
-            // user lands on an elevated window; never resurrects the tray.
+            // user lands on an elevated window; the tray window stays hidden.
             platform::windows::start_foreground_watch();
             // Radar ping: tray-aware update telemetry (Worker proxy + silent
             // GitHub fallback). Own thread, own cadence, zero hot-path touch.
@@ -2094,7 +2183,7 @@ pub fn run() {
                         .map(|s| s.config_manager.load().ui.visual_ripple)
                         .unwrap_or(false);
                     if wanted && main_window_visible(&h) {
-                        let _ = overlay::ensure_overlay_window(&h);
+                        let _ = overlay::ensure_satellite(&h, "overlay");
                     }
                 });
             }
@@ -2242,38 +2331,38 @@ pub fn run() {
                 ..
             } => {
                 if label == "main" {
-                    if should_minimize_to_tray(&app_handle) {
+                    if should_minimize_to_tray(app_handle) {
                         api.prevent_close();
                         // The state the next start replays — written now, not only
                         // on a clean exit: a Task Manager kill or a power loss must
-                        // not resurrect a window the user had put in the tray.
-                        persist_window_visibility(&app_handle, false);
+                        // not show again a window the user had placed in the tray.
+                        persist_window_visibility(app_handle, false);
                         // Two ways to live in the tray: plain hide (instant and,
                         // measured, free — private working set stays ~120 MB) or
                         // deep sleep (destroys the WebView, rebuilds it on the
                         // next tray click: 1 process / 5.0 MB). Deep sleep is
                         // refused whenever something is in flight.
-                        if deep_sleep_allowed_now(&app_handle) {
-                            start_tray_if_needed(&app_handle);
-                            suspend_main_webview_to_tray(&app_handle);
+                        if deep_sleep_allowed_now(app_handle) {
+                            start_tray_if_needed(app_handle);
+                            suspend_main_webview_to_tray(app_handle);
                             debug_log_internal("info", "[Tray] close requested -> deep sleep");
                         } else {
                             if let Some(win) = app_handle.get_webview_window("main") {
                                 let _ = win.hide();
                             }
-                            hide_secondary_windows(&app_handle);
-                            start_tray_if_needed(&app_handle);
+                            hide_secondary_windows(app_handle);
+                            start_tray_if_needed(app_handle);
                             debug_log_internal(
                                 "warn",
                                 &format!(
                                     "[Tray] close requested -> hidden to tray \
                                      (deep sleep skipped: {})",
-                                    deep_sleep_skip_reason(&app_handle)
+                                    deep_sleep_skip_reason(app_handle)
                                 ),
                             );
                         }
                     } else {
-                        shutdown_application(&app_handle);
+                        shutdown_application(app_handle);
                     }
                 }
             }
@@ -2291,25 +2380,25 @@ pub fn run() {
                         .get_webview_window("main")
                         .and_then(|w| w.is_minimized().ok())
                         .unwrap_or(false)
-                    && should_minimize_to_tray(&app_handle)
+                    && should_minimize_to_tray(app_handle)
                 {
-                    persist_window_visibility(&app_handle, false);
-                    if deep_sleep_allowed_now(&app_handle) {
-                        start_tray_if_needed(&app_handle);
-                        suspend_main_webview_to_tray(&app_handle);
+                    persist_window_visibility(app_handle, false);
+                    if deep_sleep_allowed_now(app_handle) {
+                        start_tray_if_needed(app_handle);
+                        suspend_main_webview_to_tray(app_handle);
                         debug_log_internal("info", "[Tray] minimize requested -> deep sleep");
                     } else {
                         if let Some(win) = app_handle.get_webview_window("main") {
                             let _ = win.hide();
                         }
-                        hide_secondary_windows(&app_handle);
-                        start_tray_if_needed(&app_handle);
+                        hide_secondary_windows(app_handle);
+                        start_tray_if_needed(app_handle);
                         debug_log_internal(
                             "warn",
                             &format!(
                                 "[Tray] minimize requested -> hidden to tray \
                                  (deep sleep skipped: {})",
-                                deep_sleep_skip_reason(&app_handle)
+                                deep_sleep_skip_reason(app_handle)
                             ),
                         );
                     }
@@ -2399,8 +2488,14 @@ mod tray_lifetime_tests {
         // Disabled flag: never, whatever else is going on.
         assert!(!deep_sleep_allowed(false, false, false, false));
         // Any single in-flight state blocks it.
-        assert!(!deep_sleep_allowed(true, true, false, false), "clicker running");
-        assert!(!deep_sleep_allowed(true, false, true, false), "macro playing");
+        assert!(
+            !deep_sleep_allowed(true, true, false, false),
+            "clicker running"
+        );
+        assert!(
+            !deep_sleep_allowed(true, false, true, false),
+            "macro playing"
+        );
         assert!(!deep_sleep_allowed(true, false, false, true), "recording");
         assert!(!deep_sleep_allowed(true, true, true, true));
     }

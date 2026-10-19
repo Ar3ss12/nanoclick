@@ -2,6 +2,7 @@ use crate::config::Config;
 use crate::core::action::MouseButton;
 use crate::guard::{AppFilter, FocusWatchStop, ForegroundCache, TypingGuard, GUARD_POLL_MS};
 use crate::platform::{self, backend::ClickSpec, NativeEventHandle, PlatformTimer};
+use crate::stability::SafeLockExt;
 use rand::Rng;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
@@ -17,6 +18,73 @@ pub struct StatusUpdate {
     pub clicks_done: u32,
     pub cps: f64,
     pub status_text: String,
+}
+
+/// Unified transactional state machine for the autoclicker (USER_GUIDE Phase 7).
+/// Eliminates disparate variables (is_active, current_running_preset, ui_status).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum ClickerState {
+    #[default]
+    Idle,
+    Running,
+    Paused,
+}
+
+impl ClickerState {
+    #[inline]
+    pub fn is_active(&self) -> bool {
+        matches!(self, ClickerState::Running)
+    }
+
+    #[inline]
+    pub fn is_idle(&self) -> bool {
+        matches!(self, ClickerState::Idle)
+    }
+
+    #[inline]
+    pub fn is_paused(&self) -> bool {
+        matches!(self, ClickerState::Paused)
+    }
+
+    pub fn status_text(&self) -> &'static str {
+        match self {
+            ClickerState::Idle => "IDLE",
+            ClickerState::Running => "RUNNING",
+            ClickerState::Paused => "WORK MODE (PAUSED)",
+        }
+    }
+}
+
+/// Single Entrance Gateway commands (USER_GUIDE Phase 4).
+/// All 4 doors (F6 hotkey, UI click, auto-stop timer, tray toggle) send intents here.
+#[derive(Debug, Clone)]
+pub enum ClickerCmd {
+    /// Toggle clicker (from hotkey F6, UI main button, tray menu)
+    Toggle { source: &'static str },
+    /// Explicit start (with optional preset name)
+    Start {
+        source: &'static str,
+        preset: Option<String>,
+    },
+    /// Normal stop (from UI, mode switch, etc.)
+    Stop {
+        source: &'static str,
+        reason: &'static str,
+    },
+    /// Auto-stop timer expired
+    AutoStop {
+        reason: &'static str,
+        elapsed_ms: u64,
+    },
+    /// Emergency stop (highest priority: Priority::Critical)
+    EmergencyStop,
+    /// Pause (e.g. WorkMode, TypingGuard)
+    Pause {
+        source: &'static str,
+        reason: &'static str,
+    },
+    /// Resume
+    Resume { source: &'static str },
 }
 
 // ── Toggle diagnostics ring buffer (v4.2 hardening) ──────────
@@ -160,6 +228,9 @@ impl FocusGuard {
 
 pub struct ClickScheduler {
     active: Arc<AtomicBool>,
+    state: Arc<Mutex<ClickerState>>,
+    gateway_tx: snubber::GatewaySender<ClickerCmd>,
+    gateway_rx: Arc<Mutex<Option<snubber::GatewayHost<ClickerCmd>>>>,
     mode_autoclicker: Arc<AtomicBool>,
     clicks_done: Arc<AtomicU32>,
     cps_raw: Arc<AtomicU64>,
@@ -178,6 +249,7 @@ pub struct ClickScheduler {
     hold_interval_ms: Arc<AtomicU64>,
     repeat_interval_ms: Arc<AtomicU64>,
     jitter_radius_px: Arc<AtomicU32>,
+    jitter_relative_3d: Arc<AtomicBool>,
     start_delay_ms: Arc<AtomicU64>,
     stop_duration_ms: Arc<AtomicU64>,
     stop_time_epoch_sec: Arc<AtomicI64>,
@@ -293,9 +365,13 @@ pub fn decide_toggle(
 
 impl ClickScheduler {
     pub fn new() -> Self {
+        let (gateway_tx, gateway_rx) = snubber::gateway::<ClickerCmd>(16);
         let initial_cfg = Config::default();
         ClickScheduler {
             active: Arc::new(AtomicBool::new(false)),
+            state: Arc::new(Mutex::new(ClickerState::Idle)),
+            gateway_tx,
+            gateway_rx: Arc::new(Mutex::new(Some(gateway_rx))),
             mode_autoclicker: Arc::new(AtomicBool::new(initial_cfg.active_mode == "autoclicker")),
             clicks_done: Arc::new(AtomicU32::new(0)),
             cps_raw: Arc::new(AtomicU64::new(initial_cfg.cps.to_bits())),
@@ -318,6 +394,7 @@ impl ClickScheduler {
             hold_interval_ms: Arc::new(AtomicU64::new(initial_cfg.hold_interval_ms)),
             repeat_interval_ms: Arc::new(AtomicU64::new(initial_cfg.repeat_interval_ms)),
             jitter_radius_px: Arc::new(AtomicU32::new(initial_cfg.jitter_radius_px)),
+            jitter_relative_3d: Arc::new(AtomicBool::new(initial_cfg.jitter_relative_3d)),
             start_delay_ms: Arc::new(AtomicU64::new(initial_cfg.start_delay_ms)),
             stop_duration_ms: Arc::new(AtomicU64::new(initial_cfg.stop_duration_ms)),
             stop_time_epoch_sec: Arc::new(AtomicI64::new(initial_cfg.stop_time_epoch_sec)),
@@ -383,32 +460,33 @@ impl ClickScheduler {
             cps: f64::from_bits(self.cps_raw.load(Ordering::Relaxed)),
             random_percent: f64::from_bits(self.random_pct_raw.load(Ordering::Relaxed)),
             outlier_prob: f64::from_bits(self.outlier_prob_raw.load(Ordering::Relaxed)),
-            technique: self.technique.lock().unwrap().clone(),
+            technique: self.technique.safe_lock().clone(),
             click_limit: self.limit.load(Ordering::Relaxed),
-            button: self.button.lock().unwrap().clone(),
-            click_type: self.click_type.lock().unwrap().clone(),
-            position_mode: self.position_mode.lock().unwrap().clone(),
+            button: self.button.safe_lock().clone(),
+            click_type: self.click_type.safe_lock().clone(),
+            position_mode: self.position_mode.safe_lock().clone(),
             fixed_x: self.fixed_x.load(Ordering::Relaxed) as i32,
             fixed_y: self.fixed_y.load(Ordering::Relaxed) as i32,
-            repeat_mode: self.repeat_mode.lock().unwrap().clone(),
+            repeat_mode: self.repeat_mode.safe_lock().clone(),
             repeat_count: self.repeat_count.load(Ordering::Relaxed),
             hold_duration_ms: self.hold_duration_ms.load(Ordering::Relaxed),
             hold_interval_ms: self.hold_interval_ms.load(Ordering::Relaxed),
             repeat_interval_ms: self.repeat_interval_ms.load(Ordering::Relaxed),
             jitter_radius_px: self.jitter_radius_px.load(Ordering::Relaxed),
-            hotkey_toggle: self.hotkey_toggle.lock().unwrap().clone(),
-            hotkey_mode_switch: self.hotkey_mode_switch.lock().unwrap().clone(),
-            hotkey_emergency_stop: self.hotkey_emergency_stop.lock().unwrap().clone(),
-            hotkey_speed_up: self.hotkey_speed_up.lock().unwrap().clone(),
-            hotkey_slow_down: self.hotkey_slow_down.lock().unwrap().clone(),
-            hotkey_capture_pos: self.hotkey_capture_pos.lock().unwrap().clone(),
+            jitter_relative_3d: self.jitter_relative_3d.load(Ordering::Relaxed),
+            hotkey_toggle: self.hotkey_toggle.safe_lock().clone(),
+            hotkey_mode_switch: self.hotkey_mode_switch.safe_lock().clone(),
+            hotkey_emergency_stop: self.hotkey_emergency_stop.safe_lock().clone(),
+            hotkey_speed_up: self.hotkey_speed_up.safe_lock().clone(),
+            hotkey_slow_down: self.hotkey_slow_down.safe_lock().clone(),
+            hotkey_capture_pos: self.hotkey_capture_pos.safe_lock().clone(),
             hotkey_record_toggle: self.hotkey_record_toggle.load(Ordering::Relaxed),
-            hotkey_record: self.hotkey_record.lock().unwrap().clone(),
-            hotkey_preset_slots: self.preset_hotkeys.lock().unwrap().clone(),
+            hotkey_record: self.hotkey_record.safe_lock().clone(),
+            hotkey_preset_slots: self.preset_hotkeys.safe_lock().clone(),
             start_delay_ms: 0,
             stop_duration_ms: 0,
             stop_time_epoch_sec: 0,
-            stop_mode: self.stop_mode.lock().unwrap().clone(),
+            stop_mode: self.stop_mode.safe_lock().clone(),
             gui_lock_ms: self.gui_lock_ms.load(Ordering::Relaxed),
             hotkey_debounce_ms: self.hotkey_debounce_ms.load(Ordering::Relaxed),
             active_mode: if is_auto {
@@ -416,16 +494,16 @@ impl ClickScheduler {
             } else {
                 "work".into()
             },
-            sequence_points: self.sequence_points.lock().unwrap().clone(),
+            sequence_points: self.sequence_points.safe_lock().clone(),
             visual_ripple: self.visual_ripple.load(Ordering::Relaxed),
             typing_pause_ms: self.typing_guard.pause_ms(),
             // Read back through the scheduler so a `get_config()` ->
             // `set_config()` round-trip preserves the user's ignored keys.
-            typing_ignore_keys: self.typing_ignore_keys.lock().unwrap().clone(),
+            typing_ignore_keys: self.typing_ignore_keys.safe_lock().clone(),
             app_filter_mode: self.app_filter.mode().as_config_str().to_string(),
             app_filter_list: self.app_filter.list(),
             pause_on_focus_loss: self.focus_guard.is_enabled(),
-            presets: self.presets.lock().unwrap().clone(),
+            presets: self.presets.safe_lock().clone(),
             show_notifications: true,
         }
     }
@@ -445,7 +523,8 @@ impl ClickScheduler {
         }
         if !self.is_active() || cfg.stop_duration_ms != 0 {
             self.stop_duration_ms.store(
-                cfg.stop_duration_ms.min(crate::config::MAX_STOP_DURATION_MS),
+                cfg.stop_duration_ms
+                    .min(crate::config::MAX_STOP_DURATION_MS),
                 Ordering::Relaxed,
             );
         }
@@ -453,7 +532,8 @@ impl ClickScheduler {
             self.stop_time_epoch_sec
                 .store(cfg.stop_time_epoch_sec, Ordering::Relaxed);
         }
-        self.visual_ripple.store(cfg.visual_ripple, Ordering::Relaxed);
+        self.visual_ripple
+            .store(cfg.visual_ripple, Ordering::Relaxed);
         self.cps_raw.store(cfg.cps.to_bits(), Ordering::Relaxed);
         self.random_pct_raw
             .store(cfg.random_percent.to_bits(), Ordering::Relaxed);
@@ -461,14 +541,14 @@ impl ClickScheduler {
             crate::config::normalize_outlier_prob(cfg.outlier_prob).to_bits(),
             Ordering::Relaxed,
         );
-        *self.technique.lock().unwrap() = crate::config::normalize_technique(&cfg.technique);
+        *self.technique.safe_lock() = crate::config::normalize_technique(&cfg.technique);
         self.limit.store(cfg.click_limit, Ordering::Relaxed);
-        *self.button.lock().unwrap() = cfg.button;
-        *self.click_type.lock().unwrap() = cfg.click_type;
-        *self.position_mode.lock().unwrap() = cfg.position_mode;
+        *self.button.safe_lock() = cfg.button;
+        *self.click_type.safe_lock() = cfg.click_type;
+        *self.position_mode.safe_lock() = cfg.position_mode;
         self.fixed_x.store(cfg.fixed_x as u32, Ordering::Relaxed);
         self.fixed_y.store(cfg.fixed_y as u32, Ordering::Relaxed);
-        *self.repeat_mode.lock().unwrap() = cfg.repeat_mode;
+        *self.repeat_mode.safe_lock() = cfg.repeat_mode;
         self.repeat_count.store(cfg.repeat_count, Ordering::Relaxed);
         self.hold_duration_ms
             .store(cfg.hold_duration_ms, Ordering::Relaxed);
@@ -478,26 +558,28 @@ impl ClickScheduler {
             .store(cfg.repeat_interval_ms, Ordering::Relaxed);
         self.jitter_radius_px
             .store(cfg.jitter_radius_px, Ordering::Relaxed);
+        self.jitter_relative_3d
+            .store(cfg.jitter_relative_3d, Ordering::Relaxed);
         // (start_delay_ms / stop_duration_ms / stop_time_epoch_sec are stored
         // at the TOP of this function, guarded against mid-run disarms.)
         // Normalized HERE as well: `set_config` is not only fed by `Config::from`
         // — `Config::default()` and the boot path also reach it, and an
         // unrecognized string must never arm a timer the UI cannot show.
-        *self.stop_mode.lock().unwrap() = crate::config::normalize_stop_mode(&cfg.stop_mode);
+        *self.stop_mode.safe_lock() = crate::config::normalize_stop_mode(&cfg.stop_mode);
         self.mode_autoclicker
             .store(cfg.active_mode == "autoclicker", Ordering::Relaxed);
-        *self.hotkey_toggle.lock().unwrap() = cfg.hotkey_toggle;
-        *self.hotkey_mode_switch.lock().unwrap() = cfg.hotkey_mode_switch;
-        *self.hotkey_emergency_stop.lock().unwrap() = cfg.hotkey_emergency_stop;
-        *self.hotkey_speed_up.lock().unwrap() = cfg.hotkey_speed_up;
-        *self.hotkey_slow_down.lock().unwrap() = cfg.hotkey_slow_down;
-        *self.hotkey_capture_pos.lock().unwrap() = cfg.hotkey_capture_pos;
+        *self.hotkey_toggle.safe_lock() = cfg.hotkey_toggle;
+        *self.hotkey_mode_switch.safe_lock() = cfg.hotkey_mode_switch;
+        *self.hotkey_emergency_stop.safe_lock() = cfg.hotkey_emergency_stop;
+        *self.hotkey_speed_up.safe_lock() = cfg.hotkey_speed_up;
+        *self.hotkey_slow_down.safe_lock() = cfg.hotkey_slow_down;
+        *self.hotkey_capture_pos.safe_lock() = cfg.hotkey_capture_pos;
         self.hotkey_record_toggle
             .store(cfg.hotkey_record_toggle, Ordering::Relaxed);
-        *self.hotkey_record.lock().unwrap() = cfg.hotkey_record;
-        *self.preset_hotkeys.lock().unwrap() = cfg.hotkey_preset_slots;
-        *self.presets.lock().unwrap() = cfg.presets;
-        *self.sequence_points.lock().unwrap() = cfg.sequence_points.clone();
+        *self.hotkey_record.safe_lock() = cfg.hotkey_record;
+        *self.preset_hotkeys.safe_lock() = cfg.hotkey_preset_slots;
+        *self.presets.safe_lock() = cfg.presets;
+        *self.sequence_points.safe_lock() = cfg.sequence_points.clone();
         // Engine timings that the hotkey layer reads through `get_config()`.
         // `hotkey_debounce_ms` was NEVER stored here — the "Toggle Response
         // Time" slider only took effect after a restart, because the snapshot
@@ -512,7 +594,7 @@ impl ClickScheduler {
         // hotkey (`a_user_cannot_unexempt_a_bound_hotkey`); the hook re-applies
         // the binding shield on its next re-parse.
         self.key_policy.rebuild(&cfg.typing_ignore_keys);
-        *self.typing_ignore_keys.lock().unwrap() = cfg.typing_ignore_keys;
+        *self.typing_ignore_keys.safe_lock() = cfg.typing_ignore_keys;
         self.app_filter
             .set(&cfg.app_filter_mode, &cfg.app_filter_list);
         // Focus Guard: sync the enabled flag. Disarm ONLY on a real flag flip:
@@ -532,7 +614,7 @@ impl ClickScheduler {
 
     /// Replace the active image trigger. Pass None to clear.
     pub fn set_image_trigger(&self, trigger: Option<crate::config_manager::ImageTrigger>) {
-        *self.image_trigger.lock().unwrap() = trigger;
+        *self.image_trigger.safe_lock() = trigger;
         self.image_trigger_should_stop
             .store(false, Ordering::Relaxed);
     }
@@ -540,7 +622,7 @@ impl ClickScheduler {
     /// Update stored presets in the scheduler and bump the hotkey version so
     /// the hotkey listener re-parses preset bindings.
     pub fn update_presets(&self, presets: Vec<crate::config_manager::PresetItem>) {
-        *self.presets.lock().unwrap() = presets;
+        *self.presets.safe_lock() = presets;
         self.hotkeys_version.fetch_add(1, Ordering::Release);
     }
 
@@ -553,6 +635,7 @@ impl ClickScheduler {
 
     /// Extract hotkey bindings without constructing a full `Config` or invoking `get_config()`.
     /// Used by the hotkey listener re-parse path so run-scoped timers are never zeroed or touched.
+    #[allow(clippy::type_complexity)]
     pub fn hotkey_snapshot_data(
         &self,
     ) -> (
@@ -569,28 +652,37 @@ impl ClickScheduler {
     ) {
         let preset_hotkeys = self
             .presets
-            .lock()
-            .unwrap()
+            .safe_lock()
             .iter()
             .filter(|p| !p.hotkey.trim().is_empty())
             .map(|p| (p.id.clone(), p.hotkey.clone()))
             .collect();
         (
-            self.hotkey_toggle.lock().unwrap().clone(),
-            self.hotkey_mode_switch.lock().unwrap().clone(),
-            self.hotkey_emergency_stop.lock().unwrap().clone(),
-            self.hotkey_speed_up.lock().unwrap().clone(),
-            self.hotkey_slow_down.lock().unwrap().clone(),
-            self.hotkey_capture_pos.lock().unwrap().clone(),
+            self.hotkey_toggle.safe_lock().clone(),
+            self.hotkey_mode_switch.safe_lock().clone(),
+            self.hotkey_emergency_stop.safe_lock().clone(),
+            self.hotkey_speed_up.safe_lock().clone(),
+            self.hotkey_slow_down.safe_lock().clone(),
+            self.hotkey_capture_pos.safe_lock().clone(),
             self.hotkey_record_toggle.load(Ordering::Relaxed),
-            self.hotkey_record.lock().unwrap().clone(),
-            self.preset_hotkeys.lock().unwrap().clone(),
+            self.hotkey_record.safe_lock().clone(),
+            self.preset_hotkeys.safe_lock().clone(),
             preset_hotkeys,
         )
     }
 
     pub fn is_active(&self) -> bool {
-        self.active.load(Ordering::Relaxed)
+        self.state.safe_lock().is_active()
+    }
+
+    /// Transactional state machine (Phase 7).
+    pub fn state(&self) -> ClickerState {
+        *self.state.safe_lock()
+    }
+
+    /// Send an intent through the Single Entrance Gateway (Phase 4).
+    pub fn send_cmd(&self, cmd: ClickerCmd) -> Result<(), snubber::GatewaySendError> {
+        self.gateway_tx.send(cmd)
     }
 
     pub fn is_autoclicker_mode(&self) -> bool {
@@ -616,7 +708,7 @@ impl ClickScheduler {
         }
 
         let mode_str = if new_mode { "autoclicker" } else { "work" };
-        if let Some(ref app) = app_handle {
+        if let Some(app) = app_handle {
             let _ = app.emit(
                 "status-update",
                 StatusUpdate {
@@ -648,7 +740,7 @@ impl ClickScheduler {
     /// while `activate_preset_hotkey` applies it BEFORE the branch, so an
     /// accidental double-fire of a preset bind vetoes as `BlockedByDebounce`
     /// instead of toggle-stopping the run it just started.
-
+    ///
     /// Returns true if a toggle should be applied; updates the timestamp.
     /// Returns false (and leaves the old timestamp) if the call is still
     /// within the debounce window of the previous accepted toggle. The
@@ -658,7 +750,7 @@ impl ClickScheduler {
         last: &Arc<Mutex<Option<std::time::Instant>>>,
         debounce_ms: u32,
     ) -> bool {
-        let mut guard = last.lock().unwrap();
+        let mut guard = last.safe_lock();
         if let Some(t) = *guard {
             if t.elapsed().as_millis() < debounce_ms as u128 {
                 return false;
@@ -704,7 +796,7 @@ impl ClickScheduler {
             ToggleOutcome::IgnoredWorkMode => {
                 toggle_diag_report("veto=toggle_work_mode");
                 self.set_active(false, app_handle);
-                if let Some(ref app) = app_handle {
+                if let Some(app) = app_handle {
                     let _ = app.emit(
                         "status-update",
                         StatusUpdate {
@@ -734,9 +826,10 @@ impl ClickScheduler {
         self.set_active(new_active, app_handle);
         if !new_active {
             report_stop("toggle_hotkey");
+            *self.last_toggle_instant.safe_lock() = Some(std::time::Instant::now());
         }
 
-        if let Some(ref app) = app_handle {
+        if let Some(app) = app_handle {
             let _ = app.emit(
                 "status-update",
                 StatusUpdate {
@@ -755,19 +848,52 @@ impl ClickScheduler {
         mode_str.to_string()
     }
 
-    /// TYPING KILL-SWITCH decision: may the clicker be (re)started right now?
+    /// Typing interlock decision: may the clicker be (re)started right now?
     /// Pure helper so the rule is unit-testable without spawning workers.
     fn typing_allows_start(&self) -> bool {
         !self.typing_guard.hotkeys_locked()
     }
 
-    /// Apply a requested state. **Returns what really happened**, because
-    /// callers outside the click worker (the tray menu, the UI toggle command)
-    /// have to report that value to the page: `Start` versus
-    /// `BlockedByTyping`/`IgnoredWorkMode` is the difference between a button
-    /// that works and a button that lies about it.
+    /// Single choke point for the whole stop side-effect bundle.
+    ///
+    /// Every path that ends a run — the UI button, the hotkey, the typing
+    /// interlock, the auto-stop timers, the preset engine — funnels through
+    /// here: the stop-event signal, the steering Cancel, the log line and the
+    /// IDLE emit. Telemetry observes `active` itself (the 66 ms loop polls
+    /// the shared flag, no separate worker flag exists); the click overlay
+    /// is lazy and needs no toggle here. There is no silent twin that drops
+    /// the flag but sleeps on the event handle or the log line.
+    ///
+    /// Idempotent: call it twice and the second call only re-signals the
+    /// (already rotated) handle. Never call it from inside the worker's own
+    /// self-exit: the worker already owns its `MouseHoldGuard` on the stack
+    /// and must NOT rotate the handle its successor polls — see the
+    /// `worker_self_stop` note below instead.
+    fn finish_stop(&self, reason: &str, app_handle: Option<&AppHandle>) {
+        crate::stability::send_worker_directive(snubber::Directive::Cancel("stop"));
+        let handle = self.stop_event.safe_lock().clone();
+        platform::signal_stop_event(handle);
+        // Generation rotation: the next start mints its own fresh handle (see
+        // `set_active(true)`), and we ALSO rotate here — a worker that has
+        // not observed the signal yet keeps polling its OWN cloned Arc, so a
+        // later `store(false)` from a future run can never wake it, and a
+        // stale signal can never kill the next run.
+        *self.stop_event.safe_lock() = platform::create_stop_event();
+        report_stop(reason);
+        if let Some(app) = app_handle {
+            self.emit_status_now(app, "IDLE");
+        }
+    }
+
+    // Worker self-exit note: the run ended on its own (timer/click cap /
+    // wallclock / conduit Cancel / acquire loss). Only the log line lives
+    // here conceptually — in practice the worker inlines `report_stop`
+    // directly (it owns no `ClickScheduler` handle, only its Arcs), while
+    // telemetry observes `active` itself and overlay/IDLE come from the
+    // worker epilogue that owns the AppHandle. No handle rotation: nobody
+    // signalled us, the handle is ours and the next start mints its own.
     pub fn set_active(&self, active: bool, app_handle: Option<&AppHandle>) -> ToggleOutcome {
-        // TYPING KILL-SWITCH + WORK MODE: starting the clicker while the user
+        // Typing interlock + Work Mode: starting the clicker while the user
         // is typing (the `r` in `go rush B`) or while Work Mode is engaged is
         // forbidden — central choke point so every activation path (hotkey,
         // UI button, preset restore, mode switch) inherits the block.
@@ -789,28 +915,242 @@ impl ClickScheduler {
             }
         }
 
-        let was_active = self.active.swap(active, Ordering::Relaxed);
-        if active && !was_active {
-            // ── BUG FIX ─────────────────────────────────────────────
-            // The `stop_event` handle is shared across every worker run. If we
-            // just stopped, it still carries `true` and the next worker will
-            // see the stale signal on its very first `wait_until` poll and
-            // exit immediately after 1 click. Reset it before spawning.
-            if let Some(ref h) = *self.stop_event.lock().unwrap() {
-                h.store(false, Ordering::Release);
-            }
-            self.clicks_done.store(0, Ordering::Relaxed);
-            self.spawn_worker(app_handle.cloned());
-        } else if !active && was_active {
-            *self.current_running_preset.lock().unwrap() = None;
-            let handle = self.stop_event.lock().unwrap().clone();
-            platform::signal_stop_event(handle);
+        let target = if active {
+            ClickerState::Running
+        } else {
+            ClickerState::Idle
+        };
+
+        let mut state_guard = self.state.safe_lock();
+        if *state_guard == target {
+            return if active {
+                ToggleOutcome::Start
+            } else {
+                ToggleOutcome::Stop
+            };
         }
 
         if active {
-            ToggleOutcome::Start
+            // Customs membrane (USER_GUIDE Level 2 — invariant gate): validate
+            // CPS/coords BEFORE arming hardware or spawning the worker. A
+            // breach is reported as PoisonedPayload (flight recorder, metric,
+            // no guard armed, `total_started` untouched) and the run never
+            // starts.
+            let cps = f64::from_bits(self.cps_raw.load(Ordering::Acquire));
+            let fx = self.fixed_x.load(Ordering::Acquire) as i32;
+            let fy = self.fixed_y.load(Ordering::Acquire) as i32;
+            let (sw, sh) = crate::platform::get_screen_size();
+            if crate::stability::validate_click_invariants(cps, fx, fy, sw, sh).is_err() {
+                crate::stability::click_node().report(snubber::FaultKind::PoisonedPayload, 0, 0);
+                self.active.store(false, Ordering::Release);
+                toggle_diag_push("[Hotkeys] start blocked: invariant breach (cps/coords)");
+                return ToggleOutcome::BlockedByTyping;
+            }
+
+            let state_node = crate::stability::click_state_node();
+            let transition_res = state_node.transition(
+                &mut *state_guard,
+                ClickerState::Running,
+                || {
+                    crate::stability::emergency_release_all_hardware();
+                },
+                |_s| {
+                    *self.stop_event.safe_lock() = platform::create_stop_event();
+                    self.clicks_done.store(0, Ordering::Release);
+                    self.active.store(true, Ordering::Release);
+                    self.spawn_worker(app_handle.cloned());
+                    Ok::<(), &'static str>(())
+                },
+            );
+
+            match transition_res {
+                Ok(()) => {
+                    toggle_diag_push("[Transition] Idle -> Running committed");
+                    ToggleOutcome::Start
+                }
+                Err(e) => {
+                    self.active.store(false, Ordering::Release);
+                    toggle_diag_push(format!("[Transition] Start rejected: {e:?}"));
+                    ToggleOutcome::BlockedByTyping
+                }
+            }
         } else {
+            let state_node = crate::stability::click_state_node();
+            let _ = state_node.transition(
+                &mut *state_guard,
+                ClickerState::Idle,
+                || {},
+                |_s| {
+                    self.active.store(false, Ordering::Release);
+                    *self.current_running_preset.safe_lock() = None;
+                    self.finish_stop("ui_or_hotkey", app_handle);
+                    Ok::<(), &'static str>(())
+                },
+            );
+            toggle_diag_push("[Transition] Running -> Idle committed");
             ToggleOutcome::Stop
+        }
+    }
+
+    /// Emergency stop (Priority::Critical on Floor 2, USER_GUIDE Phase 1).
+    /// Halts worker, preempts background tasks, and un-sticks all hardware immediately.
+    pub fn emergency_stop(&self, app_handle: Option<&AppHandle>) {
+        let node = crate::stability::click_node();
+        let epoch = crate::stability::next_task_id();
+        let task_id = epoch;
+
+        // Phase 1 preemption: Enter on Priority::Critical lane
+        let _guard =
+            match node.enter_with_priority(snubber::Priority::Critical, epoch, task_id, || {
+                crate::stability::emergency_release_all_hardware()
+            }) {
+                Ok(g) => {
+                    g.commit();
+                    Some(())
+                }
+                Err(snubber::EnterError::BulkheadFull) if node.preempt_requested() => {
+                    crate::debug_log_internal(
+                        "warn",
+                        "[Stability] Emergency stop preemption flag active",
+                    );
+                    None
+                }
+                Err(e) => {
+                    crate::debug_log_internal(
+                        "warn",
+                        &format!("[Stability] Emergency stop critical admission: {e:?}"),
+                    );
+                    None
+                }
+            };
+
+        // Send cooperative Preempted directive to the worker steering conduit
+        crate::stability::send_worker_directive(snubber::Directive::Preempted("emergency_stop"));
+
+        // Instant physical hardware unstick
+        crate::stability::emergency_release_all_hardware();
+
+        // Stop macro engine
+        if let Some(exec) = crate::core::global() {
+            exec.stop();
+        }
+
+        // Transition ClickerState to Idle via node.transition
+        let mut state_guard = self.state.safe_lock();
+        if *state_guard != ClickerState::Idle {
+            let state_node = crate::stability::click_state_node();
+            let res = state_node.transition(
+                &mut *state_guard,
+                ClickerState::Idle,
+                || {},
+                |_s| {
+                    self.active.store(false, Ordering::Release);
+                    *self.current_running_preset.safe_lock() = None;
+                    self.finish_stop("emergency_stop", app_handle);
+                    Ok::<(), &'static str>(())
+                },
+            );
+            if res.is_err() {
+                // Dying worker still holds slot — force state to Idle immediately (emergency override)
+                *state_guard = ClickerState::Idle;
+                self.active.store(false, Ordering::Release);
+                *self.current_running_preset.safe_lock() = None;
+                self.finish_stop("emergency_stop", app_handle);
+            }
+        }
+
+        if let Some(app) = app_handle {
+            self.emit_status_now(app, "IDLE");
+            let _ = app.emit("emergency-stopped", ());
+        }
+    }
+
+    /// Dispatch one command arriving from the Single Entrance Gateway (Phase 4).
+    pub fn dispatch_gateway_cmd(&self, cmd: ClickerCmd, app_handle: Option<&AppHandle>) {
+        match cmd {
+            ClickerCmd::Toggle { source } => {
+                crate::debug_log_internal("info", &format!("[Gateway] Toggle from {source}"));
+                let is_running = self.is_active();
+                self.set_active(!is_running, app_handle);
+            }
+            ClickerCmd::Start { source, preset } => {
+                crate::debug_log_internal(
+                    "info",
+                    &format!("[Gateway] Start from {source} preset={preset:?}"),
+                );
+                if let Some(p) = preset {
+                    self.activate_preset_hotkey(&p, app_handle);
+                } else {
+                    self.set_active(true, app_handle);
+                }
+            }
+            ClickerCmd::Stop { source, reason } => {
+                crate::debug_log_internal(
+                    "info",
+                    &format!("[Gateway] Stop from {source} reason={reason}"),
+                );
+                self.set_active(false, app_handle);
+            }
+            ClickerCmd::AutoStop { reason, elapsed_ms } => {
+                crate::debug_log_internal(
+                    "info",
+                    &format!("[Gateway] AutoStop reason={reason} elapsed={elapsed_ms}ms"),
+                );
+                self.set_active(false, app_handle);
+                if let Some(app) = app_handle {
+                    let _ = app.emit(
+                        "auto-stop",
+                        serde_json::json!({
+                            "reason": reason,
+                            "elapsed_ms": elapsed_ms
+                        }),
+                    );
+                }
+            }
+            ClickerCmd::EmergencyStop => {
+                crate::debug_log_internal("warn", "[Gateway] EmergencyStop received");
+                self.emergency_stop(app_handle);
+            }
+            ClickerCmd::Pause { source, reason } => {
+                crate::debug_log_internal(
+                    "info",
+                    &format!("[Gateway] Pause from {source} reason={reason}"),
+                );
+                let state_node = crate::stability::click_state_node();
+                let mut state_guard = self.state.safe_lock();
+                let _ = state_node.transition(
+                    &mut *state_guard,
+                    ClickerState::Paused,
+                    || {},
+                    |_s| {
+                        self.active.store(false, Ordering::Release);
+                        self.finish_stop(reason, app_handle);
+                        Ok::<(), &'static str>(())
+                    },
+                );
+            }
+            ClickerCmd::Resume { source } => {
+                crate::debug_log_internal("info", &format!("[Gateway] Resume from {source}"));
+                if *self.state.safe_lock() == ClickerState::Paused {
+                    self.set_active(true, app_handle);
+                }
+            }
+        }
+    }
+
+    /// Start the background gateway host dispatcher (USER_GUIDE Phase 4).
+    pub fn start_gateway_dispatcher(self: &Arc<Self>, app_handle: Option<AppHandle>) {
+        let rx = self.gateway_rx.safe_lock().take();
+        if let Some(host) = rx {
+            let scheduler = Arc::clone(self);
+            std::thread::Builder::new()
+                .name("nanoclick-gateway-dispatcher".into())
+                .spawn(move || {
+                    while let Ok(cmd) = host.recv() {
+                        scheduler.dispatch_gateway_cmd(cmd, app_handle.as_ref());
+                    }
+                })
+                .ok();
         }
     }
 
@@ -846,15 +1186,15 @@ impl ClickScheduler {
         }
         if preset.scope.hotkeys {
             if let Some(h) = &preset.hotkey_settings {
-                *self.hotkey_toggle.lock().unwrap() = h.toggle.clone();
-                *self.hotkey_mode_switch.lock().unwrap() = h.mode_switch.clone();
-                *self.hotkey_emergency_stop.lock().unwrap() = h.emergency_stop.clone();
-                *self.hotkey_speed_up.lock().unwrap() = h.speed_up.clone();
-                *self.hotkey_slow_down.lock().unwrap() = h.slow_down.clone();
-                *self.hotkey_capture_pos.lock().unwrap() = h.capture_pos.clone();
+                *self.hotkey_toggle.safe_lock() = h.toggle.clone();
+                *self.hotkey_mode_switch.safe_lock() = h.mode_switch.clone();
+                *self.hotkey_emergency_stop.safe_lock() = h.emergency_stop.clone();
+                *self.hotkey_speed_up.safe_lock() = h.speed_up.clone();
+                *self.hotkey_slow_down.safe_lock() = h.slow_down.clone();
+                *self.hotkey_capture_pos.safe_lock() = h.capture_pos.clone();
                 self.hotkey_record_toggle
                     .store(h.record_toggle, Ordering::Relaxed);
-                *self.hotkey_record.lock().unwrap() = h.record_hotkey.clone();
+                *self.hotkey_record.safe_lock() = h.record_hotkey.clone();
                 self.hotkey_debounce_ms
                     .store(h.hotkey_debounce_ms, Ordering::Relaxed);
                 // The preset slots are NOT part of the snapshot (a slot maps to a
@@ -869,23 +1209,24 @@ impl ClickScheduler {
     /// Engine half of a preset apply — the historic behaviour (every engine
     /// field), plus `gui_lock_ms`, which lives in the engine config.
     fn apply_preset_engine(&self, preset: &crate::config_manager::PresetItem) {
-        self.cps_raw.store(preset.target_cps.to_bits(), Ordering::Relaxed);
+        self.cps_raw
+            .store(preset.target_cps.to_bits(), Ordering::Relaxed);
         self.random_pct_raw
             .store(preset.jitter_percent.to_bits(), Ordering::Relaxed);
         self.outlier_prob_raw.store(
             crate::config::normalize_outlier_prob(preset.outlier_prob).to_bits(),
             Ordering::Relaxed,
         );
-        *self.technique.lock().unwrap() =
-            crate::config::normalize_technique(&preset.technique);
+        *self.technique.safe_lock() = crate::config::normalize_technique(&preset.technique);
         self.limit.store(preset.click_limit, Ordering::Relaxed);
-        *self.button.lock().unwrap() = preset.button.clone();
-        *self.click_type.lock().unwrap() = preset.click_type.clone();
-        *self.position_mode.lock().unwrap() = preset.position_mode.clone();
+        *self.button.safe_lock() = preset.button.clone();
+        *self.click_type.safe_lock() = preset.click_type.clone();
+        *self.position_mode.safe_lock() = preset.position_mode.clone();
         self.fixed_x.store(preset.fixed_x as u32, Ordering::Relaxed);
         self.fixed_y.store(preset.fixed_y as u32, Ordering::Relaxed);
-        *self.repeat_mode.lock().unwrap() = preset.repeat_mode.clone();
-        self.repeat_count.store(preset.repeat_count, Ordering::Relaxed);
+        *self.repeat_mode.safe_lock() = preset.repeat_mode.clone();
+        self.repeat_count
+            .store(preset.repeat_count, Ordering::Relaxed);
         self.hold_duration_ms
             .store(preset.hold_duration_ms, Ordering::Relaxed);
         self.hold_interval_ms
@@ -899,7 +1240,8 @@ impl ClickScheduler {
         // mid-run-disarm guard lives in `set_config`, not here).
         self.start_delay_ms
             .store(preset.start_delay_ms, Ordering::Relaxed);
-        self.gui_lock_ms.store(preset.gui_lock_ms, Ordering::Relaxed);
+        self.gui_lock_ms
+            .store(preset.gui_lock_ms, Ordering::Relaxed);
         let stop_dur_ms = if preset.stop_duration_ms > 0 {
             preset.stop_duration_ms
         } else {
@@ -910,10 +1252,11 @@ impl ClickScheduler {
             Ordering::Relaxed,
         );
         let stop_time_sec = crate::config::parse_stop_time_str_next(&preset.stop_time_str);
-        self.stop_time_epoch_sec.store(stop_time_sec, Ordering::Relaxed);
-        *self.stop_mode.lock().unwrap() =
+        self.stop_time_epoch_sec
+            .store(stop_time_sec, Ordering::Relaxed);
+        *self.stop_mode.safe_lock() =
             crate::config::resolve_stop_mode(&preset.stop_mode, stop_dur_ms, stop_time_sec);
-        *self.sequence_points.lock().unwrap() = preset.points.clone();
+        *self.sequence_points.safe_lock() = preset.points.clone();
     }
 
     /// Hotkey handler for a specific preset ID.
@@ -955,14 +1298,14 @@ impl ClickScheduler {
             return ToggleOutcome::BlockedByDebounce;
         }
         let is_running = self.is_active();
-        let cur_preset = self.current_running_preset.lock().unwrap().clone();
+        let cur_preset = self.current_running_preset.safe_lock().clone();
 
         if is_running {
             if cur_preset.as_deref() == Some(preset_id) {
                 // Same preset pressed again -> toggle stop
                 report_stop(format!("preset_toggle:{preset_id}"));
                 self.set_active(false, app_handle);
-                *self.current_running_preset.lock().unwrap() = None;
+                *self.current_running_preset.safe_lock() = None;
                 if let Some(app) = app_handle {
                     self.emit_status_now(app, "IDLE");
                 }
@@ -982,24 +1325,23 @@ impl ClickScheduler {
             // `get_config()` reports the run-scoped timers as 0 by design.)
             let target_preset = self
                 .presets
-                .lock()
-                .unwrap()
+                .safe_lock()
                 .iter()
                 .find(|p| p.id == preset_id)
                 .cloned();
 
             if let Some(preset) = target_preset {
                 // Signal stop event to old worker (lock-free flag, zero blocking)
-                let old_stop_handle = self.stop_event.lock().unwrap().clone();
+                let old_stop_handle = self.stop_event.safe_lock().clone();
                 platform::signal_stop_event(old_stop_handle);
 
                 // Create fresh stop event for the new worker
                 let new_stop_handle = platform::create_stop_event();
-                *self.stop_event.lock().unwrap() = new_stop_handle;
+                *self.stop_event.safe_lock() = new_stop_handle;
 
                 // Swap parameters on the fly
                 self.apply_preset_fields_to_scheduler(&preset);
-                *self.current_running_preset.lock().unwrap() = Some(preset_id.to_string());
+                *self.current_running_preset.safe_lock() = Some(preset_id.to_string());
                 self.clicks_done.store(0, Ordering::Relaxed);
 
                 // Spawn new worker immediately without any thread join
@@ -1026,15 +1368,14 @@ impl ClickScheduler {
 
             let target_preset = self
                 .presets
-                .lock()
-                .unwrap()
+                .safe_lock()
                 .iter()
                 .find(|p| p.id == preset_id)
                 .cloned();
 
             if let Some(preset) = target_preset {
                 self.apply_preset_fields_to_scheduler(&preset);
-                *self.current_running_preset.lock().unwrap() = Some(preset_id.to_string());
+                *self.current_running_preset.safe_lock() = Some(preset_id.to_string());
                 let res = self.set_active(true, app_handle);
                 if res == ToggleOutcome::Start {
                     if let Some(app) = app_handle {
@@ -1050,7 +1391,7 @@ impl ClickScheduler {
 
     /// Returns the ID of the currently executing preset, if started from a preset hotkey.
     pub fn current_running_preset_id(&self) -> Option<String> {
-        self.current_running_preset.lock().unwrap().clone()
+        self.current_running_preset.safe_lock().clone()
     }
 
     pub fn get_clicks_done(&self) -> u32 {
@@ -1104,6 +1445,7 @@ impl ClickScheduler {
         if let Some(hud) = app.get_webview_window("hud") {
             let _ = hud.emit("hud-clicks", total);
         }
+        crate::tauri_sink::mirror_hud(total);
         // Targeted emit: status-update only to "main" window.
         if let Some(main_win) = app.get_webview_window("main") {
             let _ = main_win.emit(
@@ -1117,6 +1459,34 @@ impl ClickScheduler {
                 },
             );
         }
+        crate::tauri_sink::mirror_status(&crate::status_sink::StatusPayload {
+            active,
+            mode: mode.to_string(),
+            clicks_done: total,
+            cps,
+            status_text: status_text.to_string(),
+        });
+    }
+    /// Sink overload (Stage B/C): same payload as `status_and_hud_emit`,
+    /// routed to a `StatusSink` instead of Tauri windows. The daemon calls
+    /// this; the monolith keeps the Tauri path above. Zero logic fork.
+    #[allow(dead_code)]
+    fn status_and_hud_sink(
+        sink: &dyn crate::status_sink::StatusSink,
+        total: u32,
+        mode: &str,
+        cps: f64,
+        status_text: &str,
+        active: bool,
+    ) {
+        sink.push_hud(total);
+        sink.push_status(crate::status_sink::StatusPayload {
+            active,
+            mode: mode.to_string(),
+            clicks_done: total,
+            cps,
+            status_text: status_text.to_string(),
+        });
     }
     /// Immediate `status-update` (+ `hud-clicks`) emit carrying the LIVE state,
     /// for callers that are **not** the click worker.
@@ -1144,6 +1514,29 @@ impl ClickScheduler {
             self.is_active(),
         );
     }
+    /// Sink twin of `emit_status_now` (Stage B/C): the daemon path.
+    /// Same snapshot, same order (hud first, then status) — parity is pinned
+    /// by `status_sink_twin_matches_tauri_payload` below.
+    #[allow(dead_code)]
+    pub(crate) fn emit_status_sink(
+        &self,
+        sink: &dyn crate::status_sink::StatusSink,
+        status_text: &str,
+    ) {
+        let mode = if self.is_autoclicker_mode() {
+            "autoclicker"
+        } else {
+            "work"
+        };
+        Self::status_and_hud_sink(
+            sink,
+            self.get_clicks_done(),
+            mode,
+            f64::from_bits(self.cps_raw.load(Ordering::Relaxed)),
+            status_text,
+            self.is_active(),
+        );
+    }
 
     fn spawn_worker(&self, app_handle: Option<AppHandle>) {
         let active = Arc::clone(&self.active);
@@ -1164,6 +1557,7 @@ impl ClickScheduler {
         let hold_interval_arc = Arc::clone(&self.hold_interval_ms);
         let repeat_interval_arc = Arc::clone(&self.repeat_interval_ms);
         let jitter_radius_arc = Arc::clone(&self.jitter_radius_px);
+        let jitter_relative_3d_arc = Arc::clone(&self.jitter_relative_3d);
         let sequence_points_arc = Arc::clone(&self.sequence_points);
         let start_delay_arc = Arc::clone(&self.start_delay_ms);
         let stop_duration_arc = Arc::clone(&self.stop_duration_ms);
@@ -1176,11 +1570,56 @@ impl ClickScheduler {
         let app_filter_arc = Arc::clone(&self.app_filter);
         let focus_guard_arc = Arc::clone(&self.focus_guard);
         let technique_arc = Arc::clone(&self.technique);
+        let gateway_tx = self.gateway_tx.clone();
 
         thread::spawn(move || {
+            let node = crate::stability::click_node();
+            let task_id = crate::stability::next_task_id();
+            let (conduit, _steering_handle) = crate::stability::create_worker_steering();
+
+            let guard: snubber::ErasedGuard = match node.enter_erased_auto(|| {
+                crate::stability::emergency_release_all_hardware();
+            }) {
+                Ok(g) => g,
+                Err(e) => {
+                    let err_desc = match e {
+                        snubber::EnterError::BreakerOpen => "BREAKER OPEN (COOLING DOWN)",
+                        snubber::EnterError::BulkheadFull => "SYSTEM BUSY",
+                        _ => "SAFETY TRIP",
+                    };
+                    crate::debug_log_internal(
+                        "error",
+                        &format!("[Stability] click_worker rejected by snubber: {e:?}"),
+                    );
+                    active.store(false, Ordering::Release);
+                    if let Some(ref app) = app_handle {
+                        Self::status_and_hud_emit(
+                            app,
+                            clicks_done.load(Ordering::Relaxed),
+                            if mode_autoclicker.load(Ordering::Relaxed) {
+                                "autoclicker"
+                            } else {
+                                "work"
+                            },
+                            f64::from_bits(cps_raw.load(Ordering::Relaxed)),
+                            err_desc,
+                            false,
+                        );
+                    }
+                    return;
+                }
+            };
+            crate::stability::arm_hardware_token(
+                task_id,
+                crate::stability::OP_RELEASE_ALL_INPUTS,
+                1,
+            );
+
             #[cfg(target_os = "windows")]
             unsafe {
-                use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST};
+                use windows::Win32::System::Threading::{
+                    GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST,
+                };
                 let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
             }
 
@@ -1200,8 +1639,7 @@ impl ClickScheduler {
             // old worker's stop event has been signalled. One clone here is safe
             // and correct for the full lifetime of this worker.
             let stop_handle: crate::platform::NativeEventHandle = stop_event_lock
-                .lock()
-                .unwrap()
+                .safe_lock()
                 .clone()
                 .expect("stop_event must be initialized before spawn_worker");
             // Focus Guard: arm the session baseline + shared watcher state.
@@ -1235,30 +1673,31 @@ impl ClickScheduler {
                 None
             };
 
-            let cur_button = button_arc.lock().unwrap().clone();
-            let cur_technique = technique_arc.lock().unwrap().clone();
+            let cur_button = crate::stability::safe_lock(&button_arc, node).clone();
+            let cur_technique = crate::stability::safe_lock(&technique_arc, node).clone();
             // v4.2 — parse the config strings ONCE here at the boundary
             // and carry a typed ClickSpec through the whole click loop.
             // The platform layer no longer sees raw strings.
             let cur_click_spec = ClickSpec {
                 button: platform::parse_button_label(&cur_button),
                 click_type: crate::platform::backend::ClickType::from_config_str(
-                    &click_type_arc.lock().unwrap().clone(),
+                    &crate::stability::safe_lock(&click_type_arc, node).clone(),
                 ),
                 position_mode: crate::platform::backend::PositionMode::from_config_str(
-                    &position_mode_arc.lock().unwrap().clone(),
+                    &crate::stability::safe_lock(&position_mode_arc, node).clone(),
                 ),
                 fixed_x: fixed_x_arc.load(Ordering::Relaxed) as i32,
                 fixed_y: fixed_y_arc.load(Ordering::Relaxed) as i32,
                 jitter_radius: jitter_radius_arc.load(Ordering::Relaxed),
-                points: sequence_points_arc.lock().unwrap().clone(),
+                jitter_relative_3d: jitter_relative_3d_arc.load(Ordering::Relaxed),
+                points: crate::stability::safe_lock(&sequence_points_arc, node).clone(),
                 point_index: 0,
             };
             // When a sequence is active the click loop positions the cursor
             // at each point in order. Snapshot the points once and reuse.
             let active_sequence: Vec<crate::config_manager::SequencePoint> =
                 cur_click_spec.points.clone();
-            let cur_repeat_mode = repeat_mode_arc.lock().unwrap().clone();
+            let cur_repeat_mode = crate::stability::safe_lock(&repeat_mode_arc, node).clone();
             let cur_repeat_count = repeat_count_arc.load(Ordering::Relaxed);
             let cur_hold_duration = hold_duration_arc.load(Ordering::Relaxed).max(10);
             let cur_hold_interval = hold_interval_arc.load(Ordering::Relaxed);
@@ -1284,21 +1723,31 @@ impl ClickScheduler {
                     if crate::main_window_visible(app) {
                         let app_clone = app.clone();
                         std::thread::spawn(move || {
-                            let _ = crate::overlay::ensure_overlay_window(&app_clone);
+                            let _ = crate::overlay::ensure_satellite(&app_clone, "overlay");
                         });
                     }
                 }
             }
 
-            let emit_ripple_if_enabled = |spec: &ClickSpec| {
+            // Ripple WITHOUT touching the hot path: the click loop only pushes a
+            // packed (x, y) into a lock-free ring (one fetch_add + two stores —
+            // no Mutex, no clock, no IPC). The 25 FPS drain worker coalesces and
+            // emits. `Cursor` mode resolves the point through `at`:
+            // sequence/regular branches pass the point they already positioned
+            // (zero new syscalls); hold branches pass `None` and the closure
+            // reads the cursor AFTER the click landed (never before it) — it
+            // cannot shift the click cadence, only the eye-candy dot after it.
+            let emit_ripple_if_enabled = |spec: &ClickSpec, at: Option<(i32, i32)>| {
                 if visual_ripple.load(Ordering::Relaxed) {
-                    if let Some(ref app) = app_handle {
-                        let (rx, ry) = match spec.position_mode {
-                            crate::platform::backend::PositionMode::Fixed => (spec.fixed_x, spec.fixed_y),
-                            crate::platform::backend::PositionMode::Cursor => platform_backend.cursor_position(),
-                        };
-                        crate::overlay::emit_click_ripple(app, rx, ry);
-                    }
+                    let (rx, ry) = match spec.position_mode {
+                        crate::platform::backend::PositionMode::Fixed => {
+                            (spec.fixed_x, spec.fixed_y)
+                        }
+                        crate::platform::backend::PositionMode::Cursor => {
+                            at.unwrap_or_else(|| platform_backend.cursor_position())
+                        }
+                    };
+                    crate::overlay::push_click_ripple(rx, ry);
                 }
             };
 
@@ -1345,7 +1794,14 @@ impl ClickScheduler {
                             "work"
                         };
                         let cur_cps = f64::from_bits(cps_for_telemetry.load(Ordering::Relaxed));
-                        Self::status_and_hud_emit(&app_for_telemetry, total, mode_str, cur_cps, "RUNNING", true);
+                        Self::status_and_hud_emit(
+                            &app_for_telemetry,
+                            total,
+                            mode_str,
+                            cur_cps,
+                            "RUNNING",
+                            true,
+                        );
                     }
                 });
             }
@@ -1364,7 +1820,7 @@ impl ClickScheduler {
                     if poller_done.load(Ordering::Relaxed) || !active_flag.load(Ordering::Relaxed) {
                         break;
                     }
-                    let snapshot = image_trigger_for_poller.lock().unwrap().clone();
+                    let snapshot = image_trigger_for_poller.safe_lock().clone();
                     if let Some(trig) = snapshot {
                         let poll_ms = trig.poll_ms.clamp(50, 2000) as u64;
                         std::thread::sleep(Duration::from_millis(poll_ms));
@@ -1393,8 +1849,6 @@ impl ClickScheduler {
                 });
             }
 
-
-
             // ── START DELAY (configurable) ─────────────────────────────
             // `start_delay_ms` of 0 skips the wait entirely — which is also why
             // `activate_preset_hotkey_preempts_running_preset` carries 0 in
@@ -1404,8 +1858,13 @@ impl ClickScheduler {
             if cur_start_delay > 0 {
                 let target_start = Instant::now() + Duration::from_millis(cur_start_delay);
                 let wait_ok = timer.wait_until(target_start, stop_handle.clone());
-                if !wait_ok || !active.load(Ordering::Relaxed) {
-                    active.store(false, Ordering::Relaxed);
+                if !wait_ok || !active.load(Ordering::Acquire) {
+                    // Self-exit: same bundle as `worker_self_stop` but inline —
+                    // the worker thread owns no `ClickScheduler` handle, only
+                    // its Arcs. Telemetry off happens via the `active` flag
+                    // the telemetry loop polls; console/log/IDLE below.
+                    active.store(false, Ordering::Release);
+                    report_stop("start_delay_cancelled");
                 }
             }
 
@@ -1422,7 +1881,7 @@ impl ClickScheduler {
             // back restores what the user typed), but only the armed one may end
             // this run — the page shows exactly that, and a loop that stopped on
             // "whichever deadline is nearer" would contradict its own UI.
-            let cur_stop_mode = stop_mode_arc.lock().unwrap().clone();
+            let cur_stop_mode = stop_mode_arc.safe_lock().clone();
             let cur_stop_duration_ms = if cur_stop_mode == "duration" {
                 cur_stop_duration_ms
             } else {
@@ -1443,25 +1902,56 @@ impl ClickScheduler {
             // status, so `run_started_at.elapsed()` there is inflated by the
             // teardown (a 5 s limit reported 5.05 s).
             let mut auto_stop_elapsed_ms: u64 = 0;
-            let mut mouse_guard = MouseHoldGuard::new(platform_backend.as_ref(), cur_click_spec.button);
+            let mut mouse_guard =
+                MouseHoldGuard::new(platform_backend.as_ref(), cur_click_spec.button);
             let mut butterfly_engine = ButterflyEngine::new();
             let mut drag_engine = DragClickEngine::new();
 
             // ── CLICKING LOOP ──────────────────────────────────────────
-            while active.load(Ordering::Relaxed) && mode_autoclicker.load(Ordering::Relaxed) {
+            // `active` is the stop flag: Acquire on read pairs with the
+            // Release store in `finish_stop`/self-exits (hygiene — x86
+            // would observe Relaxed too, but a stop flag has no business
+            // being Relaxed).
+            while active.load(Ordering::Acquire) && mode_autoclicker.load(Ordering::Relaxed) {
+                // Task steering: Pause parks the worker on the conduit
+                // Condvar (kernel sleep, 0% CPU); Cancel/Preempted stop the
+                // run. wait_while_paused returns the releasing directive.
+                match conduit.wait_while_paused() {
+                    snubber::Directive::Proceed | snubber::Directive::SkipStage => {}
+                    snubber::Directive::Pause => {
+                        // Re-armed before wake: re-park without busy-polling.
+                        if !active.load(Ordering::Acquire) {
+                            break;
+                        }
+                        continue;
+                    }
+                    snubber::Directive::Cancel(_reason)
+                    | snubber::Directive::Preempted(_reason) => {
+                        active.store(false, Ordering::Release);
+                        report_stop("steering_cancel");
+                        break;
+                    }
+                }
+                conduit.update_state(|s| {
+                    s.clicks_done = clicks_done.load(Ordering::Relaxed);
+                    s.cps = f64::from_bits(cps_raw.load(Ordering::Relaxed));
+                });
+
                 // Stop by elapsed duration
                 if cur_stop_duration_ms > 0
                     && run_started_at.elapsed() >= Duration::from_millis(cur_stop_duration_ms)
                 {
                     auto_stop_reason = Some("duration");
                     auto_stop_elapsed_ms = run_started_at.elapsed().as_millis() as u64;
-                    active.store(false, Ordering::Relaxed);
+                    active.store(false, Ordering::Release);
+                    report_stop("auto_stop_duration");
                     break;
                 }
                 // Image-trigger stop request (raised by the poller below).
-                if image_trigger_should_stop.load(Ordering::Relaxed) {
-                    active.store(false, Ordering::Relaxed);
-                    image_trigger_should_stop.store(false, Ordering::Relaxed);
+                if image_trigger_should_stop.load(Ordering::Acquire) {
+                    active.store(false, Ordering::Release);
+                    image_trigger_should_stop.store(false, Ordering::Release);
+                    report_stop("image_trigger");
                     if let Some(ref app) = app_handle {
                         let _ = app.emit("image-trigger-stopped", "matched target pixel");
                     }
@@ -1476,7 +1966,8 @@ impl ClickScheduler {
                     if now_unix >= cur_stop_time_sec {
                         auto_stop_reason = Some("wallclock");
                         auto_stop_elapsed_ms = run_started_at.elapsed().as_millis() as u64;
-                        active.store(false, Ordering::Relaxed);
+                        active.store(false, Ordering::Release);
+                        report_stop("auto_stop_wallclock");
                         break;
                     }
                 }
@@ -1489,7 +1980,8 @@ impl ClickScheduler {
                         && cur_repeat_count > 0
                         && batches_done >= cur_repeat_count
                     {
-                        active.store(false, Ordering::Relaxed);
+                        active.store(false, Ordering::Release);
+                        report_stop("repeat_count_done");
                         break;
                     }
 
@@ -1497,7 +1989,7 @@ impl ClickScheduler {
                     if cur_repeat_interval > 0 {
                         let target = Instant::now() + Duration::from_millis(cur_repeat_interval);
                         let success = timer.wait_until(target, stop_handle.clone());
-                        if !success || !active.load(Ordering::Relaxed) {
+                        if !success || !active.load(Ordering::Acquire) {
                             break;
                         }
                     }
@@ -1507,9 +1999,10 @@ impl ClickScheduler {
                 // If not in repeat batch mode, check total limit
                 if cur_repeat_mode != "repeat"
                     && current_limit > 0
-                    && clicks_done.load(Ordering::Relaxed) >= current_limit
+                    && clicks_done.load(Ordering::Acquire) >= current_limit
                 {
-                    active.store(false, Ordering::Relaxed);
+                    active.store(false, Ordering::Release);
+                    report_stop("click_limit_done");
                     break;
                 }
 
@@ -1542,22 +2035,25 @@ impl ClickScheduler {
                 // `None` (lock screen, elevated) and our own exe fail OPEN.
                 if focus_guard_arc.is_enabled() {
                     if focus_watch_stop.is_requested() {
-                        active.store(false, Ordering::Relaxed);
+                        active.store(false, Ordering::Release);
                         if focus_watch_stop.request_stop(focus_watch_stop.take_thief()) {
                             if let Some(ref app) = app_handle {
-                                let _ = app.emit("focus-loss-paused", focus_watch_stop.take_thief());
+                                let _ =
+                                    app.emit("focus-loss-paused", focus_watch_stop.take_thief());
                             }
                         }
+                        report_stop("focus_loss");
                         break;
                     }
                     let fg_exe = fg_cache.exe();
                     if focus_guard_arc.should_pause(fg_exe.as_deref()) {
-                        active.store(false, Ordering::Relaxed);
+                        active.store(false, Ordering::Release);
                         if focus_watch_stop.request_stop(fg_exe.clone()) {
                             if let Some(ref app) = app_handle {
                                 let _ = app.emit("focus-loss-paused", fg_exe);
                             }
                         }
+                        report_stop("focus_loss");
                         break;
                     }
                 }
@@ -1568,7 +2064,7 @@ impl ClickScheduler {
                     // v4.2 instant stop: re-check active immediately before
                     // dispatching so a stop signal that arrived during the wait
                     // never produces an extra click.
-                    if !active.load(Ordering::Relaxed) {
+                    if !active.load(Ordering::Acquire) {
                         break;
                     }
                     // v4.2 instant stop: Double is decomposed here so the gap
@@ -1576,7 +2072,7 @@ impl ClickScheduler {
                     // cancel handle; the scheduler owns the active flag).
                     if cur_click_spec.click_type == crate::platform::backend::ClickType::Double {
                         let mut dispatched = 0usize;
-                        while dispatched < 2 && active.load(Ordering::Relaxed) {
+                        while dispatched < 2 && active.load(Ordering::Acquire) {
                             let single = crate::platform::backend::ClickSpec {
                                 click_type: crate::platform::backend::ClickType::Single,
                                 ..cur_click_spec.clone()
@@ -1584,13 +2080,15 @@ impl ClickScheduler {
                             if platform_backend.click_mouse(&single) {
                                 clicks_done.fetch_add(1, Ordering::Relaxed);
                                 batch_click_count += 1;
-                                emit_ripple_if_enabled(&single);
+                                // Hold-double tap: resolve the cursor in the closure
+                                // (AFTER the click landed), no point known up front.
+                                emit_ripple_if_enabled(&single, None);
                             }
                             dispatched += 1;
                             if dispatched < 2 {
                                 let target = Instant::now() + Duration::from_millis(50);
                                 if !timer.wait_until(target, stop_handle.clone())
-                                    || !active.load(Ordering::Relaxed)
+                                    || !active.load(Ordering::Acquire)
                                 {
                                     break;
                                 }
@@ -1599,13 +2097,13 @@ impl ClickScheduler {
                     } else if platform_backend.click_mouse(&cur_click_spec) {
                         clicks_done.fetch_add(1, Ordering::Relaxed);
                         batch_click_count += 1;
-                        emit_ripple_if_enabled(&cur_click_spec);
+                        emit_ripple_if_enabled(&cur_click_spec, None);
                     }
 
                     // Hold for hold_duration_ms
                     let target_down = Instant::now() + Duration::from_millis(cur_hold_duration);
                     if !timer.wait_until(target_down, stop_handle.clone())
-                        || !active.load(Ordering::Relaxed)
+                        || !active.load(Ordering::Acquire)
                     {
                         platform_backend.release_mouse_hold(cur_click_spec.button);
                         break;
@@ -1618,7 +2116,7 @@ impl ClickScheduler {
                     if cur_hold_interval > 0 {
                         let target_up = Instant::now() + Duration::from_millis(cur_hold_interval);
                         if !timer.wait_until(target_up, stop_handle.clone())
-                            || !active.load(Ordering::Relaxed)
+                            || !active.load(Ordering::Acquire)
                         {
                             break;
                         }
@@ -1652,7 +2150,7 @@ impl ClickScheduler {
                 };
 
                 // v4.2 instant stop: re-check active immediately before dispatch
-                if !active.load(Ordering::Relaxed) {
+                if !active.load(Ordering::Acquire) {
                     break;
                 }
 
@@ -1670,25 +2168,47 @@ impl ClickScheduler {
                     mouse_guard.press_down();
                     clicks_done.fetch_add(1, Ordering::Relaxed);
                     batch_click_count += 1;
-                    emit_ripple_if_enabled(&seq_spec);
+                    // Sequence point was just set via set_cursor_pos above — the
+                    // click lands exactly there, no syscall needed.
+                    emit_ripple_if_enabled(&seq_spec, Some((p.x, p.y)));
 
                     let target_down = Instant::now() + Duration::from_secs_f64(hold_ms / 1000.0);
-                    if !timer.wait_until(target_down, stop_handle.clone()) || !active.load(Ordering::Relaxed) {
+                    if !timer.wait_until(target_down, stop_handle.clone())
+                        || !active.load(Ordering::Acquire)
+                    {
                         mouse_guard.release_up();
                         break;
                     }
                     mouse_guard.release_up();
 
-                    let seq_delay = if p.delay_ms > 0 { p.delay_ms as f64 } else { release_ms };
+                    let seq_delay = if p.delay_ms > 0 {
+                        p.delay_ms as f64
+                    } else {
+                        release_ms
+                    };
                     let target_up = Instant::now() + Duration::from_secs_f64(seq_delay / 1000.0);
-                    if !timer.wait_until(target_up, stop_handle.clone()) || !active.load(Ordering::Relaxed) {
+                    if !timer.wait_until(target_up, stop_handle.clone())
+                        || !active.load(Ordering::Acquire)
+                    {
                         break;
                     }
                     continue;
                 }
 
                 // Regular click positioning
+                //
+                // 3D games vs 2D Desktop Jitter:
+                // - Fixed mode: moves to fixed target with jitter, if radius > 0.
+                // - Cursor mode (3D Games ON): sends a relative mouse delta `mouse_move_relative(dx, dy)`
+                //   via RawInput (MOUSEEVENTF_MOVE). Does NOT call SetCursorPos and does NOT instantly
+                //   reverse, providing natural micro-movement without camera vibrating or anti-cheat flags.
+                // - Cursor mode (2D Desktop ON): calls `set_cursor_pos(orig_x + dx, orig_y + dy)` before
+                //   click, and restores back to `orig_x, orig_y` after click so cursor stays locked.
                 let (orig_x, orig_y) = platform_backend.cursor_position();
+                let is_3d = cur_click_spec.jitter_relative_3d
+                    && cur_click_spec.position_mode
+                        == crate::platform::backend::PositionMode::Cursor;
+
                 if cur_click_spec.position_mode == crate::platform::backend::PositionMode::Fixed {
                     let mut tx = cur_click_spec.fixed_x;
                     let mut ty = cur_click_spec.fixed_y;
@@ -1700,28 +2220,40 @@ impl ClickScheduler {
                     platform_backend.set_cursor_pos(tx, ty);
                 } else if cur_click_spec.jitter_radius > 0 {
                     let r = cur_click_spec.jitter_radius as i32;
-                    let tx = orig_x + rng.gen_range(-r..=r);
-                    let ty = orig_y + rng.gen_range(-r..=r);
-                    platform_backend.set_cursor_pos(tx, ty);
+                    let dx = rng.gen_range(-r..=r);
+                    let dy = rng.gen_range(-r..=r);
+                    if is_3d {
+                        platform_backend.mouse_move_relative(dx, dy);
+                    } else {
+                        platform_backend.set_cursor_pos(orig_x + dx, orig_y + dy);
+                    }
                 }
 
                 // Press Down
                 mouse_guard.press_down();
                 clicks_done.fetch_add(1, Ordering::Relaxed);
                 batch_click_count += 1;
-                emit_ripple_if_enabled(&cur_click_spec);
+                // Regular branch: `orig_x/orig_y` was read for positioning just
+                // above; reuse it (Fixed mode ignores it anyway). No new syscall.
+                emit_ripple_if_enabled(&cur_click_spec, Some((orig_x, orig_y)));
 
                 // Hold phase (safe against early break)
                 let target_down = Instant::now() + Duration::from_secs_f64(hold_ms / 1000.0);
-                if !timer.wait_until(target_down, stop_handle.clone()) || !active.load(Ordering::Relaxed) {
+                if !timer.wait_until(target_down, stop_handle.clone())
+                    || !active.load(Ordering::Acquire)
+                {
                     mouse_guard.release_up();
                     break;
                 }
 
                 // Release phase
                 mouse_guard.release_up();
+                // 2D Desktop Cursor offset restores here. The 3D relative path
+                // floats naturally with player hand control (never reversed instantly).
                 if cur_click_spec.jitter_radius > 0
-                    && cur_click_spec.position_mode == crate::platform::backend::PositionMode::Cursor
+                    && cur_click_spec.position_mode
+                        == crate::platform::backend::PositionMode::Cursor
+                    && !is_3d
                 {
                     platform_backend.set_cursor_pos(orig_x, orig_y);
                 }
@@ -1729,15 +2261,20 @@ impl ClickScheduler {
                 // Double click support
                 if cur_click_spec.click_type == crate::platform::backend::ClickType::Double {
                     let gap_target = Instant::now() + Duration::from_millis(50);
-                    if !timer.wait_until(gap_target, stop_handle.clone()) || !active.load(Ordering::Relaxed) {
+                    if !timer.wait_until(gap_target, stop_handle.clone())
+                        || !active.load(Ordering::Acquire)
+                    {
                         break;
                     }
                     mouse_guard.press_down();
                     clicks_done.fetch_add(1, Ordering::Relaxed);
                     batch_click_count += 1;
-                    emit_ripple_if_enabled(&cur_click_spec);
+                    // Second tap of the double: same point as the first one.
+                    emit_ripple_if_enabled(&cur_click_spec, Some((orig_x, orig_y)));
                     let target_down2 = Instant::now() + Duration::from_secs_f64(hold_ms / 1000.0);
-                    if !timer.wait_until(target_down2, stop_handle.clone()) || !active.load(Ordering::Relaxed) {
+                    if !timer.wait_until(target_down2, stop_handle.clone())
+                        || !active.load(Ordering::Acquire)
+                    {
                         mouse_guard.release_up();
                         break;
                     }
@@ -1746,7 +2283,9 @@ impl ClickScheduler {
 
                 // Release duration between clicks
                 let target_up = Instant::now() + Duration::from_secs_f64(release_ms / 1000.0);
-                if !timer.wait_until(target_up, stop_handle.clone()) || !active.load(Ordering::Relaxed) {
+                if !timer.wait_until(target_up, stop_handle.clone())
+                    || !active.load(Ordering::Acquire)
+                {
                     break;
                 }
             }
@@ -1801,6 +2340,10 @@ impl ClickScheduler {
                             "elapsed_ms": auto_stop_elapsed_ms,
                         }),
                     );
+                    let _ = gateway_tx.send(ClickerCmd::AutoStop {
+                        reason,
+                        elapsed_ms: auto_stop_elapsed_ms,
+                    });
                 }
             }
 
@@ -1808,6 +2351,10 @@ impl ClickScheduler {
             // next run re-arms with a fresh foreground. (set_config also
             // disarms on save; this is the authoritative run-end cleanup.)
             focus_guard_arc.disarm();
+
+            // Commit snubber transaction and clear supervisor token
+            guard.commit();
+            crate::stability::commit_hardware_token(task_id);
         });
     }
 }
@@ -1838,7 +2385,7 @@ pub(crate) fn outlier_interval_ns(
 /// Moments: E = 0, Var = p²/9 (uniform would be p²/3). NO ×√3 compensation
 /// on purpose: rescaling would push edges to ±p×1.73 and break the ±35% promise.
 pub(crate) fn bates_jitter_factor(rng: &mut impl rand::Rng, pct_frac: f64) -> f64 {
-    if !(pct_frac > 0.0) {
+    if pct_frac <= 0.0 {
         return 0.0;
     }
     let r1 = rng.gen_range(-pct_frac..=pct_frac);
@@ -1890,7 +2437,7 @@ impl<'a, B: crate::platform::backend::InputBackend + ?Sized> Drop for MouseHoldG
 /// Bates B3 distribution: mean of 3 uniform draws in [mean - radius, mean + radius].
 /// Returns a value strictly bounded within [mean - radius, mean + radius] with Gaussian-like clustering.
 pub(crate) fn bates_b3(rng: &mut impl rand::Rng, mean: f64, radius: f64) -> f64 {
-    if !(radius > 0.0) {
+    if radius <= 0.0 {
         return mean;
     }
     let r1 = rng.gen_range(-radius..=radius);
@@ -2000,7 +2547,8 @@ impl ButterflyEngine {
         let raw_interval = (base_interval * scale).max(target_interval_ms * 0.70);
 
         // At high CPS (bio_factor -> 0), interval converges cleanly to target_interval_ms
-        let interval_ms = (target_interval_ms + (raw_interval - target_interval_ms) * bio_factor).max(4.0);
+        let interval_ms =
+            (target_interval_ms + (raw_interval - target_interval_ms) * bio_factor).max(4.0);
 
         let max_allowed_hold = interval_ms * 0.40;
         let raw_hold = bates_b3(rng, 20.0, 6.0) * scale;
@@ -2058,10 +2606,12 @@ impl DragClickEngine {
             // при високому CPS (Fadeout) плавно стискається до інтервалу такту
             let min_reset = (60.0 * bio_factor + target_interval_ms * (1.0 - bio_factor)).max(2.0);
             let reset_pause_ms = raw_reset_ms.clamp(min_reset, 2500.0);
-            let final_reset_ms = bates_b3(rng, reset_pause_ms, reset_pause_ms * 0.20 * bio_factor).max(min_reset);
+            let final_reset_ms =
+                bates_b3(rng, reset_pause_ms, reset_pause_ms * 0.20 * bio_factor).max(min_reset);
 
             self.burst_remaining -= 1;
-            let hold = (bates_b3(rng, 4.0, 1.0) * high_speed_scale).clamp(2.0, target_interval_ms * 0.40);
+            let hold =
+                (bates_b3(rng, 4.0, 1.0) * high_speed_scale).clamp(2.0, target_interval_ms * 0.40);
             return (hold, final_reset_ms);
         }
 
@@ -2070,7 +2620,8 @@ impl DragClickEngine {
 
         // Тертя сповільнюється до кінця протяжки:
         let friction_drag = (18 - self.burst_remaining.min(18)) as f64 * 0.25 * bio_factor;
-        let hold_ms = (bates_b3(rng, 4.0, 1.0) * high_speed_scale).clamp(2.0, target_interval_ms * 0.40);
+        let hold_ms =
+            (bates_b3(rng, 4.0, 1.0) * high_speed_scale).clamp(2.0, target_interval_ms * 0.40);
         let release_ms = (bates_b3(rng, 5.0 + friction_drag, 1.5) * high_speed_scale).max(2.0);
 
         (hold_ms, release_ms)
@@ -2115,11 +2666,11 @@ mod hotkey_debounce_tests {
     fn debounce_block_does_not_advance_timestamp() {
         let last = Arc::new(Mutex::new(None));
         assert!(ClickScheduler::toggle_debounce_check(&last, 80));
-        let t0 = *last.lock().unwrap();
+        let t0 = *last.safe_lock();
         for _ in 0..5 {
             assert!(!ClickScheduler::toggle_debounce_check(&last, 80));
         }
-        let t1 = *last.lock().unwrap();
+        let t1 = *last.safe_lock();
         assert_eq!(
             t0, t1,
             "blocked calls must not update the debounce timestamp"
@@ -2232,8 +2783,8 @@ mod single_mode_active_precheck_tests {
         );
     }
 
-    /// TYPING KILL-SWITCH: a text keypress while running must stop the clicker,
-    /// and a start attempt while the user is typing must be swallowed.
+    /// Typing interlock: a text keypress while running must stop the clicker,
+    /// and a start attempt while the user is typing must be refused.
     ///
     /// NOTE: this test NEVER calls `set_active(true)` — in autoclicker mode
     /// that would spawn a real click worker. All assertions go through the
@@ -2242,9 +2793,9 @@ mod single_mode_active_precheck_tests {
     /// `if active && !self.typing_allows_start() { return; }` guard sits
     /// before the mode check and before `spawn_worker`).
     #[test]
-    fn typing_kill_switch_blocks_start_but_never_stop() {
+    fn typing_interlock_blocks_start_but_never_stop() {
         let scheduler = ClickScheduler::new();
-        // Disabled guard (default config): the kill-switch decision is
+        // Disabled guard (default config): the interlock decision is
         // transparent.
         assert!(scheduler.typing_allows_start());
 
@@ -2311,7 +2862,10 @@ mod single_mode_active_precheck_tests {
         // Variance ≈ p²/9 within ±15% (uniform would be p²/3 — 3x wider).
         let expected = p * p / 9.0;
         let rel = ((var - expected) / expected).abs();
-        assert!(rel < 0.15, "Bates variance off: got {var}, want ~{expected}");
+        assert!(
+            rel < 0.15,
+            "Bates variance off: got {var}, want ~{expected}"
+        );
         // Hard bound: ZERO escapes in 10k draws — no clamp ever needed.
         assert_eq!(out_of_bounds, 0, "Bates escaped [-p, +p]");
     }
@@ -2331,22 +2885,34 @@ mod single_mode_active_precheck_tests {
         use rand::SeedableRng;
         let mut rng = rand::rngs::StdRng::seed_from_u64(7);
         for _ in 0..1000 {
-            assert_eq!(outlier_interval_ns(&mut rng, 80_000_000, 81_000_000, 0.0), 81_000_000);
+            assert_eq!(
+                outlier_interval_ns(&mut rng, 80_000_000, 81_000_000, 0.0),
+                81_000_000
+            );
         }
         // Negative / NaN / infinite also mean "no hesitation", never a stretch
         // (and never a panic — NaN.clamp() would panic in core).
-        assert_eq!(outlier_interval_ns(&mut rng, 80_000_000, 81_000_000, -0.5), 81_000_000);
-        assert_eq!(outlier_interval_ns(&mut rng, 80_000_000, 81_000_000, f64::NAN), 81_000_000);
-        assert_eq!(outlier_interval_ns(&mut rng, 80_000_000, 81_000_000, f64::INFINITY), 81_000_000);
+        assert_eq!(
+            outlier_interval_ns(&mut rng, 80_000_000, 81_000_000, -0.5),
+            81_000_000
+        );
+        assert_eq!(
+            outlier_interval_ns(&mut rng, 80_000_000, 81_000_000, f64::NAN),
+            81_000_000
+        );
+        assert_eq!(
+            outlier_interval_ns(&mut rng, 80_000_000, 81_000_000, f64::INFINITY),
+            81_000_000
+        );
     }
 
     #[test]
     fn outlier_rate_and_shape() {
         use rand::SeedableRng;
         let base: i64 = 80_000_000; // 12.5 CPS — the human reference point
-        // 100k draws: 2% binomial sigma is ~0.14%, so ±0.5% is ~3.5 sigma.
-        // (20k proved too seed-sensitive in review: one honest seed read
-        // 1.68%, inside 1.5-2.5% only by luck of the draw.)
+                                    // 100k draws: 2% binomial sigma is ~0.14%, so ±0.5% is ~3.5 sigma.
+                                    // (20k proved too seed-sensitive in review: one honest seed read
+                                    // 1.68%, inside 1.5-2.5% only by luck of the draw.)
         let n = 100_000usize;
         let mut rng = rand::rngs::StdRng::seed_from_u64(0x0E57_0001);
         let mut hits = 0usize;
@@ -2365,7 +2931,10 @@ mod single_mode_active_precheck_tests {
         }
         let rate = hits as f64 / n as f64;
         assert!(rate > 0.015 && rate < 0.025, "outlier rate drifted: {rate}");
-        assert!(min_k >= 2.0 && max_k <= 3.0, "outlier shape escaped [2x,3x]: {min_k}..{max_k}");
+        assert!(
+            min_k >= 2.0 && max_k <= 3.0,
+            "outlier shape escaped [2x,3x]: {min_k}..{max_k}"
+        );
         // Mean dips honestly ~3%: E[k] = 0.98*1 + 0.02*2.5 = 1.03.
         // Never compensated — the dip IS the humanity.
         let mean_k = sum as f64 / n as f64 / base as f64;
@@ -2620,12 +3189,8 @@ mod hotkey_stop_path_tests {
             // start path — a stop must never be refusable.
             let debounce_ok = self.active
                 || ClickScheduler::toggle_debounce_check(&self.last_toggle, self.debounce_ms);
-            let outcome = decide_toggle(
-                self.active,
-                self.work_mode,
-                self.typing_locked,
-                debounce_ok,
-            );
+            let outcome =
+                decide_toggle(self.active, self.work_mode, self.typing_locked, debounce_ok);
             match outcome {
                 ToggleOutcome::Start => self.active = true,
                 ToggleOutcome::Stop => self.active = false,
@@ -2649,7 +3214,10 @@ mod hotkey_stop_path_tests {
         assert_eq!(sim.press(), ToggleOutcome::Start);
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(sim.press(), ToggleOutcome::Stop);
-        assert!(!sim.active, "300 ms later the second press must stop clicking");
+        assert!(
+            !sim.active,
+            "300 ms later the second press must stop clicking"
+        );
     }
 
     /// Debounce must never swallow a stop, even on an ultra-fast second tap.
@@ -2658,7 +3226,11 @@ mod hotkey_stop_path_tests {
         let mut sim = ToggleSim::new(5000); // absurdly long window, on purpose
         assert_eq!(sim.press(), ToggleOutcome::Start);
         std::thread::sleep(Duration::from_millis(10));
-        assert_eq!(sim.press(), ToggleOutcome::Stop, "a stop is never debounced");
+        assert_eq!(
+            sim.press(),
+            ToggleOutcome::Stop,
+            "a stop is never debounced"
+        );
         assert!(!sim.active);
     }
 
@@ -2666,7 +3238,7 @@ mod hotkey_stop_path_tests {
     fn stop_is_never_gated_by_the_typing_lockout() {
         let mut sim = ToggleSim::new(80);
         assert_eq!(sim.press(), ToggleOutcome::Start);
-        // A text key landed mid-run: the clicker is stopped by the kill-switch
+        // A text key landed mid-run: the clicker is stopped by the typing interlock
         // and the lockout is armed.
         sim.typing_locked = true;
         assert_eq!(
@@ -2745,9 +3317,9 @@ mod hotkey_stop_path_tests {
         assert_eq!(sim.press(), ToggleOutcome::Start);
         assert_eq!(sim.press(), ToggleOutcome::Stop);
 
-        let before = *sim.last_toggle.lock().unwrap();
+        let before = *sim.last_toggle.safe_lock();
         assert_eq!(sim.press(), ToggleOutcome::BlockedByDebounce);
-        let after = *sim.last_toggle.lock().unwrap();
+        let after = *sim.last_toggle.safe_lock();
         assert_eq!(before, after, "a refused start must not extend the window");
 
         std::thread::sleep(Duration::from_millis(520));
@@ -2852,7 +3424,10 @@ mod hotkey_stop_path_tests {
         scheduler.set_config(cfg);
 
         let after = scheduler.get_config();
-        assert_eq!(after.gui_lock_ms, 2400, "gui_lock_ms must survive set_config");
+        assert_eq!(
+            after.gui_lock_ms, 2400,
+            "gui_lock_ms must survive set_config"
+        );
         assert_eq!(
             after.hotkey_debounce_ms, 35,
             "the response-time slider must take effect without a restart"
@@ -2873,7 +3448,10 @@ mod hotkey_stop_path_tests {
         work.toggle_mode(None);
         assert!(!work.is_autoclicker_mode());
         assert_eq!(work.set_active(true, None), ToggleOutcome::IgnoredWorkMode);
-        assert!(!work.is_active(), "a vetoed start must not leave a run behind");
+        assert!(
+            !work.is_active(),
+            "a vetoed start must not leave a run behind"
+        );
         // …but STOP stays absolute, exactly as `decide_toggle` promises.
         assert_eq!(work.set_active(false, None), ToggleOutcome::Stop);
 
@@ -2881,7 +3459,10 @@ mod hotkey_stop_path_tests {
         let typing = ClickScheduler::new();
         typing.typing_guard().note();
         assert!(typing.typing_guard().hotkeys_locked());
-        assert_eq!(typing.set_active(true, None), ToggleOutcome::BlockedByTyping);
+        assert_eq!(
+            typing.set_active(true, None),
+            ToggleOutcome::BlockedByTyping
+        );
         assert!(!typing.is_active());
     }
 
@@ -2895,9 +3476,7 @@ mod hotkey_stop_path_tests {
         // real window and asserts start-then-veto). A script that both enables
         // the window and asserts preempts-then-toggles in one breath would be
         // timing-flaky by construction (CI stalls > 80 ms mid-test are real).
-        scheduler
-            .hotkey_debounce_ms
-            .store(0, Ordering::Relaxed);
+        scheduler.hotkey_debounce_ms.store(0, Ordering::Relaxed);
         // Zero-state hygiene: a `ClickScheduler::new()` carries the factory
         // typing window (600 ms), and other tests in this same binary call
         // `typing_guard().note()` — never on THIS instance, but a fresh guard
@@ -3005,6 +3584,142 @@ mod hotkey_stop_path_tests {
             scheduler.is_active(),
             "a double-fired preset hotkey must not stop the run it just started"
         );
+    }
+
+    /// Stop-Start-Stop must not revive a stale worker.
+    ///
+    /// Regression for the split-brain stop: `stop_event` used to be ONE
+    /// shared `Arc<AtomicBool>` reset in place (`store(false)`) on start. A
+    /// worker that had not observed its own stop signal yet saw the reset
+    /// and kept clicking — Stop-Start-Stop left a stray thread behind. Now every
+    /// stop rotates in a fresh handle (and every start mints one), so the
+    /// stale thread keeps polling its OWN cloned Arc and dies on schedule.
+    /// The test asserts the structural guarantee directly: after
+    /// `set_active(false)` the scheduler's handle is a DIFFERENT Arc than
+    /// the one a worker spawned before the stop could have cloned.
+    #[test]
+    fn stop_start_stop_rotates_the_stop_handle() {
+        let scheduler = ClickScheduler::new();
+        scheduler.hotkey_debounce_ms.store(0, Ordering::Relaxed);
+        let before = {
+            let g = scheduler.stop_event.safe_lock();
+            g.clone()
+        };
+        // Start spawns a worker (which clones `before`), then stop must
+        // retire that handle — never reuse it.
+        assert_eq!(scheduler.set_active(true, None), ToggleOutcome::Start);
+        assert_eq!(scheduler.set_active(false, None), ToggleOutcome::Stop);
+        let after_stop = {
+            let g = scheduler.stop_event.safe_lock();
+            g.clone()
+        };
+        let retired = match (&before, &after_stop) {
+            (Some(b), Some(a)) => !Arc::ptr_eq(b, a),
+            _ => false,
+        };
+        assert!(
+            retired,
+            "finish_stop must rotate the stop handle so a stale worker can never observe a future reset"
+        );
+        // And the next start must mint yet another generation — reusing the
+        // post-stop handle would re-expose the same race one run later.
+        // NOTE: debounce is zeroed above, but the worker thread itself may
+        // still be exiting; `set_active(true)` below only needs the flag
+        // transition, the spawned test worker exits on its first poll.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert_eq!(scheduler.set_active(true, None), ToggleOutcome::Start);
+        let after_restart = {
+            let g = scheduler.stop_event.safe_lock();
+            g.clone()
+        };
+        let fresh = match (&after_stop, &after_restart) {
+            (Some(b), Some(a)) => !Arc::ptr_eq(b, a),
+            _ => false,
+        };
+        assert!(
+            fresh,
+            "set_active(true) must mint a fresh stop handle per generation"
+        );
+        assert_eq!(scheduler.set_active(false, None), ToggleOutcome::Stop);
+        assert!(
+            !scheduler.is_active(),
+            "final stop must leave the scheduler idle"
+        );
+    }
+
+    /// Customs membrane blocks a poisoned start: CPS out of range admits no
+    /// worker, rolls the flag back, reports PoisonedPayload, arms no guard.
+    ///
+    /// Snubber wiring: `validate_click_invariants` runs BEFORE the worker
+    /// spawn; the breach lands in the click-node flight recorder as
+    /// `PoisonedPayload` with `total_started` untouched (no slot burned —
+    /// deliberately NOT `scoped_checked`, which would arm + commit a
+    /// throwaway guard on a max_in_flight(1) node).
+    ///
+    /// Hermetic accounting: this test uses its own throwaway node instead of
+    /// the global `click_node()`, whose `total_started` other tests in the
+    /// same binary legitimately advance (bulkhead admit + release).
+    #[test]
+    fn poisoned_cps_never_spawns_a_worker_and_is_reported() {
+        let scheduler = ClickScheduler::new();
+        scheduler.hotkey_debounce_ms.store(0, Ordering::Relaxed);
+        scheduler
+            .cps_raw
+            .store((-5.0f64).to_bits(), Ordering::Release);
+        // `report(PoisonedPayload)` bumps the per-kind counter + last_fault;
+        // it does NOT arm a guard (`total_started` untouched) and does NOT
+        // touch `poisoned_rejected` (that one belongs to `enter_checked`
+        // breaches, which deliberately aren't used here — see the membrane
+        // NOTE in `set_active`: no throwaway guard on a max_in_flight(1)
+        // node).
+        // Hermetic node: the production path reports on the global
+        // `click_node()`; here we assert the same algebra on a throwaway
+        // node so parallel tests cannot move the counters under us.
+        let node = snubber::SnubberNode::builder("test_poison_membrane").build();
+        let cps = f64::from_bits(scheduler.cps_raw.load(Ordering::Acquire));
+        let fx = scheduler.fixed_x.load(Ordering::Acquire) as i32;
+        let fy = scheduler.fixed_y.load(Ordering::Acquire) as i32;
+        let (sw, sh) = crate::platform::get_screen_size();
+        assert!(
+            crate::stability::validate_click_invariants(cps, fx, fy, sw, sh).is_err(),
+            "poisoned CPS must breach the membrane"
+        );
+        node.report(snubber::FaultKind::PoisonedPayload, 0, 0);
+        let out = scheduler.set_active(true, None);
+        assert_eq!(
+            out,
+            ToggleOutcome::BlockedByTyping,
+            "poisoned start must be refused at the membrane"
+        );
+        assert!(
+            !scheduler.is_active(),
+            "refused start must roll the flag back to idle"
+        );
+        let s = node.stats();
+        assert_eq!(
+            s.reported[snubber::FaultKind::PoisonedPayload.index()],
+            1,
+            "breach must be reported as PoisonedPayload in the per-kind counter"
+        );
+        assert!(
+            matches!(
+                s.last_fault.map(|f| f.kind),
+                Some(snubber::FaultKind::PoisonedPayload)
+            ),
+            "breach must land in the flight recorder as the last fault"
+        );
+        assert_eq!(
+            s.total_started, 0,
+            "membrane breach must not arm a guard (no slot burned)"
+        );
+        // Recovery: a sane CPS starts normally right after the refusal.
+        scheduler
+            .cps_raw
+            .store(10.0f64.to_bits(), Ordering::Release);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert_eq!(scheduler.set_active(true, None), ToggleOutcome::Start);
+        assert!(scheduler.is_active());
+        assert_eq!(scheduler.set_active(false, None), ToggleOutcome::Stop);
     }
 
     #[test]
@@ -3167,26 +3882,58 @@ mod hotkey_stop_path_tests {
         // 1. Single timing at 160 CPS
         for _ in 0..20 {
             let (hold, release) = calc_single_timing(&mut rng, target_interval_ms, 10.0, 0.02);
-            assert!(hold >= 2.0, "Single hold at 160 CPS must be >= 2ms, got {}", hold);
-            assert!(release >= 2.0, "Single release at 160 CPS must be >= 2ms, got {}", release);
-            assert!(hold + release <= 8.5, "Single cycle at 160 CPS must be tight, got {}", hold + release);
+            assert!(
+                hold >= 2.0,
+                "Single hold at 160 CPS must be >= 2ms, got {}",
+                hold
+            );
+            assert!(
+                release >= 2.0,
+                "Single release at 160 CPS must be >= 2ms, got {}",
+                release
+            );
+            assert!(
+                hold + release <= 8.5,
+                "Single cycle at 160 CPS must be tight, got {}",
+                hold + release
+            );
         }
 
         // 2. Butterfly timing at 160 CPS
         let mut b_engine = ButterflyEngine::new();
         for _ in 0..20 {
             let (hold, release) = b_engine.next_timing(&mut rng, target_interval_ms);
-            assert!(hold >= 2.0, "Butterfly hold at 160 CPS must be >= 2ms, got {}", hold);
-            assert!(release >= 2.0, "Butterfly release at 160 CPS must be >= 2ms, got {}", release);
-            assert!(hold + release <= 8.5, "Butterfly cycle at 160 CPS must be tight, got {}", hold + release);
+            assert!(
+                hold >= 2.0,
+                "Butterfly hold at 160 CPS must be >= 2ms, got {}",
+                hold
+            );
+            assert!(
+                release >= 2.0,
+                "Butterfly release at 160 CPS must be >= 2ms, got {}",
+                release
+            );
+            assert!(
+                hold + release <= 8.5,
+                "Butterfly cycle at 160 CPS must be tight, got {}",
+                hold + release
+            );
         }
 
         // 3. Drag timing at 160 CPS
         let mut d_engine = DragClickEngine::new();
         for _ in 0..20 {
             let (hold, release) = d_engine.next_timing(&mut rng, target_interval_ms);
-            assert!(hold >= 2.0, "Drag hold at 160 CPS must be >= 2ms, got {}", hold);
-            assert!(release >= 2.0, "Drag release at 160 CPS must be >= 2ms, got {}", release);
+            assert!(
+                hold >= 2.0,
+                "Drag hold at 160 CPS must be >= 2ms, got {}",
+                hold
+            );
+            assert!(
+                release >= 2.0,
+                "Drag release at 160 CPS must be >= 2ms, got {}",
+                release
+            );
         }
     }
 
@@ -3207,7 +3954,9 @@ mod hotkey_stop_path_tests {
     fn test_binding_shield_exempts_star_plus_one() {
         let scheduler = ClickScheduler::new();
         // 0x6A (Numpad *) and 0x31 ('1')
-        scheduler.key_policy().exempt_all([0x6Au16, 0x31].into_iter());
+        scheduler
+            .key_policy()
+            .exempt_all([0x6Au16, 0x31].into_iter());
         assert!(scheduler.key_policy().is_exempt(0x6A));
         assert!(scheduler.key_policy().is_exempt(0x31));
         assert!(!scheduler.key_policy().is_text_keypress(0x6A));
@@ -3228,8 +3977,8 @@ mod hotkey_stop_path_tests {
 
     #[test]
     fn work_to_autoclicker_enters_with_a_clean_guard() {
-        // The typing guard sleeps in Work Mode (the hook loop skips both the
-        // kill-switch and the arming when `is_autoclicker_mode()` is false),
+        // The typing guard is idle in Work Mode (the hook loop skips both the
+        // interlock and the arming when `is_autoclicker_mode()` is false),
         // but belt and suspenders: a lockout armed BEFORE the switch (or by
         // any path that bypassed the skip) must not suppress the first toggle
         // after returning to Autoclicker mode.
@@ -3254,7 +4003,10 @@ mod hotkey_stop_path_tests {
     fn test_work_mode_strictly_forbids_start() {
         let scheduler = ClickScheduler::new();
         scheduler.toggle_mode(None); // switch to work mode
-        assert_eq!(scheduler.set_active(true, None), ToggleOutcome::IgnoredWorkMode);
+        assert_eq!(
+            scheduler.set_active(true, None),
+            ToggleOutcome::IgnoredWorkMode
+        );
         assert!(!scheduler.is_active());
     }
 
@@ -3286,25 +4038,225 @@ mod hotkey_stop_path_tests {
             jitter_percent: 10.0,
             ..Default::default()
         };
-        *scheduler.presets.lock().unwrap() = vec![p1, p2];
+        *scheduler.presets.safe_lock() = vec![p1, p2];
 
         // Start preset 1
         let res1 = scheduler.activate_preset_hotkey("preset_1", None);
         assert_eq!(res1, ToggleOutcome::Start);
         assert!(scheduler.is_active());
-        assert_eq!(scheduler.current_running_preset.lock().unwrap().as_deref(), Some("preset_1"));
+        assert_eq!(
+            scheduler.current_running_preset.safe_lock().as_deref(),
+            Some("preset_1")
+        );
 
         // Preempt with preset 2
         let res2 = scheduler.activate_preset_hotkey("preset_2", None);
         assert_eq!(res2, ToggleOutcome::Start);
         assert!(scheduler.is_active());
-        assert_eq!(scheduler.current_running_preset.lock().unwrap().as_deref(), Some("preset_2"));
+        assert_eq!(
+            scheduler.current_running_preset.safe_lock().as_deref(),
+            Some("preset_2")
+        );
 
         // Toggle same preset stops
         let res3 = scheduler.activate_preset_hotkey("preset_2", None);
         assert_eq!(res3, ToggleOutcome::Stop);
         assert!(!scheduler.is_active());
     }
+
+    #[test]
+    fn status_sink_twin_matches_tauri_payload() {
+        // Stage B/C parity: the sink twin emits the same snapshot the Tauri
+        // path would — hud first, then status, same clicks/mode/cps/text.
+        let scheduler = ClickScheduler::new();
+        let sink = crate::status_sink::VecSink::default();
+        scheduler.emit_status_sink(&sink, "IDLE");
+        assert_eq!(sink.count(crate::ipc::EVENT_HUD_CLICKS), 1);
+        assert_eq!(sink.count(crate::ipc::EVENT_STATUS_UPDATE), 1);
+        let guard = sink.frames.lock().unwrap();
+        let (_, status) = guard
+            .iter()
+            .find(|(e, _)| e == crate::ipc::EVENT_STATUS_UPDATE)
+            .unwrap();
+        assert_eq!(
+            status["clicks_done"],
+            serde_json::Value::from(scheduler.get_clicks_done())
+        );
+        assert_eq!(status["status_text"], serde_json::Value::from("IDLE"));
+    }
+
+    // ── 3D Game Jitter Tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_3d_jitter_scheduler_loop_invariants() {
+        let src = include_str!("scheduler.rs");
+
+        // 1. Verify scheduler calls mouse_move_relative when is_3d is true
+        assert!(
+            src.contains("platform_backend.mouse_move_relative(dx, dy);"),
+            "scheduler must invoke mouse_move_relative for 3D jitter"
+        );
+
+        // 2. Verify 2D cursor mode calls set_cursor_pos before click and restores after click
+        assert!(
+            src.contains("platform_backend.set_cursor_pos(orig_x + dx, orig_y + dy);"),
+            "scheduler must invoke set_cursor_pos for 2D cursor jitter"
+        );
+        assert!(
+            src.contains("platform_backend.set_cursor_pos(orig_x, orig_y);"),
+            "scheduler must restore original cursor pos in 2D mode"
+        );
+
+        // 3. Verify that in 3D mode (!is_3d guard), cursor is NOT restored via set_cursor_pos
+        assert!(
+            src.contains("&& !is_3d"),
+            "cursor restoration must be gated with !is_3d so 3D camera does not snap back"
+        );
+    }
+
+    #[test]
+    fn test_no_instant_anti_jitter_reversal_in_platform() {
+        let win_mod_src = include_str!("platform/windows/mod.rs");
+        // Windows mod.rs click_mouse must NOT contain mouse_move_relative(-dx, -dy)
+        assert!(
+            !win_mod_src.contains("mouse_move_relative(-dx, -dy)"),
+            "platform must not contain instant opposite-vector reversal (anti-cheat detection risk)"
+        );
+    }
+
+    #[test]
+    fn test_jitter_3d_ripple_coordinates_use_screen_position() {
+        let src = include_str!("scheduler.rs");
+        // emit_ripple_if_enabled in regular click loop must pass Some((orig_x, orig_y))
+        assert!(
+            src.contains("emit_ripple_if_enabled(&cur_click_spec, Some((orig_x, orig_y)));"),
+            "ripple coordinates must use global screen position, never relative deltas"
+        );
+    }
+
+    #[test]
+    fn test_snubber_gateway_phase4_all_doors_intake() {
+        let scheduler = Arc::new(ClickScheduler::new());
+        // Door 1 (Hotkey), Door 2 (UI), Door 3 (Timer), Door 4 (Tray) all send to gateway:
+        assert!(scheduler
+            .send_cmd(ClickerCmd::Toggle { source: "hotkey" })
+            .is_ok());
+        assert!(scheduler
+            .send_cmd(ClickerCmd::Toggle { source: "ui" })
+            .is_ok());
+        assert!(scheduler
+            .send_cmd(ClickerCmd::AutoStop {
+                reason: "duration",
+                elapsed_ms: 1000
+            })
+            .is_ok());
+        assert!(scheduler
+            .send_cmd(ClickerCmd::Toggle { source: "tray" })
+            .is_ok());
+        assert!(scheduler.send_cmd(ClickerCmd::EmergencyStop).is_ok());
+
+        // Drain from GatewayHost
+        let host_lock = scheduler.gateway_rx.safe_lock().take();
+        assert!(
+            host_lock.is_some(),
+            "GatewayHost must be initialized on ClickScheduler"
+        );
+        let host = host_lock.unwrap();
+
+        let cmd1 = host.try_recv().expect("door 1 cmd");
+        assert!(matches!(cmd1, ClickerCmd::Toggle { source: "hotkey" }));
+
+        let cmd2 = host.try_recv().expect("door 2 cmd");
+        assert!(matches!(cmd2, ClickerCmd::Toggle { source: "ui" }));
+
+        let cmd3 = host.try_recv().expect("door 3 cmd");
+        assert!(matches!(cmd3, ClickerCmd::AutoStop { .. }));
+
+        let cmd4 = host.try_recv().expect("door 4 cmd");
+        assert!(matches!(cmd4, ClickerCmd::Toggle { source: "tray" }));
+
+        let cmd5 = host.try_recv().expect("door 5 cmd");
+        assert!(matches!(cmd5, ClickerCmd::EmergencyStop));
+    }
+
+    #[test]
+    fn test_snubber_state_machine_phase7_node_transition() {
+        let scheduler = ClickScheduler::new();
+        assert_eq!(scheduler.state(), ClickerState::Idle);
+        assert!(!scheduler.is_active());
+        assert_eq!(scheduler.state().status_text(), "IDLE");
+
+        // Transition Idle -> Running via set_active
+        let out = scheduler.set_active(true, None);
+        assert_eq!(out, ToggleOutcome::Start);
+        assert_eq!(scheduler.state(), ClickerState::Running);
+        assert!(scheduler.is_active());
+        assert_eq!(scheduler.state().status_text(), "RUNNING");
+
+        // Transition Running -> Idle via set_active
+        let out_stop = scheduler.set_active(false, None);
+        assert_eq!(out_stop, ToggleOutcome::Stop);
+        assert_eq!(scheduler.state(), ClickerState::Idle);
+        assert!(!scheduler.is_active());
+        assert_eq!(scheduler.state().status_text(), "IDLE");
+
+        // Paused state representation
+        assert_eq!(ClickerState::Paused.status_text(), "WORK MODE (PAUSED)");
+        assert!(!ClickerState::Paused.is_active());
+        assert!(ClickerState::Paused.is_paused());
+    }
+
+    #[test]
+    fn test_snubber_emergency_stop_priority_critical_phase1() {
+        let scheduler = ClickScheduler::new();
+        // Arm clicker to Running state
+        *scheduler.state.safe_lock() = ClickerState::Running;
+        scheduler.active.store(true, Ordering::Release);
+        assert!(scheduler.is_active());
+
+        // Call emergency_stop
+        scheduler.emergency_stop(None);
+
+        // State is unconditionally Idle and active is false
+        assert_eq!(scheduler.state(), ClickerState::Idle);
+        assert!(!scheduler.is_active());
+        assert_eq!(scheduler.current_running_preset_id(), None);
+
+        // Verify scheduler.rs wiring uses Priority::Critical
+        let src = include_str!("scheduler.rs");
+        assert!(
+            src.contains("snubber::Priority::Critical"),
+            "emergency_stop must use Priority::Critical on click_node"
+        );
+    }
+
+    #[test]
+    fn test_snubber_satellite_restart_tracker_phase5() {
+        use snubber::{Backoff, RestartDecision, RestartPolicy, RestartTracker, RestartWindow};
+
+        let mut tracker = RestartTracker::new(
+            RestartPolicy::OnCrash,
+            Backoff::exponential(50, 1000),
+            RestartWindow::new(3, 10),
+        );
+
+        // First crash at t = 1000
+        let d1 = tracker.note_death(Some(1), 1000);
+        assert!(matches!(d1, RestartDecision::Restart { delay_ms: 50, .. }));
+
+        // Second crash at t = 1100
+        let d2 = tracker.note_death(Some(1), 1100);
+        assert!(matches!(d2, RestartDecision::Restart { delay_ms: 100, .. }));
+
+        // Third crash at t = 1300
+        let d3 = tracker.note_death(Some(1), 1300);
+        assert!(matches!(d3, RestartDecision::Restart { delay_ms: 200, .. }));
+
+        // Fourth crash at t = 1600 (exceeds 3 restarts in 10s window) -> GiveUp!
+        let d4 = tracker.note_death(Some(1), 1600);
+        assert!(
+            matches!(d4, RestartDecision::GiveUp { .. }),
+            "Excessive crashes must trigger GiveUp storm breaker"
+        );
+    }
 }
-
-

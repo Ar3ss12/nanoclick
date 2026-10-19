@@ -57,11 +57,11 @@ fn macros_quarantine_path(live: &std::path::Path) -> PathBuf {
 #[cfg(target_os = "windows")]
 fn harden_snapshot(path: &std::path::Path) {
     use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
     use windows::Win32::Storage::FileSystem::{
         SetFileAttributesW, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_READONLY,
         FILE_FLAGS_AND_ATTRIBUTES,
     };
-    use windows::core::PCWSTR;
     let wide: Vec<u16> = path
         .as_os_str()
         .encode_wide()
@@ -70,9 +70,7 @@ fn harden_snapshot(path: &std::path::Path) {
     unsafe {
         let _ = SetFileAttributesW(
             PCWSTR::from_raw(wide.as_ptr()),
-            FILE_FLAGS_AND_ATTRIBUTES(
-                FILE_ATTRIBUTE_HIDDEN.0 | FILE_ATTRIBUTE_READONLY.0,
-            ),
+            FILE_FLAGS_AND_ATTRIBUTES(FILE_ATTRIBUTE_HIDDEN.0 | FILE_ATTRIBUTE_READONLY.0),
         );
     }
 }
@@ -80,10 +78,10 @@ fn harden_snapshot(path: &std::path::Path) {
 #[cfg(target_os = "windows")]
 fn unharden_snapshot(path: &std::path::Path) {
     use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
     use windows::Win32::Storage::FileSystem::{
         SetFileAttributesW, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES,
     };
-    use windows::core::PCWSTR;
     let wide: Vec<u16> = path
         .as_os_str()
         .encode_wide()
@@ -152,8 +150,16 @@ fn recover_macros_corrupted(path: &std::path::Path) -> (Vec<Macro>, MacrosHealAc
                 let _ = fs::rename(&tmp, path);
             }
         }
-        eprintln!("[macros] unrecoverable; restored last-good snapshot. Quarantine: {:?}", quarantine);
-        return (good.macros, MacrosHealAction::RecoveredFromLastGood { backup_path: quarantine });
+        eprintln!(
+            "[macros] unrecoverable; restored last-good snapshot. Quarantine: {:?}",
+            quarantine
+        );
+        return (
+            good.macros,
+            MacrosHealAction::RecoveredFromLastGood {
+                backup_path: quarantine,
+            },
+        );
     }
     let empty = serde_json::to_string_pretty(&MacroStore::default()).unwrap_or_default();
     if !empty.is_empty() {
@@ -162,8 +168,16 @@ fn recover_macros_corrupted(path: &std::path::Path) -> (Vec<Macro>, MacrosHealAc
             let _ = fs::rename(&tmp, path);
         }
     }
-    eprintln!("[macros] unrecoverable, no snapshot; reset to empty. Quarantine: {:?}", quarantine);
-    (Vec::new(), MacrosHealAction::ResetEmpty { backup_path: quarantine })
+    eprintln!(
+        "[macros] unrecoverable, no snapshot; reset to empty. Quarantine: {:?}",
+        quarantine
+    );
+    (
+        Vec::new(),
+        MacrosHealAction::ResetEmpty {
+            backup_path: quarantine,
+        },
+    )
 }
 
 /// Write the golden snapshot of the macro store (tmp+rename, then harden).
@@ -285,7 +299,8 @@ mod tests {
     }
 
     fn tmp_store_path(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("nanoclick_macros_{}_{}", std::process::id(), tag));
+        let dir =
+            std::env::temp_dir().join(format!("nanoclick_macros_{}_{}", std::process::id(), tag));
         let _ = std::fs::create_dir_all(&dir);
         dir.join("macros.json")
     }
@@ -295,7 +310,9 @@ mod tests {
         let live = tmp_store_path("lkg");
         let _ = std::fs::remove_file(live.with_file_name("macros.last_good.json"));
         // Simulate a good store on disk, then heal-load to seed the snapshot.
-        let store = MacroStore { macros: vec![dummy()] };
+        let store = MacroStore {
+            macros: vec![dummy()],
+        };
         let json = serde_json::to_string_pretty(&store).unwrap();
         std::fs::write(&live, &json).unwrap();
         // Seed via the same path the app uses (parse then snapshot).
@@ -307,7 +324,9 @@ mod tests {
         assert_eq!(macros.len(), 1);
         assert_eq!(macros[0].id, "test-1");
         match action {
-            MacrosHealAction::RecoveredFromLastGood { backup_path } => assert!(backup_path.exists()),
+            MacrosHealAction::RecoveredFromLastGood { backup_path } => {
+                assert!(backup_path.exists())
+            }
             other => panic!("expected LKG recovery, got {:?}", other),
         }
         let _ = std::fs::remove_file(&live);

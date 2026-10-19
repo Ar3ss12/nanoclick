@@ -48,7 +48,11 @@ impl SessionStats {
         cps: f64,
         now_ms: u64,
     ) -> StatsFlush {
-        let cur_cps = if cps.is_finite() && cps > 0.0 { cps } else { 0.0 };
+        let cur_cps = if cps.is_finite() && cps > 0.0 {
+            cps
+        } else {
+            0.0
+        };
         if active {
             if !self.active_now {
                 self.active_now = true;
@@ -71,10 +75,8 @@ impl SessionStats {
                 if now_ms > last {
                     let delta_ms = now_ms - last;
                     if delta_ms < 5_000 {
-                        self.session_active_ms =
-                            self.session_active_ms.saturating_add(delta_ms);
-                        totals.total_active_ms =
-                            totals.total_active_ms.saturating_add(delta_ms);
+                        self.session_active_ms = self.session_active_ms.saturating_add(delta_ms);
+                        totals.total_active_ms = totals.total_active_ms.saturating_add(delta_ms);
                     }
                 }
             }
@@ -132,11 +134,20 @@ mod tests {
         let mut s = SessionStats::new();
         let mut totals = StatsConfig::default();
         assert_eq!(s.tick(&mut totals, true, 0, 10.0, 1_000), StatsFlush::Save);
-        assert_eq!(s.tick(&mut totals, true, 100, 10.0, 2_000), StatsFlush::Save);
-        assert_eq!(s.tick(&mut totals, false, 100, 0.0, 3_000), StatsFlush::Save);
+        assert_eq!(
+            s.tick(&mut totals, true, 100, 10.0, 2_000),
+            StatsFlush::Save
+        );
+        assert_eq!(
+            s.tick(&mut totals, false, 100, 0.0, 3_000),
+            StatsFlush::Save
+        );
         assert_eq!(totals.history.len(), 1);
         // Late 66 ms worker echo — must be a no-op, never a twin entry.
-        assert_eq!(s.tick(&mut totals, false, 101, 0.0, 3_040), StatsFlush::None);
+        assert_eq!(
+            s.tick(&mut totals, false, 101, 0.0, 3_040),
+            StatsFlush::None
+        );
         assert_eq!(totals.history.len(), 1);
     }
 
@@ -148,7 +159,10 @@ mod tests {
         s.tick(&mut totals, true, 3, 5.0, 1_500);
         s.tick(&mut totals, false, 3, 0.0, 1_800);
         assert_eq!(totals.total_clicks, 3);
-        assert!(totals.history.is_empty(), "junk tap must not pollute the chart");
+        assert!(
+            totals.history.is_empty(),
+            "junk tap must not pollute the chart"
+        );
     }
 
     #[test]
@@ -175,4 +189,3 @@ mod tests {
         assert_eq!(totals.total_clicks, 100);
     }
 }
-

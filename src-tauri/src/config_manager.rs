@@ -11,6 +11,11 @@ pub struct EngineSettings {
     pub jitter_percent: f64,
     pub click_limit: u32,
     pub jitter_radius_px: u32,
+    /// 3D jitter: relative MOUSEEVENTF_MOVE instead of absolute SetCursorPos.
+    /// Only meaningful with position_mode "cursor" + jitter_radius_px > 0.
+    /// Default false = legacy absolute path (desktop-safe).
+    #[serde(default)]
+    pub jitter_relative_3d: bool,
     /// Rare biological hesitation: probability (0.0 = off, default 0.02)
     /// that one interval stretches to 2-3x base. Stateless, Zero-Jitter safe.
     #[serde(default = "default_outlier_prob")]
@@ -116,6 +121,7 @@ impl Default for EngineSettings {
             jitter_percent: 5.0,
             click_limit: 0,
             jitter_radius_px: 0,
+            jitter_relative_3d: false,
             outlier_prob: default_outlier_prob(),
             technique: default_technique(),
             button: "left".into(),
@@ -314,6 +320,13 @@ pub struct UiSettings {
     /// `#[serde(default)]` — old configs deserialize to empty = "nothing dismissed".
     #[serde(default)]
     pub update_dismissed_version: String,
+    /// Stage A (daemon-split plan §A): run overlay/hud as supervised OOP child
+    /// processes instead of in-process WebViews. Default `None` = follow the
+    /// `NANOCLICK_OOP_SATELLITES=1` env var; `Some(true)` forces OOP even
+    /// without the env var; `Some(false)` keeps in-process regardless.
+    /// Dev/power-user feature — not exposed in the settings UI yet.
+    #[serde(default)]
+    pub oop_satellites: Option<bool>,
 }
 
 fn default_true() -> bool {
@@ -360,6 +373,7 @@ impl Default for UiSettings {
             accent_color: "#06b6d4".into(),
             language: default_language(),
             update_dismissed_version: String::new(),
+            oop_satellites: None,
         }
     }
 }
@@ -1226,7 +1240,13 @@ mod tests {
 
     #[test]
     fn stats_backup_and_fallback_recovery() {
-        let temp_dir = std::env::temp_dir().join(format!("nanoclick_test_stats_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "nanoclick_test_stats_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let _ = fs::create_dir_all(&temp_dir);
         let config_file = temp_dir.join("config.json");
         let cm = ConfigManager {
@@ -1240,12 +1260,18 @@ mod tests {
         cm.save(&cfg).expect("save should succeed");
 
         // stats.json must exist next to config.json
-        assert!(cm.stats_path().exists(), "stats.json should be created on save");
+        assert!(
+            cm.stats_path().exists(),
+            "stats.json should be created on save"
+        );
 
         // Simulate config reset (fresh install/wipe of config.json with stats = 0)
         let mut wiped_config = AppConfig::default();
         wiped_config.stats.total_clicks = 0;
-        let _ = fs::write(&config_file, serde_json::to_string_pretty(&wiped_config).unwrap());
+        let _ = fs::write(
+            &config_file,
+            serde_json::to_string_pretty(&wiped_config).unwrap(),
+        );
 
         // load() should detect total_clicks == 0 and restore from stats.json
         let loaded = cm.load();

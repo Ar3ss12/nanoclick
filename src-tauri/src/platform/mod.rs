@@ -120,7 +120,7 @@ pub fn default_input_backend_hotkey_stop() {
     #[cfg(target_os = "windows")]
     {
         use backend::HotkeyBackend as _;
-        windows::WindowsBackend::default().stop();
+        windows::WindowsBackend.stop();
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -179,8 +179,8 @@ pub fn recorder_backend_stop() {
 // UI-thread-only; the click loop never touches it.
 
 use std::sync::{
-    OnceLock, RwLock,
     atomic::{AtomicBool, Ordering},
+    OnceLock, RwLock,
 };
 
 /// One selectable application for the Smart Guard app filter.
@@ -363,9 +363,13 @@ pub fn is_own_exe(name: &str) -> bool {
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn list_running_apps() -> Vec<AppEntry> { Vec::new() }
+pub fn list_running_apps() -> Vec<AppEntry> {
+    Vec::new()
+}
 #[cfg(not(target_os = "windows"))]
-pub fn list_installed_apps() -> Vec<AppEntry> { Vec::new() }
+pub fn list_installed_apps() -> Vec<AppEntry> {
+    Vec::new()
+}
 
 #[cfg(test)]
 mod app_catalog_tests {
@@ -381,7 +385,10 @@ mod app_catalog_tests {
             exe_name_from_path(r"C:/tools/JAVA/W.exe").as_deref(),
             Some("w.exe")
         );
-        assert_eq!(exe_name_from_path("  chrome.exe  ").as_deref(), Some("chrome.exe"));
+        assert_eq!(
+            exe_name_from_path("  chrome.exe  ").as_deref(),
+            Some("chrome.exe")
+        );
         assert_eq!(exe_name_from_path("").as_deref(), None);
         assert_eq!(exe_name_from_path("   ").as_deref(), None);
         // Non-executables must never reach the filter list.
@@ -427,7 +434,10 @@ mod app_catalog_tests {
         let Some(own) = own_exe_name() else {
             return; // non-UTF8 exe path edge: nothing to assert
         };
-        assert!(own.ends_with(".exe"), "own exe must be an image name, got {own:?}");
+        assert!(
+            own.ends_with(".exe"),
+            "own exe must be an image name, got {own:?}"
+        );
         assert_eq!(own, own.to_ascii_lowercase());
         assert!(is_own_exe(&own));
         assert!(is_own_exe(&own.to_ascii_uppercase()));
@@ -438,21 +448,37 @@ mod app_catalog_tests {
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn is_current_process_elevated() -> bool { false }
+pub fn is_current_process_elevated() -> bool {
+    false
+}
 #[cfg(not(target_os = "windows"))]
-pub fn get_foreground_window_title() -> Option<String> { None }
+pub fn get_foreground_window_title() -> Option<String> {
+    None
+}
 #[cfg(not(target_os = "windows"))]
-pub fn get_foreground_process_name() -> Option<String> { None }
+pub fn get_foreground_process_name() -> Option<String> {
+    None
+}
 #[cfg(not(target_os = "windows"))]
-pub fn is_target_point_elevated(_x: i32, _y: i32) -> bool { false }
+pub fn is_target_point_elevated(_x: i32, _y: i32) -> bool {
+    false
+}
 #[cfg(not(target_os = "windows"))]
-pub fn restart_as_admin() -> Result<(), String> { Err("Only supported on Windows".into()) }
+pub fn restart_as_admin() -> Result<(), String> {
+    Err("Only supported on Windows".into())
+}
 #[cfg(not(target_os = "windows"))]
-pub fn set_always_run_as_admin(_enabled: bool) -> Result<(), String> { Ok(()) }
+pub fn set_always_run_as_admin(_enabled: bool) -> Result<(), String> {
+    Ok(())
+}
 #[cfg(not(target_os = "windows"))]
-pub fn is_always_run_as_admin() -> bool { false }
+pub fn is_always_run_as_admin() -> bool {
+    false
+}
 #[cfg(not(target_os = "windows"))]
-pub fn is_scheduled_elevated_task_registered() -> bool { false }
+pub fn is_scheduled_elevated_task_registered() -> bool {
+    false
+}
 #[cfg(not(target_os = "windows"))]
 pub fn register_scheduled_elevated_task() -> Result<(), String> {
     Err("Only supported on Windows".into())

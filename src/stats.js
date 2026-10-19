@@ -82,15 +82,15 @@ const StatsEngine = {
           if (res.totals && config && typeof config === "object") {
             config.stats = res.totals;
           }
-          try {
-            const sess = await inv("get_session_stats");
-            if (sess && typeof sess === "object") {
-              this.state.sessionClicks = Number(sess.session_clicks) || 0;
-              this.state.runClicks = Number(sess.run_clicks) || 0;
-              this.state.sessionActiveMs = Number(sess.session_active_ms) || 0;
-              this.state.activeNow = !!sess.active_now;
-            }
-          } catch (_) {}
+          // Session mirror rides the same tick (one IPC per frame, not two).
+          // Falls back to the legacy second call on old backends without it.
+          const sess = res.session || await inv("get_session_stats").catch(() => null);
+          if (sess && typeof sess === "object") {
+            this.state.sessionClicks = Number(sess.session_clicks) || 0;
+            this.state.runClicks = Number(sess.run_clicks) || 0;
+            this.state.sessionActiveMs = Number(sess.session_active_ms) || 0;
+            this.state.activeNow = !!sess.active_now;
+          }
         }
       } catch (_) {
         // IPC hiccup — fall through to paint with the last known state.

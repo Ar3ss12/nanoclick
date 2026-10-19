@@ -200,9 +200,10 @@ impl NotificationCode {
             | Self::MacroRecordingSaved
             | Self::ConfigResetSuccess => SoundCue::Success,
 
-            Self::StartDelayCountdown | Self::SpeedAdjusted | Self::ModeSwitched | Self::PresetPreempted => {
-                SoundCue::Tick
-            }
+            Self::StartDelayCountdown
+            | Self::SpeedAdjusted
+            | Self::ModeSwitched
+            | Self::PresetPreempted => SoundCue::Tick,
 
             _ => SoundCue::None,
         }
@@ -283,7 +284,10 @@ impl NotificationStore {
             );
 
             if !is_window_visible || is_critical {
-                crate::tray::notify_balloon(&notification.default_title, &notification.default_message);
+                crate::tray::notify_balloon(
+                    &notification.default_title,
+                    &notification.default_message,
+                );
                 play_system_sound(notification.sound);
             }
         }

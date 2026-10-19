@@ -71,10 +71,7 @@ pub async fn start_native_app_capture(
                         }),
                     );
                 } else {
-                    let _ = app.emit(
-                        "capture-done",
-                        serde_json::json!({ "id": id, "exe": exe }),
-                    );
+                    let _ = app.emit("capture-done", serde_json::json!({ "id": id, "exe": exe }));
                 }
             }
             None => {
@@ -107,18 +104,16 @@ static PICKER_ID: AtomicU64 = AtomicU64::new(u64::MAX);
 pub async fn start_position_picker_stream(app: AppHandle) -> Result<serde_json::Value, String> {
     let id = CAPTURE_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
     PICKER_ID.store(id, Ordering::SeqCst);
-    std::thread::spawn(move || {
-        loop {
-            if PICKER_ID.load(Ordering::SeqCst) != id {
-                break;
-            }
-            let (x, y) = crate::platform::get_cursor_pos();
-            let _ = app.emit(
-                "position-picker-tick",
-                serde_json::json!({ "id": id, "x": x, "y": y }),
-            );
-            std::thread::sleep(Duration::from_millis(50));
+    std::thread::spawn(move || loop {
+        if PICKER_ID.load(Ordering::SeqCst) != id {
+            break;
         }
+        let (x, y) = crate::platform::get_cursor_pos();
+        let _ = app.emit(
+            "position-picker-tick",
+            serde_json::json!({ "id": id, "x": x, "y": y }),
+        );
+        std::thread::sleep(Duration::from_millis(50));
     });
     Ok(serde_json::json!({ "id": id }))
 }
@@ -139,6 +134,9 @@ mod capture_tests {
     fn ids_are_monotonic_and_cancel_targets_the_newest() {
         let a = super::CAPTURE_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         let b = super::CAPTURE_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-        assert!(b > a, "capture ids must grow so stale threads can be recognised");
+        assert!(
+            b > a,
+            "capture ids must grow so stale threads can be recognised"
+        );
     }
 }

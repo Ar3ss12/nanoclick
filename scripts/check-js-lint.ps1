@@ -87,6 +87,16 @@ try {
 
 Write-Host ''
 if ($code -eq 0) {
+  # ── CSS TRIPWIRE: forbidden culling optimizations in transparent overlays ──
+  $overlayCssPath = Join-Path $SrcDir "overlay.css"
+  if (Test-Path $overlayCssPath) {
+    $cssContent = Get-Content $overlayCssPath -Raw
+    if ($cssContent -match 'content-visibility' -or $cssContent -match 'contain:\s*strict') {
+      Write-Host "FAILED: overlay.css contains forbidden culling optimization ('content-visibility' or 'contain: strict') which culls Chromium transparent canvas painting." -ForegroundColor Red
+      exit 1
+    }
+  }
+
   # Exit 0 means "clean": no errors and no warnings (unless -AllowWarnings was used).
   Write-Host 'OK: oxlint reports no errors and no warnings.' -ForegroundColor Green
   exit 0

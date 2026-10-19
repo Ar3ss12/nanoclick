@@ -6,21 +6,16 @@ use super::action::Action;
 use serde::{Deserialize, Serialize};
 
 /// How a macro should repeat when played.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum RepeatMode {
     /// Run the actions exactly once.
+    #[default]
     Once,
     /// Run the actions `count` times total.
     Times { count: u32 },
     /// Run forever until cancelled by the user (e.g. via Esc).
     UntilStopped,
-}
-
-impl Default for RepeatMode {
-    fn default() -> Self {
-        RepeatMode::Once
-    }
 }
 
 #[allow(dead_code)]

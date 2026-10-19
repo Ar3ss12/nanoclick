@@ -1,4 +1,4 @@
-﻿//! Windows UIPI (User Interface Privilege Isolation), UAC elevation, DPI
+//! Windows UIPI (User Interface Privilege Isolation), UAC elevation, DPI
 //! awareness, and portable in-place self-update.
 //!
 //! The portable updater lives here (not in `lib.rs`) because it is pure
@@ -8,9 +8,7 @@
 //! WinHTTP from the `windows` crate (feature `Win32_Networking_WinHttp`).
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, POINT};
-use windows::Win32::Security::{
-    GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
-};
+use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
 use windows::Win32::System::Threading::{
     GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
 };
@@ -52,9 +50,7 @@ pub fn is_current_process_elevated() -> bool {
         if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
             return false;
         }
-        let mut elevation = TOKEN_ELEVATION {
-            TokenIsElevated: 0,
-        };
+        let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
         let mut size = std::mem::size_of::<TOKEN_ELEVATION>() as u32;
         let ok = GetTokenInformation(
             token,
@@ -97,9 +93,7 @@ pub fn is_window_elevated(hwnd: HWND) -> bool {
             return true;
         }
 
-        let mut elevation = TOKEN_ELEVATION {
-            TokenIsElevated: 0,
-        };
+        let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
         let mut size = std::mem::size_of::<TOKEN_ELEVATION>() as u32;
         let ok = GetTokenInformation(
             token,
@@ -347,7 +341,8 @@ pub fn is_scheduled_elevated_task_registered() -> bool {
 /// Register the opt-in task. The UAC consent happens HERE, once, owned by
 /// the user's explicit click — never at boot, never silently.
 pub fn register_scheduled_elevated_task() -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| format!("failed to get current exe path: {e}"))?;
+    let exe =
+        std::env::current_exe().map_err(|e| format!("failed to get current exe path: {e}"))?;
     let exe_str = exe
         .to_str()
         .ok_or_else(|| "invalid exe path string".to_string())?;
@@ -416,7 +411,9 @@ pub fn updated_from_pid(argv: &[String]) -> Option<u32> {
 
 /// Pure: sibling paths for the swap, derived from the running image.
 /// Same directory = same volume = rename is atomic, never a copy.
-pub fn portable_swap_paths(current_exe: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+pub fn portable_swap_paths(
+    current_exe: &std::path::Path,
+) -> (std::path::PathBuf, std::path::PathBuf) {
     let mut new_path = current_exe.as_os_str().to_owned();
     new_path.push(".new");
     let mut old_path = current_exe.as_os_str().to_owned();
@@ -455,8 +452,8 @@ pub fn classify_portable_update_error(stage: &str, detail: &str) -> String {
 /// by default, and keeps the portable path independent of the plugin.
 #[cfg(target_os = "windows")]
 pub fn winhttp_get(url: &str, progress: &dyn Fn(u64, Option<u64>)) -> Result<Vec<u8>, String> {
+    use windows::core::{w, HSTRING, PCWSTR};
     use windows::Win32::Networking::WinHttp::*;
-    use windows::core::{HSTRING, PCWSTR, w};
 
     // Split URL into host + path with plain string ops (no url-crate dep).
     let (host, path, secure) = split_http_url(url)?;
@@ -562,13 +559,8 @@ pub fn winhttp_get(url: &str, progress: &dyn Fn(u64, Option<u64>)) -> Result<Vec
             }
             let want = (read as usize).min(buf.len());
             let mut got: u32 = 0;
-            WinHttpReadData(
-                request,
-                buf.as_mut_ptr() as *mut _,
-                want as u32,
-                &mut got,
-            )
-            .map_err(|e| format!("WinHttpReadData failed: {e}"))?;
+            WinHttpReadData(request, buf.as_mut_ptr() as *mut _, want as u32, &mut got)
+                .map_err(|e| format!("WinHttpReadData failed: {e}"))?;
             if got == 0 {
                 break;
             }
@@ -646,8 +638,8 @@ pub fn cleanup_old_binary_deferred(old_path: std::path::PathBuf) {
             if std::fs::remove_file(&old_path).is_ok() {
                 return;
             }
-            use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_DELAY_UNTIL_REBOOT};
             use windows::core::HSTRING;
+            use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_DELAY_UNTIL_REBOOT};
             let from = HSTRING::from(old_path.as_os_str());
             unsafe {
                 let _ = MoveFileExW(&from, None, MOVEFILE_DELAY_UNTIL_REBOOT);
@@ -721,10 +713,7 @@ mod tests {
             classify_schtasks_exit(Some(1), "ERROR: The system cannot find the file specified."),
             NotFound
         );
-        assert_eq!(
-            classify_schtasks_exit(Some(1), "Access is denied."),
-            Failed
-        );
+        assert_eq!(classify_schtasks_exit(Some(1), "Access is denied."), Failed);
         assert_eq!(classify_schtasks_exit(None, ""), Failed);
     }
 
@@ -732,7 +721,10 @@ mod tests {
 
     #[test]
     fn updated_from_arg_roundtrips_a_pid() {
-        let argv = vec!["nanoclick.exe".to_string(), "--updated-from=1234".to_string()];
+        let argv = vec![
+            "nanoclick.exe".to_string(),
+            "--updated-from=1234".to_string(),
+        ];
         assert_eq!(updated_from_pid(&argv), Some(1234));
         let no_marker = vec!["nanoclick.exe".to_string()];
         assert_eq!(updated_from_pid(&no_marker), None);
@@ -772,7 +764,10 @@ mod tests {
     #[test]
     fn url_splitter_accepts_only_http() {
         let (h, p, s) = split_http_url("https://github.com/a/b.exe").unwrap();
-        assert_eq!((h.as_str(), p.as_str(), s), ("github.com", "/a/b.exe", true));
+        assert_eq!(
+            (h.as_str(), p.as_str(), s),
+            ("github.com", "/a/b.exe", true)
+        );
         let (h, p, s) = split_http_url("http://host/x").unwrap();
         assert_eq!((h.as_str(), p.as_str(), s), ("host", "/x", false));
         assert!(split_http_url("file:///etc/passwd").is_err());
@@ -781,7 +776,11 @@ mod tests {
 
     #[test]
     fn bad_signature_is_rejected_without_io() {
-        assert!(!verify_portable_signature(b"bytes", "not a sig", "not a key"));
+        assert!(!verify_portable_signature(
+            b"bytes",
+            "not a sig",
+            "not a key"
+        ));
         assert!(!verify_portable_signature(b"", "", ""));
     }
 

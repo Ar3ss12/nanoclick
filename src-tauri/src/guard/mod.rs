@@ -3,11 +3,11 @@
 //! Both guards live in their own modules so `scheduler.rs` stays a thin
 //! orchestration layer and this logic never bloats the click hot path:
 //!
-//! * [`typing`]     — Typing Guard: short click freeze after real text
-//!                    input. Gameplay keys (WASD, hotbar, arrows, ...)
-//!                    are deliberately ignored so gaming never pauses.
+//! * [`typing`] — Typing Guard: short click freeze after real text input.
+//!   Gameplay keys (WASD, hotbar, arrows, ...) are deliberately ignored so
+//!   gaming never pauses.
 //! * [`app_filter`] — App/window scope filter (everywhere | whitelist |
-//!                    blacklist) driven by the foreground process name.
+//!   blacklist) driven by the foreground process name.
 //!
 //! Cost contract for the click loop:
 //! * Typing Guard poll = 2 atomic loads, zero syscalls.

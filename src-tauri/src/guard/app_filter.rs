@@ -30,9 +30,10 @@ use std::sync::Mutex;
 pub const FOREGROUND_TTL_MS: u64 = 300;
 
 /// Which applications the clicker is allowed to operate in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FilterMode {
     /// No restriction (default).
+    #[default]
     Everywhere,
     /// Only the listed apps are allowed.
     Whitelist,
@@ -88,12 +89,6 @@ impl FilterMode {
     }
 }
 
-impl Default for FilterMode {
-    fn default() -> Self {
-        FilterMode::Everywhere
-    }
-}
-
 /// Live app-filter state shared between the click loop and the UI writes.
 pub struct AppFilter {
     mode: AtomicU32,
@@ -109,8 +104,10 @@ impl AppFilter {
     }
 
     pub fn set(&self, mode: &str, list: &[String]) {
-        self.mode
-            .store(FilterMode::from_config_str(mode).encode(), Ordering::Relaxed);
+        self.mode.store(
+            FilterMode::from_config_str(mode).encode(),
+            Ordering::Relaxed,
+        );
         if let Ok(mut guard) = self.list.lock() {
             *guard = normalize_app_filter_list(list);
         }

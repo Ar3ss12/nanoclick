@@ -222,11 +222,8 @@ mod tests {
     /// A live-file path in a private temp dir (the public helpers write to the real config dir,
     /// which a unit test must never touch).
     fn temp_live(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "nanoclick_presets_{}_{}",
-            std::process::id(),
-            tag
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("nanoclick_presets_{}_{}", std::process::id(), tag));
         let _ = fs::create_dir_all(&dir);
         let live = dir.join(PRESETS_FILE);
         let _ = fs::remove_file(&live);
@@ -257,7 +254,11 @@ mod tests {
         write_store_at(&live, &list).unwrap();
         fs::write(&live, "{ not json").unwrap();
         let (loaded, action) = load_at(&live);
-        assert_eq!(loaded.len(), 2, "the snapshot must come back, not an empty store");
+        assert_eq!(
+            loaded.len(),
+            2,
+            "the snapshot must come back, not an empty store"
+        );
         assert_eq!(loaded[1].name, "Second");
         assert!(matches!(
             action,

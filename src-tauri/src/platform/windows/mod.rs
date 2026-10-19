@@ -6,7 +6,9 @@ pub mod uipi;
 pub mod windows_hooks;
 
 pub use foreground_watch::{start_foreground_watch, stop_foreground_watch};
-pub use keyboard::{mouse_click, mouse_down, mouse_up, scroll_wheel, send_key, set_cursor_pos};
+pub use keyboard::{
+    mouse_click, mouse_down, mouse_move_relative, mouse_up, scroll_wheel, send_key, set_cursor_pos,
+};
 pub use uipi::*;
 pub use windows_hooks::{stop_recorder_hooks, WindowsRecorderBackend};
 
@@ -26,9 +28,9 @@ use windows::Win32::Graphics::Gdi::{GetDC, GetPixel, ReleaseDC};
 use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetCursorPos, GetForegroundWindow, GetWindowTextW,
-    GetWindowThreadProcessId, MSG, PM_REMOVE, PeekMessageW, PostThreadMessageW, QS_ALLINPUT,
-    SetCursorPos, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
-    KBDLLHOOKSTRUCT, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_QUIT,
+    GetWindowThreadProcessId, PeekMessageW, PostThreadMessageW, SetCursorPos, SetWindowsHookExW,
+    TranslateMessage, UnhookWindowsHookEx, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, PM_REMOVE,
+    QS_ALLINPUT, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_QUIT,
 };
 
 /// Parse a config button label into the neutral MouseButton type.
@@ -77,10 +79,8 @@ static TIMER_INIT: Once = Once::new();
 
 /// Set Windows global timer resolution to 1ms for sub-millisecond precision.
 pub fn init_timer_resolution() {
-    TIMER_INIT.call_once(|| {
-        unsafe {
-            let _ = timeBeginPeriod(1);
-        }
+    TIMER_INIT.call_once(|| unsafe {
+        let _ = timeBeginPeriod(1);
     });
 }
 
@@ -194,6 +194,10 @@ impl crate::platform::backend::InputBackend for WindowsBackend {
         set_cursor_pos(x, y);
     }
 
+    fn mouse_move_relative(&self, dx: i32, dy: i32) {
+        mouse_move_relative(dx, dy);
+    }
+
     fn send_key(&self, key: KeyCode, mods: Modifiers, is_up: bool) {
         send_key(key.0, mods.ctrl, mods.alt, mods.shift, mods.win, is_up);
     }
@@ -219,10 +223,24 @@ impl crate::platform::backend::InputBackend for WindowsBackend {
             let mut rng = rand::thread_rng();
             let dx = rng.gen_range(-radius..=radius);
             let dy = rng.gen_range(-radius..=radius);
-            target_x += dx;
-            target_y += dy;
-            unsafe {
-                let _ = SetCursorPos(target_x, target_y);
+            // 3D games (RawInput/DirectInput) read ONLY the relative delta:
+            // absolute SetCursorPos lands as dx=0,dy=0 there and the camera
+            // never moves. Cursor + flag ON => relative MOVE (natural drift).
+            // Everything else => legacy absolute path (desktop-safe).
+            let is_cursor = spec.position_mode == crate::platform::backend::PositionMode::Cursor;
+            if is_cursor && spec.jitter_relative_3d {
+                mouse_move_relative(dx, dy);
+            } else {
+                if spec.position_mode == crate::platform::backend::PositionMode::Fixed {
+                    target_x += dx;
+                    target_y += dy;
+                } else {
+                    target_x = orig_x + dx;
+                    target_y = orig_y + dy;
+                }
+                unsafe {
+                    let _ = SetCursorPos(target_x, target_y);
+                }
             }
         }
 
@@ -235,8 +253,10 @@ impl crate::platform::backend::InputBackend for WindowsBackend {
             _ => mouse_click(spec.button),
         }
 
-        // Restore original cursor position in Cursor mode to prevent accumulative Brownian drift
-        if spec.jitter_radius > 0 && spec.position_mode == crate::platform::backend::PositionMode::Cursor {
+        // In Fixed mode, restore original cursor position
+        if spec.jitter_radius > 0
+            && spec.position_mode == crate::platform::backend::PositionMode::Fixed
+        {
             unsafe {
                 let _ = SetCursorPos(orig_x, orig_y);
             }
@@ -306,6 +326,17 @@ pub fn spawn_global_hotkey_listener(scheduler: Arc<ClickScheduler>, app_handle: 
     }
     GLOBAL_HOTKEY_STOP.store(false, Ordering::Release);
     thread::spawn(move || {
+        let guard = match crate::stability::hotkey_node().enter_auto(|| {
+            shutdown_global_hotkey_listener();
+        }) {
+            Ok(g) => g,
+            Err(e) => {
+                crate::debug_log_internal("warn", &format!("[Hotkeys] listener rejected: {e:?}"));
+                GLOBAL_HOTKEY_RUNNING.store(false, Ordering::Release);
+                return;
+            }
+        };
+
         // ZERO-JITTER: hotkey path is on the critical click start/stop path.
         // Highest scheduler priority so a game at 100% CPU never delays hotkeys.
         #[cfg(target_os = "windows")]
@@ -316,6 +347,7 @@ pub fn spawn_global_hotkey_listener(scheduler: Arc<ClickScheduler>, app_handle: 
             let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
         }
         run_keyboard_hook(scheduler, app_handle);
+        guard.commit();
         GLOBAL_HOTKEY_RUNNING.store(false, Ordering::Release);
     });
 }
@@ -382,7 +414,7 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
             let is_down = message == 0x0100 || message == 0x0104;
             let is_up = message == 0x0101 || message == 0x0105;
             if (is_down || is_up) && kb.vkCode != 0 {
-                // Lock-free hand-over: no `try_lock`, so the event cannot be
+                // Lock-free hand-over: no mutex locks, so the event cannot be
                 // dropped while this callback holds up the system input chain.
                 send_hook_event(GlobalKeyEvent {
                     vk: kb.vkCode as u16,
@@ -459,9 +491,7 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
 
     // Store thread ID so shutdown_global_hotkey_listener can wake us immediately
     // via PostThreadMessageW(WM_QUIT) instead of waiting for the next timeout.
-    let hook_thread_id = unsafe {
-        windows::Win32::System::Threading::GetCurrentThreadId()
-    };
+    let hook_thread_id = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
     GLOBAL_HOTKEY_THREAD_ID.store(hook_thread_id, Ordering::Release);
 
     // Parse-once contract: bindings are parsed from scheduler strings only at
@@ -491,7 +521,6 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
     let mut last_tx_failures: u64 = 0;
 
     while !GLOBAL_HOTKEY_STOP.load(Ordering::Acquire) {
-
         // ── v4.3 FIX: WINDOWS MESSAGE PUMP (REQUIRED for LL hooks) ──────
         // WH_KEYBOARD_LL delivers its callback through the message queue of
         // the thread that installed the hook — and ONLY when that thread
@@ -614,9 +643,7 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
                     let toggle_is_typable = bindings.toggle.iter().any(|combo| {
                         combo.required.is_empty()
                             && combo.trigger_matches(event.vk)
-                            && scheduler
-                                .key_policy()
-                                .is_typable(combo.trigger)
+                            && scheduler.key_policy().is_typable(combo.trigger)
                     });
 
                     // Set when this very press opened a confirmation window:
@@ -666,10 +693,7 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
                         }
                         if was_active {
                             killed_by_text_press = true;
-                            hotkey_diag_push(format!(
-                                "killed_by_typing vk=0x{:02X}",
-                                event.vk
-                            ));
+                            hotkey_diag_push(format!("killed_by_typing vk=0x{:02X}", event.vk));
                         }
                     }
 
@@ -677,9 +701,9 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
                         if scheduler.is_active() {
                             // STOP is always instantaneous (0ms delay) — never delayed by typing confirmation!
                             hotkey_diag_push("confirmed_action=toggle_instant_stop".into());
-                            let prev = scheduler.is_active();
-                            let mode = scheduler.hotkey_toggle(Some(&app_handle));
-                            hotkey_diag_push(format!("instant stop done was_active={prev} mode={mode}"));
+                            let _ = scheduler.send_cmd(crate::scheduler::ClickerCmd::Toggle {
+                                source: "hotkey",
+                            });
                         } else {
                             // START is gated by Typing Guard to prevent accidental trigger while typing text
                             let guard = scheduler.typing_guard();
@@ -687,11 +711,15 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
                             // `true` = fire now (key cannot be typed);
                             // `false` = rejected or held back for confirmation,
                             // resolved in the poll loop below.
-                            if guard.try_arm_toggle(now, crate::guard::TOGGLE_CONFIRM_MS, toggle_is_typable) {
+                            if guard.try_arm_toggle(
+                                now,
+                                crate::guard::TOGGLE_CONFIRM_MS,
+                                toggle_is_typable,
+                            ) {
                                 hotkey_diag_push("confirmed_action=toggle".into());
-                                let prev = scheduler.is_active();
-                                let mode = scheduler.hotkey_toggle(Some(&app_handle));
-                                hotkey_diag_push(format!("toggle done was_active={prev} mode={mode}"));
+                                let _ = scheduler.send_cmd(crate::scheduler::ClickerCmd::Toggle {
+                                    source: "hotkey",
+                                });
                             } else if guard.is_toggle_pending() {
                                 toggle_deferred = true;
                                 // Remember whether this very key already stopped
@@ -737,11 +765,7 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
                     });
                     fire_hotkey_group(&bindings.emergency_stop, event.vk, &held, || {
                         hotkey_diag_push("fired_action=emergency_stop".into());
-                        scheduler.set_active(false, Some(&app_handle));
-                        scheduler.emit_status_now(&app_handle, "IDLE");
-                        if let Some(exec) = crate::core::global() {
-                            exec.stop();
-                        }
+                        let _ = scheduler.send_cmd(crate::scheduler::ClickerCmd::EmergencyStop);
                     });
                     fire_hotkey_group(&bindings.speed_up, event.vk, &held, || {
                         hotkey_diag_push("fired_action=speed_up".into());
@@ -800,7 +824,11 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
                         scheduler.typing_guard().note();
                         hotkey_diag_push(format!("armed_guard vk=0x{:02X}", event.vk));
                     }
-                } else if bindings.toggle.iter().any(|combo| combo.trigger_matches(event.vk)) {
+                } else if bindings
+                    .toggle
+                    .iter()
+                    .any(|combo| combo.trigger_matches(event.vk))
+                {
                     // The toggle's trigger key, but a required modifier is not
                     // held (kept for parity with the other hotkey groups).
                     hotkey_diag_push(format!(
@@ -821,7 +849,10 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
         // confirmation.
         // This runs on the hook thread in the poll loop (every ~20 ms), so no
         // extra thread and no timer are needed.
-        if let Some(confirmed) = scheduler.typing_guard().poll_pending(crate::guard::now_ms()) {
+        if let Some(confirmed) = scheduler
+            .typing_guard()
+            .poll_pending(crate::guard::now_ms())
+        {
             if confirmed {
                 if toggle_deferred_killed_clicker {
                     // v4.3: the key that opened this confirmation already
@@ -1225,7 +1256,7 @@ impl HotkeyBindings {
 
 fn combos_from_label(label: &str) -> (Vec<HotkeyCombo>, usize) {
     let groups: Vec<&str> = label
-        .split(|c: char| c == '/' || c == '|')
+        .split(['/', '|'])
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .collect();
@@ -1291,11 +1322,10 @@ fn log_bindings(bindings: &HotkeyBindings) {
 ///   - Single ASCII letter: `R`, `K`, `a`, `z`
 ///   - Single ASCII digit:  `0`–`9`
 ///   - Function keys:        `F1`–`F24`
-///   - Specials:             `Escape`/`Esc`, `Tab`, `Space`, `Enter`/`Return`,
-///                           `Backspace`/`Bs`, `Delete`/`Del`, `Insert`/`Ins`,
-///                           `Home`, `End`, `PageUp`/`PgUp`, `PageDown`/`PgDn`,
-///                           `Up`, `Down`, `Left`, `Right`,
-///                           `Caps`/`CapsLock`, `Shift`, `Ctrl`, `Alt`, `Win`/`Meta`
+///   - Specials: `Escape`/`Esc`, `Tab`, `Space`, `Enter`/`Return`,
+///     `Backspace`/`Bs`, `Delete`/`Del`, `Insert`/`Ins`, `Home`, `End`,
+///     `PageUp`/`PgUp`, `PageDown`/`PgDn`, `Up`, `Down`, `Left`, `Right`,
+///     `Caps`/`CapsLock`, `Shift`, `Ctrl`, `Alt`, `Win`/`Meta`
 ///   - Numpad digits:        `Num0`–`Num9`
 fn vk_from_label(label: &str) -> Option<u16> {
     let l = label.trim();
@@ -1305,12 +1335,12 @@ fn vk_from_label(label: &str) -> Option<u16> {
 
     // Single character — letter or digit.
     if l.len() == 1 {
-        let c = l.chars().next().unwrap();
+        let c = l.chars().next()?;
         if c.is_ascii_alphabetic() {
             return Some(0x41 + (c.to_ascii_uppercase() as u16 - b'A' as u16));
         }
         if c.is_ascii_digit() {
-            return Some(0x30 + c.to_digit(10).unwrap() as u16);
+            return Some(0x30 + c.to_digit(10).unwrap_or(0) as u16);
         }
     }
 
@@ -1692,9 +1722,8 @@ mod physical_integration_tests {
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, DispatchMessageW, GetMessageW,
-        SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
-        HHOOK, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL,
+        CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, TranslateMessage,
+        UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL,
     };
 
     static CAPTURE_TX: OnceLock<StdMutex<Option<mpsc::Sender<(u16, bool)>>>> = OnceLock::new();
@@ -2042,8 +2071,13 @@ mod physical_integration_tests {
         // `OnceLock`-held Sender behind a Mutex, is the banned shape coming
         // back.
         assert!(
-            !src.contains("OnceLock<Mutex<Option<Sender<GlobalKeyEvent>>>")
-                && !src.contains("OnceLock<StdMutex<Option<Sender<GlobalKeyEvent>>>"),
+            !src.contains(concat!(
+                "OnceLock<Mutex",
+                "<Option<Sender<GlobalKeyEvent>>>"
+            )) && !src.contains(concat!(
+                "OnceLock<StdMutex",
+                "<Option<Sender<GlobalKeyEvent>>>"
+            )),
             "the fallible global sender is back: its try_lock() dropped hook events \
              and the fallback that re-detected them no longer exists"
         );
@@ -2376,8 +2410,7 @@ pub fn list_installed_apps() -> Vec<crate::platform::AppEntry> {
     use winreg::RegKey;
 
     const UNINSTALL: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall";
-    const UNINSTALL_WOW: &str =
-        r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall";
+    const UNINSTALL_WOW: &str = r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall";
     // Registry view flags mirror the 64/32-bit uninstall hives.
     const KEY_WOW64_64: u32 = 0x0100;
     const KEY_WOW64_32: u32 = 0x0200;
@@ -2429,7 +2462,11 @@ pub fn list_installed_apps() -> Vec<crate::platform::AppEntry> {
         }
     }
 
-    out.sort_by(|a, b| a.label.to_ascii_lowercase().cmp(&b.label.to_ascii_lowercase()));
+    out.sort_by(|a, b| {
+        a.label
+            .to_ascii_lowercase()
+            .cmp(&b.label.to_ascii_lowercase())
+    });
     out.dedup_by(|a, b| a.label.eq_ignore_ascii_case(&b.label));
     out
 }
@@ -2556,9 +2593,9 @@ pub fn get_pixel_rgba_safe(x: i32, y: i32) -> Result<u32, PixelError> {
                     );
                     if lines == 1 {
                         // DIB gives 0x00BBGGRR — repack into our RGBA u32.
-                        let r = (pixel & 0xFF) as u32;
-                        let g = ((pixel >> 8) & 0xFF) as u32;
-                        let b = ((pixel >> 16) & 0xFF) as u32;
+                        let r = pixel & 0xFF;
+                        let g = (pixel >> 8) & 0xFF;
+                        let b = (pixel >> 16) & 0xFF;
                         result = Ok((r << 24) | (g << 16) | (b << 8) | 0xFF);
                     }
                 }

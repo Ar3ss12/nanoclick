@@ -87,7 +87,9 @@ pub fn start_foreground_watch() {
             .name("nanoclick-foreground-watch".into())
             .spawn(run_watch)
             .expect("foreground watch thread must spawn");
-        *WATCH_THREAD.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(thread);
+        if let Ok(mut slot) = WATCH_THREAD.get_or_init(|| Mutex::new(None)).lock() {
+            *slot = Some(thread);
+        }
     }
 }
 
@@ -273,11 +275,9 @@ fn handle_foreground_event(ev: ForegroundEvent, own_pid: u32, own_tid: u32) {
         // single gate (`main_window_visible`) and dispatch window work to the
         // Tauri main thread — this worker must never touch a WebView.
         let main = handle.clone();
-        let _ = handle
-            .clone()
-            .run_on_main_thread(move || {
-                crate::foreground_alert_on_elevated_focus(&main);
-            });
+        let _ = handle.clone().run_on_main_thread(move || {
+            crate::foreground_alert_on_elevated_focus(&main);
+        });
     }
     crate::notifications::push_notification(
         crate::notifications::NotificationCode::UipiBlocked,
@@ -292,8 +292,7 @@ fn handle_foreground_event(ev: ForegroundEvent, own_pid: u32, own_tid: u32) {
 /// failed hand-over is counted here and reported by the worker, never logged
 /// from inside the callback.
 #[cfg(target_os = "windows")]
-static WINEVENT_TX_FAILED: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static WINEVENT_TX_FAILED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// The system callback. Lock-free hand-over ONLY — see the module docs.
 /// A failed `send` is counted, never logged, never retried here.
@@ -314,7 +313,7 @@ unsafe extern "system" fn winevent_proc(
         return;
     }
     let ev = ForegroundEvent {
-        hwnd_raw: hwnd.0 as isize,
+        hwnd_raw: hwnd.0,
         event_thread,
     };
     let delivered = LOCAL_TX.with(|cell| {
@@ -341,26 +340,38 @@ mod tests {
 
     #[test]
     fn null_hwnd_is_fail_open() {
-        let ev = ForegroundEvent { hwnd_raw: 0, event_thread: 1234 };
+        let ev = ForegroundEvent {
+            hwnd_raw: 0,
+            event_thread: 1234,
+        };
         assert!(!should_handle_foreground_event(ev, 9999));
     }
 
     #[test]
     fn own_thread_event_is_skipped() {
-        let ev = ForegroundEvent { hwnd_raw: 0x1234, event_thread: 777 };
+        let ev = ForegroundEvent {
+            hwnd_raw: 0x1234,
+            event_thread: 777,
+        };
         assert!(!should_handle_foreground_event(ev, 777));
     }
 
     #[test]
     fn foreign_window_event_is_eligible() {
-        let ev = ForegroundEvent { hwnd_raw: 0x1234, event_thread: 777 };
+        let ev = ForegroundEvent {
+            hwnd_raw: 0x1234,
+            event_thread: 777,
+        };
         assert!(should_handle_foreground_event(ev, 888));
     }
 
     #[test]
     fn unknown_own_tid_does_not_skip() {
         // Boot edge: we do not know our tid yet — never drop an event for it.
-        let ev = ForegroundEvent { hwnd_raw: 0x1234, event_thread: 0 };
+        let ev = ForegroundEvent {
+            hwnd_raw: 0x1234,
+            event_thread: 0,
+        };
         assert!(should_handle_foreground_event(ev, 0));
     }
 }

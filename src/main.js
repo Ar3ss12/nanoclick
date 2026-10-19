@@ -549,6 +549,7 @@ let currentConfig = {
     jitter_percent: 7.5,
     click_limit: 0,
     jitter_radius_px: 0,
+    jitter_relative_3d: false,
     outlier_prob: 0.02,
     technique: "auto",
     button: "left",
@@ -639,6 +640,8 @@ const recordMacroHotkeyLabel = document.getElementById("recordMacroHotkeyLabel")
 /* configPathDisplay removed: full path now lives in the folder-button tooltip */
 const guiLockDelayInput  = document.getElementById("guiLockDelayInput");
 const jitterRadiusInput  = document.getElementById("jitterRadiusInput");
+const jitter3dCheck      = document.getElementById("jitter3dCheck");
+const jitter3dRow        = document.getElementById("jitter3dRow");
 const rippleCheckbox     = document.getElementById("rippleCheckbox");
 const hudCheckbox        = document.getElementById("hudCheckbox");
 const footerModeShortcut = document.getElementById("footerModeShortcut");
@@ -1467,6 +1470,34 @@ function updateSubSettingsVisibility() {
       if (pickPosBtn) pickPosBtn.removeAttribute("disabled");
     }
   }
+
+  // 3. 3D jitter toggle: meaningful ONLY in Cursor mode with radius > 0.
+  // In Fixed mode the platform needs absolute SetCursorPos — relative
+  // motion would walk the cursor away from the pinned point. With radius
+  // 0 there is no spread at all, so the checkbox is dimmed, not hidden
+  // (the user sees WHY it does nothing).
+  const jitterR = parseInt(jitterRadiusInput?.value, 10) || 0;
+  const jitter3dActive = posMode === "cursor" && jitterR > 0;
+  if (jitter3dRow) {
+    if (jitter3dActive) {
+      jitter3dRow.classList.remove("disabled-subgroup");
+    } else {
+      jitter3dRow.classList.add("disabled-subgroup");
+    }
+  }
+  if (jitter3dCheck) {
+    if (jitter3dActive) {
+      jitter3dCheck.removeAttribute("disabled");
+      if (currentConfig?.engine) {
+        jitter3dCheck.checked = !!currentConfig.engine.jitter_relative_3d;
+      }
+    } else {
+      jitter3dCheck.setAttribute("disabled", "true");
+      if (currentConfig?.engine) {
+        jitter3dCheck.checked = !!currentConfig.engine.jitter_relative_3d;
+      }
+    }
+  }
 }
 
 // ── CONFIG SYNC ─────────────────────────────────────────────
@@ -1557,14 +1588,13 @@ function updateUiFromConfig(config) {
   if (jitterRadiusInput) jitterRadiusInput.value = config.engine.jitter_radius_px ?? 0;
   const jitterRadiusRangeEl = document.getElementById("jitterRadiusRange");
   if (jitterRadiusRangeEl) jitterRadiusRangeEl.value = config.engine.jitter_radius_px ?? 0;
+  if (jitter3dCheck) jitter3dCheck.checked = config.engine.jitter_relative_3d === true;
   if (rippleCheckbox) rippleCheckbox.checked = config.ui.visual_ripple;
   if (hudCheckbox) {
     hudCheckbox.checked = !!config.ui.show_hud;
-    if (config.ui?.show_hud && typeof invoke === "function") {
-      setTimeout(() => {
-        invoke("toggle_hud_window", { show: true }).catch(() => {});
-      }, 150);
-    }
+    // No invoke here: the window is already in the state the config describes
+    // (boot path / show_secondary_windows built it, save_app_config syncs it
+    // on change). A hydrate-time toggle re-created what the owner already owns.
   }
 
   if (alwaysOnTopCheckbox) {
@@ -2210,8 +2240,34 @@ function saveConfigThrottled() {
     saveConfig();
   }, 250);
 }
+// Bridge for classic scripts (uipi_manager.js): module-scope functions are
+// invisible outside the module, so the admin checkbox had been calling a
+// `window.saveConfig` that never existed (silent no-op → flag lost on disk).
+// One name, throttled variant — a checkbox flip must never force a full save.
+if (typeof window !== "undefined") window.__nanoclickSaveThrottled = saveConfigThrottled;
 
+// Config-bulkhead serialization, page side: never run two save_app_config
+// invokes in parallel (last-write-wins on the backend), and retry ONCE on
+// "config busy — retry" with a FRESH collect — the config may have moved
+// under us (tray toggle), so re-collecting is the dedup.
+let _saveInFlight = null;
 async function saveConfig() {
+  // Serialize: a second call while one is in flight becomes the trailing
+  // call (coalesced — the fresh collect below re-reads the DOM anyway).
+  if (_saveInFlight) {
+    try { await _saveInFlight; } catch (_) {}
+    return saveConfig();
+  }
+  const flight = saveConfigInner(false);
+  _saveInFlight = flight;
+  try {
+    return await flight;
+  } finally {
+    if (_saveInFlight === flight) _saveInFlight = null;
+  }
+}
+
+async function saveConfigInner(retried) {
   // NEVER write before a real config has been loaded. `currentConfig` starts as the
   // module default — a factory profile with `first_run: true` — and a save from here
   // has silently replaced a live profile with it: language "ua" (the Rust default,
@@ -2256,6 +2312,7 @@ async function saveConfig() {
       currentConfig.engine.gui_lock_ms = safeInt(guiLockDelayInput?.value, 1500) || 1500;
       currentConfig.engine.hotkey_debounce_ms = safeInt(document.getElementById("debounceSlider")?.value, 80);
       currentConfig.engine.jitter_radius_px = safeInt(jitterRadiusInput?.value, 0);
+      currentConfig.engine.jitter_relative_3d = !!document.getElementById("jitter3dCheck")?.checked;
 
       const startDelayInput = document.getElementById("startDelayInput");
       const stopTimeInput = document.getElementById("stopTimeInput");
@@ -2344,6 +2401,14 @@ async function saveConfig() {
     return true;
   } catch (err) {
     op.fail("save-config", err);
+    // Config bulkhead contention: ONE retry with a fresh collect (the tray
+    // may have moved the config under us). Anything else — or a second
+    // busy — is an honest failure, never a silent one.
+    const msg = String(err?.message ?? err ?? "");
+    if (!retried && msg.includes("config busy")) {
+      await new Promise((r) => setTimeout(r, 300));
+      return saveConfigInner(true);
+    }
     console.error("[SaveConfig] aborted:", err);
     // A failed write must be VISIBLE. `console.error` reaches only the WebView console, and
     // `enqueueLog` is gated by DEBUG_UI (off in release builds) — so until now a failed save
@@ -2527,32 +2592,70 @@ if (jitterRadiusInput) {
     const range = document.getElementById("jitterRadiusRange");
     if (range) range.value = safeVal;
     if (currentConfig && currentConfig.engine) currentConfig.engine.jitter_radius_px = safeVal;
+    updateSubSettingsVisibility();
     saveConfigThrottled();
   });
   jitterRadiusInput.addEventListener("change", saveConfig);
 }
-if (rippleCheckbox) rippleCheckbox.addEventListener("change", async () => {
+// ── 3D jitter toggle: relative motion for games ──
+if (jitter3dCheck) {
+  jitter3dCheck.addEventListener("change", () => {
+    if (currentConfig && currentConfig.engine) {
+      currentConfig.engine.jitter_relative_3d = !!jitter3dCheck.checked;
+    }
+    saveConfig();
+  });
+}
+document.querySelectorAll('input[name="posMode"]').forEach((r) => {
+  r.addEventListener("change", () => {
+    updateSubSettingsVisibility();
+    saveConfig();
+  });
+});
+if (rippleCheckbox) rippleCheckbox.addEventListener("change", () => {
+  if (rippleCheckbox.disabled) return;
   currentConfig.ui.visual_ripple = rippleCheckbox.checked;
-  // NOTE: save_app_config (Rust) already syncs the lazy overlay WebView when
-  // visual_ripple flips. This direct invoke is a fast-path for instant feedback;
-  // failures are non-fatal because saveConfig() below triggers the same sync.
-  try {
-    await invoke("toggle_overlay", { show: rippleCheckbox.checked });
-  } catch (e) {
-    console.error("toggle_overlay failed:", e);
-  }
-  saveConfig();
+  // ONE owner: save_app_config (Rust) syncs the lazy overlay WebView when
+  // visual_ripple flips. The old direct fast-path invoke raced the save path:
+  // it created a hidden WebView, then save_app_config's own toggle saw
+  // "already exists" and showed it BEFORE the DOM rendered (the DWM white
+  // flash Zero-Flash was built to prevent).
+  // Lock IMMEDIATELY on first click (not only on backend "busy" reply):
+  // WebView2 builds take 500ms–1s, so rapid clicks must be gated NOW.
+  // satellite-toggle-result unlocks early on "applied"/"already".
+  lockSatelliteCheckboxes(1000);
+  saveConfigThrottled();
 });
-if (hudCheckbox) hudCheckbox.addEventListener("change", async () => {
+if (hudCheckbox) hudCheckbox.addEventListener("change", () => {
+  if (hudCheckbox.disabled) return;
   currentConfig.ui.show_hud = hudCheckbox.checked;
-  // Same as above: save_app_config syncs the lazy HUD WebView as fallback.
-  try {
-    await invoke("toggle_hud_window", { show: hudCheckbox.checked });
-  } catch (e) {
-    console.error("toggle_hud_window failed:", e);
-  }
-  saveConfig();
+  // Same as above: save_app_config syncs the lazy HUD WebView as the single owner.
+  lockSatelliteCheckboxes(1000);
+  saveConfigThrottled();
 });
+
+// Busy-lock for the satellite checkboxes: while a create is in flight
+// the backend answers "busy", and a second flip would only stack another
+// full save onto the queue. Lock both boxes; satellite-toggle-result
+// unlocks early on "applied"/"already_there". A stale timer is cancelled
+// before each new one so an extend never re-disables after an early unlock.
+let _satelliteBusyUntil = 0;
+let _satelliteLockTimer = null;
+function lockSatelliteCheckboxes(ms = 1000) {
+  _satelliteBusyUntil = Date.now() + ms;
+  for (const cb of [rippleCheckbox, hudCheckbox]) {
+    if (cb) cb.disabled = true;
+  }
+  if (_satelliteLockTimer) clearTimeout(_satelliteLockTimer);
+  _satelliteLockTimer = setTimeout(() => {
+    _satelliteLockTimer = null;
+    if (Date.now() >= _satelliteBusyUntil) {
+      for (const cb of [rippleCheckbox, hudCheckbox]) {
+        if (cb) cb.disabled = false;
+      }
+    }
+  }, ms);
+}
 
 // Radio buttons change listener
 document.querySelectorAll('input[type="radio"]').forEach(r => {
@@ -3345,7 +3448,7 @@ function hesitationProbToPercent(prob) {
 function withPresetDefaults(p) {
   const merged = {
     id: "", name: "Preset", description: "", icon: "⚡", category: "utility",
-    target_cps: 10, jitter_percent: 5, jitter_radius_px: 0, outlier_prob: 0.02,
+    target_cps: 10, jitter_percent: 5, jitter_radius_px: 0, jitter_relative_3d: false, outlier_prob: 0.02,
     technique: "auto", click_limit: 0, button: "left", click_type: "single",
     position_mode: "cursor", fixed_x: 100, fixed_y: 100,
     hold_duration_ms: 500, hold_interval_ms: 1000,
@@ -3361,6 +3464,7 @@ function withPresetDefaults(p) {
   merged.target_cps = clampPresetNumber(merged.target_cps, PRESET_LIMITS.cpsMin, PRESET_LIMITS.cpsMax, 10);
   merged.jitter_percent = clampPresetNumber(merged.jitter_percent, PRESET_LIMITS.jitterMin, PRESET_LIMITS.jitterMax, 5);
   merged.jitter_radius_px = Math.round(clampPresetNumber(merged.jitter_radius_px, PRESET_LIMITS.jitterRadiusMin, PRESET_LIMITS.jitterRadiusMax, 0));
+  merged.jitter_relative_3d = merged.jitter_relative_3d === true;
   merged.click_limit = Math.max(0, Math.min(PRESET_LIMITS.clickLimitMax, parseInt(merged.click_limit, 10) || 0));
   merged.outlier_prob = hesitationPercentToProb(hesitationProbToPercent(merged.outlier_prob));
   merged.technique = normalizeTechnique(merged.technique);
@@ -3377,6 +3481,7 @@ function capturePresetEngine() {
     target_cps: clampPresetNumber(e.target_cps, PRESET_LIMITS.cpsMin, PRESET_LIMITS.cpsMax, 10),
     jitter_percent: clampPresetNumber(e.jitter_percent, PRESET_LIMITS.jitterMin, PRESET_LIMITS.jitterMax, 5),
     jitter_radius_px: Math.round(clampPresetNumber(e.jitter_radius_px, PRESET_LIMITS.jitterRadiusMin, PRESET_LIMITS.jitterRadiusMax, 0)),
+    jitter_relative_3d: e.jitter_relative_3d === true,
     outlier_prob: hesitationPercentToProb(hesitationProbToPercent(e.outlier_prob)),
     technique: normalizeTechnique(e.technique),
     click_limit: Math.max(0, Math.min(PRESET_LIMITS.clickLimitMax, parseInt(e.click_limit, 10) || 0)),
@@ -3459,6 +3564,7 @@ function buildPresetSnapshot(scope) {
     target_cps: engine.target_cps,
     jitter_percent: engine.jitter_percent,
     jitter_radius_px: engine.jitter_radius_px,
+    jitter_relative_3d: engine.jitter_relative_3d,
     outlier_prob: engine.outlier_prob,
     technique: engine.technique,
     click_limit: engine.click_limit,
@@ -3807,6 +3913,7 @@ async function applyPreset(presetId) {
       currentConfig.engine.target_cps = full.target_cps;
       currentConfig.engine.jitter_percent = full.jitter_percent;
       currentConfig.engine.jitter_radius_px = full.jitter_radius_px;
+      currentConfig.engine.jitter_relative_3d = full.jitter_relative_3d === true;
       currentConfig.engine.outlier_prob = full.outlier_prob;
       currentConfig.engine.technique = full.technique;
       currentConfig.engine.click_limit = full.click_limit;
@@ -5474,12 +5581,42 @@ function applyStatusUpdate(payload) {
 
 listenSilent("status-update", (event) => applyStatusUpdate(event?.payload || {}));
 
-// ── WINDOW FOCUS / VISIBILITY STATUS RESYNC ──────────────────────────
+// ── FULL APPLICATION STATE RECONCILIATION (Zero-Desync) ──────────────
+function applyFullStateSync(payload) {
+  if (!payload || typeof payload !== "object") return;
+  // 1. Core clicker state
+  applyStatusUpdate(payload);
+
+  // 2. Synchronize recording state if initialized
+  try {
+    if (typeof isRecording !== "undefined" && typeof payload.is_recording === "boolean" && payload.is_recording !== isRecording) {
+      isRecording = payload.is_recording;
+      if (typeof showRecordingOverlay === "function") {
+        showRecordingOverlay(isRecording);
+      }
+      const status = document.getElementById("automationRecordingStatus");
+      const recordBtn = document.getElementById("automationRecordBtn");
+      if (status) status.style.display = isRecording ? "block" : "none";
+      if (recordBtn) recordBtn.disabled = isRecording;
+    }
+  } catch (_) {}
+}
+
+listenSilent("full-state-sync", (event) => applyFullStateSync(event?.payload));
+
+// ── WINDOW FOCUS / VISIBILITY & BACKGROUND STATUS RESYNC ──────────────
 // When the window is backgrounded or minimized, WebView2 background throttling
 // may delay or pause IPC events. Querying live backend status on focus/restore
-// guarantees the UI immediately reflects reality (zero desync).
+// and via background pulse guarantees the UI immediately reflects reality (zero desync).
 async function resyncStatusOnFocus() {
   if (!configHydrated || typeof invoke !== "function") return;
+  try {
+    const s = await invoke("get_full_state");
+    if (s && typeof s === "object") {
+      applyFullStateSync(s);
+      return;
+    }
+  } catch (_) {}
   try {
     const s = await invoke("get_status");
     if (s && typeof s === "object") {
@@ -5496,6 +5633,11 @@ document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") {
     resyncStatusOnFocus();
   }
+});
+
+// Periodic background auto-sync pulse: recovers from any dropped/throttled events
+everyVisible(1000, () => {
+  resyncStatusOnFocus();
 });
 
 // ── IN-WINDOW HOTKEY DISPATCHER (thin forwarder) ────────────────
@@ -5626,12 +5768,68 @@ listen("tray-action-result", (event) => {
   }
 });
 
+// (2b) A SATELLITE toggle answered honestly. `save_app_config` is the single
+// owner of the ripple/HUD windows; when the main window is away it stores the
+// preference and answers DeferredTray — the toast below is what keeps the
+// checkbox from looking broken ("clicked — silence").
+listen("satellite-toggle-result", (event) => {
+  try {
+    const p = event?.payload || {};
+    const ripple = p.which === "ripple";
+    const cb = ripple ? rippleCheckbox : hudCheckbox;
+    if (p.ok !== false) {
+      // Applied / AlreadyThere: pin the checkbox to the REAL window state
+      // (SATELLITE_PLAN §5) and unlock early — the operation completed,
+      // no need to hold the lock for the remaining timeout.
+      if (cb && currentConfig?.ui) {
+        const want = ripple ? !!currentConfig.ui.visual_ripple : !!currentConfig.ui.show_hud;
+        if (cb.checked !== want) cb.checked = want;
+      }
+      // Early-unlock: the backend is done, let the user interact again.
+      // Reset the busy-until timestamp so the next setTimeout in
+      // lockSatelliteCheckboxes re-enables immediately.
+      _satelliteBusyUntil = 0;
+      for (const c of [rippleCheckbox, hudCheckbox]) { if (c) c.disabled = false; }
+      return;
+    }
+    // "tray": window waits for the main window; "busy": a toggle is already
+    // in progress (snubber bulkhead) or the satellite breaker is cooling
+    // down. Both keep the checkbox honest instead of dying silently.
+    if (p.reason !== "tray" && p.reason !== "busy") return;
+    const key = ripple ? "satellite_deferred_ripple" : "satellite_deferred_hud";
+    const busyKey = ripple ? "satellite_busy_ripple" : "satellite_busy_hud";
+    const isBusy = p.reason === "busy";
+    const fallback = ripple
+      ? isBusy
+        ? "Ripple toggle in progress — try again in a second."
+        : "Ripple will appear together with the window (the app is in the tray)."
+      : isBusy
+        ? "HUD toggle in progress — try again in a second."
+        : "HUD will appear together with the window (the app is in the tray).";
+    showToast("⏳ " + getI18nText(isBusy ? busyKey : key, {}, fallback), "warn");
+    // Busy: extend the lock so the retry storm cannot stack more saves.
+    // Tray: the lock was already set at change-time and expires naturally;
+    //       the window will unlock when the main window returns.
+    if (isBusy && typeof lockSatelliteCheckboxes === "function") lockSatelliteCheckboxes(1200);
+  } catch (err) {
+    dbg("satellite-toggle-result handler error:", err?.message || String(err));
+  }
+});
+
 // (2) The tray already persisted `ui.show_hud`; mirror it into the BEHAVIOR
 // checkbox WITHOUT saving — a save from here would write the stale checkbox
 // value back to disk and silently undo the menu choice.
+// Guarded against the checkbox race: a `tray-hud-changed` that arrives while
+// a satellite toggle is in flight (locked checkboxes) or while a throttled
+// save is pending must not repaint the box — the in-flight path owns it.
 listen("tray-hud-changed", (event) => {
   try {
+    if (typeof _satelliteBusyUntil === "number" && Date.now() < _satelliteBusyUntil) return;
     const show = !!event?.payload;
+    if (currentConfig?.ui && currentConfig.ui.show_hud === show) {
+      if (hudCheckbox && hudCheckbox.checked !== show) hudCheckbox.checked = show;
+      return;
+    }
     if (currentConfig?.ui) currentConfig.ui.show_hud = show;
     if (hudCheckbox) hudCheckbox.checked = show;
   } catch (err) {
@@ -5999,21 +6197,49 @@ async function renderMacroList() {
       </div>
     </div>`;
   }).join("");
-  // Wire up handlers.
-  listEl.querySelectorAll(".btn-play").forEach(btn => {
-    btn.addEventListener("click", async (ev) => {
-      const id = ev.target.dataset.id;
-      const m = macros.find(x => x.id === id);
-      if (m) await invoke("play_macro", { m });
+  // Single delegated listener for the whole list (same pattern as the preset
+  // grid's `dataset.bound`): N per-card binds per render was O(N) bind work
+  // on every repaint for zero benefit — old nodes (with their listeners)
+  // are dropped by innerHTML anyway, but the bind loop still ran each time.
+  // `macros` is captured per render, so the closure always sees fresh data.
+  if (!listEl.dataset.bound) {
+    listEl.dataset.bound = "1";
+    listEl.addEventListener("click", async (ev) => {
+      const btn = ev.target.closest(".btn-play,.btn-edit,.btn-optimize,.btn-delete");
+      if (!btn || !listEl.contains(btn)) return;
+      const id = btn.dataset.id;
+      const m = listEl._macros?.find((x) => x.id === id);
+      if (!m) return;
+      if (btn.classList.contains("btn-play")) {
+        await invoke("play_macro", { m });
+      } else if (btn.classList.contains("btn-edit")) {
+        openVisualEditor(m, renderMacroList);
+      } else if (btn.classList.contains("btn-optimize")) {
+        const before = m.actions.length;
+        m.actions = optimizeActionList(m.actions, optimizeLevel);
+        m.enabled = m.actions.map(() => true);
+        const diff = before - m.actions.length;
+        try {
+          await saveMacro(m);
+          console.log(`[MacroOptimize] ${m.name}: ${before} → ${m.actions.length} actions (${diff} cleaned)`);
+          await renderMacroList();
+          showToast(diff > 0
+            ? `⚡ Cleaned ${diff} redundant action(s) (${optimizeLevel})`
+            : `⚡ Macro already optimal for ${optimizeLevel} mode`, "info");
+        } catch (err) {
+          console.error("[MacroOptimize] save failed:", err);
+          alert(getI18nText("dialog_alert_macro_optimize_fail", {}, "Failed to save optimized macro."));
+        }
+      } else if (btn.classList.contains("btn-delete")) {
+        if (!confirm(getI18nText("dialog_confirm_delete_macro", {}, "Delete this macro?"))) return;
+        await invoke("delete_macro", { id });
+        await renderMacroList();
+      }
     });
-  });
-  listEl.querySelectorAll(".btn-edit").forEach(btn => {
-    btn.addEventListener("click", (ev) => {
-      const id = ev.target.dataset.id;
-      const m = macros.find(x => x.id === id);
-      if (m) openVisualEditor(m, renderMacroList);
-    });
-  });
+  }
+  listEl._macros = macros;
+  // Rename needs per-node listeners (input lifecycle), kept as-is: it binds
+  // only to `.macro-name` spans and tears down with the nodes themselves.
   listEl.querySelectorAll(".macro-name").forEach(nameEl => {
     const beginRename = () => {
       if (nameEl.querySelector("input")) return;
@@ -6060,36 +6286,8 @@ async function renderMacroList() {
       }
     });
   });
-  listEl.querySelectorAll(".btn-optimize").forEach(btn => {
-    btn.addEventListener("click", async (ev) => {
-      const id = ev.currentTarget.dataset.id;
-      const m = macros.find(x => x.id === id);
-      if (!m) return;
-      const before = m.actions.length;
-      m.actions = optimizeActionList(m.actions, optimizeLevel);
-      m.enabled = m.actions.map(() => true);
-      const diff = before - m.actions.length;
-      try {
-        await saveMacro(m);
-        console.log(`[MacroOptimize] ${m.name}: ${before} → ${m.actions.length} actions (${diff} cleaned)`);
-        await renderMacroList();
-        showToast(diff > 0
-          ? `⚡ Cleaned ${diff} redundant action(s) (${optimizeLevel})`
-          : `⚡ Macro already optimal for ${optimizeLevel} mode`, "info");
-      } catch (err) {
-        console.error("[MacroOptimize] save failed:", err);
-        alert(getI18nText("dialog_alert_macro_optimize_fail", {}, "Failed to save optimized macro."));
-      }
-    });
-  });
-  listEl.querySelectorAll(".btn-delete").forEach(btn => {
-    btn.addEventListener("click", async (ev) => {
-      const id = ev.target.dataset.id;
-      if (!confirm(getI18nText("dialog_confirm_delete_macro", {}, "Delete this macro?"))) return;
-      await invoke("delete_macro", { id });
-      await renderMacroList();
-    });
-  });
+  // optimize/delete/play/edit buttons are handled by the single delegated
+  // listener above (bound once via `dataset.bound`) — no per-card binds here.
 }
 
 /// Compact human label for an Action. Used in the macro list preview.

@@ -20,6 +20,7 @@
 
 use crate::core::action::{KeyCode, Modifiers, MouseButton};
 use crate::recorder::raw_event::RawEvent;
+use crate::stability::SafeLockExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -32,9 +33,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, VK_CONTROL, VK_LWIN, VK_MENU, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetMessageW, PostThreadMessageW,
-    SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT,
-    WH_KEYBOARD_LL, WH_MOUSE_LL, WM_QUIT,
+    CallNextHookEx, DispatchMessageW, GetMessageW, PostThreadMessageW, SetWindowsHookExW,
+    TranslateMessage, UnhookWindowsHookEx, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL,
+    WH_MOUSE_LL, WM_QUIT,
 };
 
 static STOP_FLAG: AtomicBool = AtomicBool::new(false);
@@ -64,10 +65,7 @@ pub fn spawn_recorder_hooks(
         run_hooks(tx, IgnoredHotkey::parse(&ignored_hotkey));
         drop(any);
     });
-    *RECORDER_THREAD
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .unwrap() = Some(thread);
+    *RECORDER_THREAD.get_or_init(|| Mutex::new(None)).safe_lock() = Some(thread);
     let any_keep: Arc<dyn std::any::Any + Send + Sync> = Arc::new(());
     any_keep
 }
@@ -100,7 +98,7 @@ impl WindowsRecorderBackend {
 
 impl crate::platform::backend::RecorderBackend for WindowsRecorderBackend {
     fn start(&self, sender: Sender<RawEvent>) -> Result<(), String> {
-        let label = self.ignored_hotkey_label.lock().unwrap().clone();
+        let label = self.ignored_hotkey_label.safe_lock().clone();
         spawn_recorder_hooks(sender, label);
         Ok(())
     }
@@ -122,8 +120,7 @@ pub fn stop_recorder_hooks() {
     }
     if let Some(thread) = RECORDER_THREAD
         .get_or_init(|| Mutex::new(None))
-        .lock()
-        .unwrap()
+        .safe_lock()
         .take()
     {
         let _ = thread.join();
@@ -135,7 +132,7 @@ fn now_ms_since(start: Instant) -> u64 {
 }
 
 fn read_modifiers() -> Modifiers {
-    let m = Modifiers {
+    Modifiers {
         ctrl: unsafe { (GetAsyncKeyState(VK_CONTROL.0 as i32) as u32 & 0x8000) != 0 },
         alt: unsafe { (GetAsyncKeyState(VK_MENU.0 as i32) as u32 & 0x8000) != 0 },
         shift: unsafe { (GetAsyncKeyState(VK_SHIFT.0 as i32) as u32 & 0x8000) != 0 },
@@ -143,8 +140,7 @@ fn read_modifiers() -> Modifiers {
             (GetAsyncKeyState(VK_LWIN.0 as i32) as u32 & 0x8000) != 0
                 || (GetAsyncKeyState(0x5C) /* VK_RWIN */ as i32 as u32 & 0x8000) != 0
         },
-    };
-    m
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -451,8 +447,7 @@ fn run_hooks(tx: Sender<RawEvent>, ignored_hotkey: Option<IgnoredHotkey>) {
     LOCAL_CONTEXT.with(|cell| *cell.borrow_mut() = Some(ctx.clone()));
     *RECORDER_CONTEXT
         .get_or_init(|| Mutex::new(None))
-        .lock()
-        .unwrap() = Some(ctx);
+        .safe_lock() = Some(ctx);
 
     unsafe {
         let kb_hook = match SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), None, 0) {

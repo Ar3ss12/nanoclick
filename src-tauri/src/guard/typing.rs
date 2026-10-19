@@ -48,7 +48,6 @@
 //! Disabled guard (`pause_ms == 0`) is zero-cost: [`TypingGuard::note`]
 //! returns before touching memory.
 
-
 use super::now_ms;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -65,7 +64,6 @@ pub const TYPING_FREEZE_MS: u32 = 800;
 /// key arms the lockout. Tests that want the letter list import it from
 /// `key_policy` directly; re-exporting it here would only create a second name
 /// for the same data (and an unused-constant warning in test builds).
-
 /// `true` when this virtual-key counts as real text input, i.e. the fingers
 /// are typing rather than driving a game.
 ///
@@ -109,9 +107,9 @@ pub fn is_typable_vk(vk: u16) -> bool {
         || (0x60..=0x69).contains(&vk) // numpad digits
         || (0xBA..=0xC0).contains(&vk) // OEM punctuation
         || (0xDB..=0xDE).contains(&vk) // OEM punctuation (brackets/quotes)
-    // Numpad operators (`* + - . /`) are deliberately NOT listed: they are
-    // calculator / spreadsheet keys — the same class as the hotbar digits —
-    // so a hotkey bound to one fires instantly.
+                                       // Numpad operators (`* + - . /`) are deliberately NOT listed: they are
+                                       // calculator / spreadsheet keys — the same class as the hotbar digits —
+                                       // so a hotkey bound to one fires instantly.
 }
 
 /// Typing Guard state. Written by the keyboard-hook thread, read by the
@@ -223,7 +221,6 @@ impl TypingGuard {
         self.text_events.store(0, Ordering::Relaxed);
         self.last_text_ms.store(0, Ordering::Relaxed);
     }
-
 
     /* ── toggle confirmation (ambiguous single-key hotkeys) ───────── */
 
@@ -425,7 +422,10 @@ mod tests {
         // Short window keeps the test fast while exercising the real clock.
         let guard = TypingGuard::new(60);
         guard.note();
-        assert!(!guard.allows_hotkey(), "hotkey must be ignored right after typing");
+        assert!(
+            !guard.allows_hotkey(),
+            "hotkey must be ignored right after typing"
+        );
 
         std::thread::sleep(std::time::Duration::from_millis(80));
         assert!(
@@ -448,7 +448,10 @@ mod tests {
         guard.note();
 
         // ...and now the user hits R (the toggle hotkey) inside "rush".
-        assert!(!is_text_keypress_vk(0x52), "R must never arm the lockout itself");
+        assert!(
+            !is_text_keypress_vk(0x52),
+            "R must never arm the lockout itself"
+        );
         assert!(
             !guard.allows_hotkey(),
             "R inside a word must not switch the clicker on"
@@ -486,7 +489,10 @@ mod tests {
 
         // 'u' arrives 90 ms later -> it was a letter inside a word.
         guard.note();
-        assert!(!guard.is_toggle_pending(), "the next letter cancels the press");
+        assert!(
+            !guard.is_toggle_pending(),
+            "the next letter cancels the press"
+        );
 
         // Nothing to resolve, and the toggle never fired.
         assert_eq!(guard.poll_pending(t0 + 500), None);
@@ -568,20 +574,22 @@ mod tests {
     /// in-game never blocks hotkeys or interrupts active clicking.
     #[test]
     fn space_is_gameplay_key_and_does_not_interrupt_clicking() {
-        assert!(!is_text_keypress_vk(0x20), "Space must be treated as a gameplay key");
+        assert!(
+            !is_text_keypress_vk(0x20),
+            "Space must be treated as a gameplay key"
+        );
     }
 }
 
-
-    /// Disarm drops the lockout and the pending window together.
-    #[test]
-    fn disarm_clears_lockout_and_pending() {
-        let guard = TypingGuard::new(TYPING_FREEZE_MS);
-        guard.note();
-        assert!(guard.hotkeys_locked());
-        guard.disarm();
-        assert!(!guard.hotkeys_locked(), "disarm must release the lockout");
-        assert!(guard.allows_hotkey());
-        assert!(!guard.is_toggle_pending());
-        assert_eq!(guard.lock_remaining_ms(), 0);
-    }
+/// Disarm drops the lockout and the pending window together.
+#[test]
+fn disarm_clears_lockout_and_pending() {
+    let guard = TypingGuard::new(TYPING_FREEZE_MS);
+    guard.note();
+    assert!(guard.hotkeys_locked());
+    guard.disarm();
+    assert!(!guard.hotkeys_locked(), "disarm must release the lockout");
+    assert!(guard.allows_hotkey());
+    assert!(!guard.is_toggle_pending());
+    assert_eq!(guard.lock_remaining_ms(), 0);
+}

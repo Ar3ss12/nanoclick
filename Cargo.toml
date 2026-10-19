@@ -8,7 +8,7 @@ default-members = ["src-tauri"]
 [profile.release]
 opt-level = "z"     # Optimize for minimum binary size
 lto = true          # Link-Time Optimization across all crates
-codegen-units = 1   # Single code generation unit for maximum LLVM inlining
+codegen-units = 2   # Single code generation unit for maximum LLVM inlining
 panic = "abort"     # Strip panic unwinding tables & landing pads
 strip = true        # Strip all debug and symbol tables from binary
 
@@ -20,3 +20,4 @@ strip = true        # Strip all debug and symbol tables from binary
 # used by `cargo test` WITHOUT `--release`, so the override never reaches the
 # gate. See the `common-controls-v6` note in `src-tauri/Cargo.toml` for the
 # failure that looked like a panic/unwind problem but was a Windows import.
+

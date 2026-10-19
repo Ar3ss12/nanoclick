@@ -25,6 +25,8 @@ pub struct Config {
     pub hold_interval_ms: u64,
     pub repeat_interval_ms: u64,
     pub jitter_radius_px: u32,
+    /// 3D jitter flag, mirrored from the persisted engine settings.
+    pub jitter_relative_3d: bool,
     /// Rare biological hesitation probability (0.0 = off, default 0.02).
     pub outlier_prob: f64,
     /// Biometric technique hint (Phase A: UI only): auto/single/butterfly/drag.
@@ -91,6 +93,7 @@ impl Default for Config {
             hold_interval_ms: 1000,
             repeat_interval_ms: 1000,
             jitter_radius_px: 0,
+            jitter_relative_3d: false,
             outlier_prob: 0.02,
             technique: "auto".into(),
             hotkey_toggle: "R / K".into(),
@@ -149,6 +152,7 @@ impl From<AppConfig> for Config {
             hold_interval_ms: app_cfg.engine.hold_interval_ms,
             repeat_interval_ms: app_cfg.engine.repeat_interval_ms,
             jitter_radius_px: app_cfg.engine.jitter_radius_px,
+            jitter_relative_3d: app_cfg.engine.jitter_relative_3d,
             outlier_prob: normalize_outlier_prob(app_cfg.engine.outlier_prob),
             technique: normalize_technique(&app_cfg.engine.technique),
             hotkey_toggle: app_cfg.hotkeys.toggle,
@@ -468,7 +472,10 @@ mod stop_timer_tests {
 
         // The explicit mode wins while its trigger holds a value.
         assert_eq!(resolve_stop_mode("duration", 1_500, 0), "duration");
-        assert_eq!(resolve_stop_mode("wallclock", 0, 1_700_000_000), "wallclock");
+        assert_eq!(
+            resolve_stop_mode("wallclock", 0, 1_700_000_000),
+            "wallclock"
+        );
         // …and loses to the other value the moment its own is cleared, so a run
         // is never left disarmable while a usable deadline sits in the config.
         assert_eq!(resolve_stop_mode("duration", 0, 1_700_000_000), "wallclock");
@@ -488,7 +495,10 @@ mod stop_timer_tests {
     fn outlier_prob_normalizes_to_default_and_ceiling() {
         assert_eq!(normalize_outlier_prob(0.02), 0.02);
         assert_eq!(normalize_outlier_prob(0.0), 0.0); // switch-off survives
-        assert_eq!(normalize_outlier_prob(DEFAULT_OUTLIER_PROB), DEFAULT_OUTLIER_PROB);
+        assert_eq!(
+            normalize_outlier_prob(DEFAULT_OUTLIER_PROB),
+            DEFAULT_OUTLIER_PROB
+        );
         assert_eq!(normalize_outlier_prob(0.5), MAX_OUTLIER_PROB);
         assert_eq!(normalize_outlier_prob(f64::INFINITY), DEFAULT_OUTLIER_PROB);
         assert_eq!(normalize_outlier_prob(f64::NAN), DEFAULT_OUTLIER_PROB);

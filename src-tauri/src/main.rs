@@ -48,6 +48,14 @@ fn apply_webview_memory_policy() {
 
 fn main() {
     apply_webview_memory_policy();
+    // Stage A — satellite quarantine: the same binary as a satellite host.
+    // Checked FIRST so a satellite never touches the update handover,
+    // single-instance lock, scheduler, hooks, or tray pump.
+    if let Some(label) =
+        nanoclick::satellite::satellite_label_from_args(&std::env::args().collect::<Vec<_>>())
+    {
+        std::process::exit(nanoclick::satellite::run_satellite(&label));
+    }
     // Update handover (portable in-place path): the old process spawned us
     // with `--updated-from=<pid>` while IT was still alive. Wait for it to
     // die BEFORE Tauri boots — otherwise we meet its single-instance lock,

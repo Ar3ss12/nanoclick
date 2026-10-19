@@ -106,10 +106,7 @@ pub fn get_portable_update_info() -> serde_json::Value {
 /// Windows-only: other platforms get a stub that refuses.
 #[cfg(not(target_os = "windows"))]
 #[tauri::command]
-pub async fn portable_self_update(
-    _download_url: String,
-    _signature: String,
-) -> Result<(), String> {
+pub async fn portable_self_update(_download_url: String, _signature: String) -> Result<(), String> {
     Err("portable self-update is only supported on Windows".into())
 }
 
@@ -180,7 +177,10 @@ pub async fn portable_self_update(
     if let Err(e) = std::fs::rename(&new_path, &current_exe) {
         // Roll back: put the old binary back, or the folder is left broken.
         let _ = std::fs::rename(&old_path, &current_exe);
-        return Err(pu::classify_portable_update_error("rename-new", &e.to_string()));
+        return Err(pu::classify_portable_update_error(
+            "rename-new",
+            &e.to_string(),
+        ));
     }
 
     // 4. Respawn the new image with the handover marker, then exit.
@@ -318,9 +318,29 @@ pub fn stats_tick(
 ) -> serde_json::Value {
     use crate::stats_agg::StatsFlush;
     let mut cfg = state.config_manager.load();
-    let flush = match state.session_stats.lock() {
-        Ok(mut s) => s.tick(&mut cfg.stats, active, clicks_done, cps, now_ms),
-        Err(_) => StatsFlush::None,
+    // Fold + snapshot under ONE lock: the page used to call `stats_tick`
+    // then `get_session_stats` (two IPC round-trips per telemetry frame).
+    // Returning the session mirror here halves the tick IPC rate.
+    let (flush, session) = match state.session_stats.lock() {
+        Ok(mut s) => {
+            let flush = s.tick(&mut cfg.stats, active, clicks_done, cps, now_ms);
+            let session = serde_json::json!({
+                "session_clicks": s.session_clicks,
+                "run_clicks": s.run_clicks,
+                "session_active_ms": s.session_active_ms,
+                "active_now": s.active_now,
+            });
+            (flush, session)
+        }
+        Err(_) => (
+            StatsFlush::None,
+            serde_json::json!({
+                "session_clicks": 0,
+                "run_clicks": 0,
+                "session_active_ms": 0,
+                "active_now": false,
+            }),
+        ),
     };
     let should_save = flush == StatsFlush::Save;
     if should_save {
@@ -329,6 +349,7 @@ pub fn stats_tick(
     serde_json::json!({
         "saved": should_save,
         "totals": cfg.stats,
+        "session": session,
     })
 }
 
@@ -631,7 +652,11 @@ pub fn new_unique_id(prefix: String) -> String {
         .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
         .take(16)
         .collect();
-    let prefix = if safe.is_empty() { "id_".into() } else { format!("{safe}_") };
+    let prefix = if safe.is_empty() {
+        "id_".into()
+    } else {
+        format!("{safe}_")
+    };
     new_prefixed_id(&prefix)
 }
 
@@ -685,15 +710,12 @@ fn chrono_like_stamp() -> String {
 /// silently dropped by WebView2, so this button silently did nothing.
 #[tauri::command]
 pub fn export_presets_to_disk(state: State<'_, crate::AppState>) -> Result<String, String> {
-    let library = state
-        .scheduler
-        .get_config()
-        .presets;
+    let library = state.scheduler.get_config().presets;
     if library.is_empty() {
         return Err("no presets to export".into());
     }
-    let json = serde_json::to_string_pretty(&library)
-        .map_err(|e| format!("serialize presets: {e}"))?;
+    let json =
+        serde_json::to_string_pretty(&library).map_err(|e| format!("serialize presets: {e}"))?;
     let desktop = std::env::var("USERPROFILE")
         .map(|p| std::path::PathBuf::from(p).join("Desktop"))
         .unwrap_or_else(|_| std::env::temp_dir());
@@ -997,7 +1019,10 @@ mod tests {
         .unwrap();
         drop(tx);
         let actions = handle.stop();
-        assert!(!actions.is_empty(), "stop() must return captured actions on first call");
+        assert!(
+            !actions.is_empty(),
+            "stop() must return captured actions on first call"
+        );
     }
 
     #[test]
@@ -1017,7 +1042,10 @@ mod tests {
         let first_actions = handle.stop();
         let second_actions = handle.stop();
         assert!(!first_actions.is_empty());
-        assert!(second_actions.is_empty(), "second stop() call returns empty vec without panicking");
+        assert!(
+            second_actions.is_empty(),
+            "second stop() call returns empty vec without panicking"
+        );
     }
 
     #[test]

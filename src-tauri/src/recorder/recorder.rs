@@ -21,6 +21,7 @@
 use crate::core::Action;
 use crate::recorder::normalizer;
 use crate::recorder::raw_event::RawEvent;
+use crate::stability::SafeLockExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -29,16 +30,11 @@ use std::time::Duration;
 
 /// Recording mode — `Smart` (default) applies the 5-phase Normalizer,
 /// `Precise` keeps every event as-is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RecordingMode {
+    #[default]
     Smart,
     Precise,
-}
-
-impl Default for RecordingMode {
-    fn default() -> Self {
-        RecordingMode::Smart
-    }
 }
 
 /// Threadsafe handle for a recording session.
@@ -109,15 +105,14 @@ impl RecorderHandle {
         self.shared.is_running.store(false, Ordering::Relaxed);
         // Poll briefly for the consumer thread to finalize.
         for _ in 0..120 {
-            if self.shared.final_actions.lock().unwrap().is_some() {
+            if self.shared.final_actions.safe_lock().is_some() {
                 break;
             }
             thread::sleep(Duration::from_millis(50));
         }
         self.shared
             .final_actions
-            .lock()
-            .unwrap()
+            .safe_lock()
             .take()
             .unwrap_or_default()
     }
@@ -153,13 +148,13 @@ fn spawn_consumer_thread(
         while let Ok(ev) = rx.try_recv() {
             buffer.push(ev);
         }
-        let mode = *shared.mode.lock().unwrap();
+        let mode = *shared.mode.safe_lock();
         let actions: Vec<Action> = if mode == RecordingMode::Precise {
             buffer.into_iter().map(|e| e.to_action()).collect()
         } else {
             normalizer::normalize(buffer)
         };
-        *shared.final_actions.lock().unwrap() = Some(actions);
+        *shared.final_actions.safe_lock() = Some(actions);
         drop(tx_keepalive); // release the sender so the channel disconnects
     });
 }

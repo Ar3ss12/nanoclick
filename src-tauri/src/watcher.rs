@@ -54,7 +54,13 @@ struct WatchedFile {
 impl WatchedFile {
     fn new(path: PathBuf, validate: fn(&str) -> bool) -> Self {
         let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-        WatchedFile { path, last_seen_mtime: mtime, pending_since: None, own_write_at: None, validate }
+        WatchedFile {
+            path,
+            last_seen_mtime: mtime,
+            pending_since: None,
+            own_write_at: None,
+            validate,
+        }
     }
 }
 
@@ -64,7 +70,9 @@ pub struct Observer {
 
 impl Observer {
     pub fn new() -> Self {
-        Observer { files: Mutex::new(HashMap::new()) }
+        Observer {
+            files: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Register a file under a short key (`"config"`, `"macros"`).
@@ -139,7 +147,11 @@ impl Observer {
                 let valid = std::fs::read_to_string(&f.path)
                     .map(|s| (f.validate)(&s))
                     .unwrap_or(false);
-                if valid { FileHealth::ChangedValid } else { FileHealth::ChangedInvalid }
+                if valid {
+                    FileHealth::ChangedValid
+                } else {
+                    FileHealth::ChangedInvalid
+                }
             }
         }
     }
@@ -201,8 +213,12 @@ pub fn presets_bytes_valid(raw: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn always_valid(_: &str) -> bool { true }
-    fn always_invalid(_: &str) -> bool { false }
+    fn always_valid(_: &str) -> bool {
+        true
+    }
+    fn always_invalid(_: &str) -> bool {
+        false
+    }
 
     fn tmp_file(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("nanoclick_watch_{}", std::process::id()));
@@ -296,7 +312,9 @@ mod tests {
     fn config_validator_accepts_good_rejects_broken() {
         // Embedded default is the ground truth of "valid": it must pass.
         // Truncated / empty bytes are never valid.
-        assert!(config_bytes_valid(crate::defaults::EMBEDDED_DEFAULT_CONFIG_JSON));
+        assert!(config_bytes_valid(
+            crate::defaults::EMBEDDED_DEFAULT_CONFIG_JSON
+        ));
         assert!(!config_bytes_valid("{\"a\":1}."));
         assert!(!config_bytes_valid(""));
     }

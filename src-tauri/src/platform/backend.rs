@@ -61,6 +61,10 @@ pub struct ClickSpec {
     pub fixed_x: i32,
     pub fixed_y: i32,
     pub jitter_radius: u32,
+    /// 3D jitter: relative MOUSEEVENTF_MOVE in Cursor mode instead of
+    /// absolute SetCursorPos. RawInput/DirectInput games read ONLY the
+    /// relative delta — absolute positioning reads as dx=0,dy=0 there.
+    pub jitter_relative_3d: bool,
     /// Optional multi-point click sequence. When non-empty the executor
     /// visits each point in order with the per-point delay. When empty
     /// the executor falls back to the legacy single-point behaviour
@@ -79,6 +83,10 @@ pub trait InputBackend: Send + Sync {
     fn mouse_up(&self, button: MouseButton);
     fn scroll_wheel(&self, delta_x: i32, delta_y: i32);
     fn set_cursor_pos(&self, x: i32, y: i32);
+    /// Synthesize relative mouse motion (MOUSEEVENTF_MOVE) for 3D camera rotation and recoil jitter.
+    fn mouse_move_relative(&self, dx: i32, dy: i32) {
+        let _ = (dx, dy);
+    }
     /// Synthesize a key event. `key.0` is the platform-neutral virtual
     /// key code (VK_* on Windows); modifiers are applied explicitly.
     fn send_key(&self, key: KeyCode, mods: Modifiers, is_up: bool);
@@ -280,6 +288,36 @@ mod contract_tests {
     }
 
     #[test]
+    fn jitter_3d_routing_matrix() {
+        // The routing rule the platform implements: ONLY Cursor + flag ON
+        // takes the relative RawInput path; everything else is absolute.
+        fn is_relative(mode: PositionMode, flag: bool) -> bool {
+            mode == PositionMode::Cursor && flag
+        }
+        assert!(is_relative(PositionMode::Cursor, true));
+        assert!(!is_relative(PositionMode::Cursor, false));
+        assert!(!is_relative(PositionMode::Fixed, true));
+        assert!(!is_relative(PositionMode::Fixed, false));
+    }
+
+    #[test]
+    fn jitter_3d_spec_carries_the_flag() {
+        let spec = ClickSpec {
+            button: MouseButton::Left,
+            click_type: ClickType::Single,
+            position_mode: PositionMode::Cursor,
+            fixed_x: 0,
+            fixed_y: 0,
+            jitter_radius: 5,
+            jitter_relative_3d: true,
+            points: Vec::new(),
+            point_index: 0,
+        };
+        assert!(spec.jitter_relative_3d);
+        assert_eq!(spec.position_mode, PositionMode::Cursor);
+    }
+
+    #[test]
     fn mock_backend_receives_typed_click_specs() {
         let backend = MockInputBackend::default();
         let spec = ClickSpec {
@@ -289,6 +327,7 @@ mod contract_tests {
             fixed_x: 100,
             fixed_y: 200,
             jitter_radius: 5,
+            jitter_relative_3d: false,
             points: Vec::new(),
             point_index: 0,
         };

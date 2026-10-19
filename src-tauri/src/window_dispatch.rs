@@ -65,8 +65,12 @@ pub fn binding_matches(binding: &str, current_key: &str, held_keys: &[String]) -
     }
     let current = norm(current_key);
     let held_upper: Vec<String> = held_keys.iter().map(|k| norm(k)).collect();
-    for group in binding.split(|c| c == '/' || c == '|') {
-        let parts: Vec<&str> = group.split('+').map(str::trim).filter(|s| !s.is_empty()).collect();
+    for group in binding.split(['/', '|']) {
+        let parts: Vec<&str> = group
+            .split('+')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
         if parts.is_empty() {
             continue;
         }
@@ -86,6 +90,7 @@ pub fn binding_matches(binding: &str, current_key: &str, held_keys: &[String]) -
 /// Priority mirrors the page: emergency → mode → toggle → preset slots.
 /// `mode_is_work` + `running` resolve the Work-Mode veto here so the page
 /// never branches on clicker state.
+#[allow(clippy::too_many_arguments)]
 pub fn decide_window_key(
     toggle: &str,
     mode_switch: &str,
@@ -134,7 +139,11 @@ mod tests {
     fn chord_needs_its_modifiers_held() {
         assert!(binding_matches("Ctrl+Alt+M", "M", &held(&["Ctrl", "Alt"])));
         assert!(!binding_matches("Ctrl+Alt+M", "M", &held(&["Ctrl"])));
-        assert!(binding_matches("Ctrl+Alt+M", "M", &held(&["ControlLeft", "AltRight"])));
+        assert!(binding_matches(
+            "Ctrl+Alt+M",
+            "M",
+            &held(&["ControlLeft", "AltRight"])
+        ));
     }
 
     #[test]

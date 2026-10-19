@@ -95,7 +95,7 @@ pub fn tray_action_for_command(id: u32) -> Option<TrayAction> {
 ///
 /// Plain numbers on purpose, like the tray event codes above: the dispatch
 /// tables stay testable on any platform, and `CheckMenuItem` takes a raw u32.
-fn check_flags(on: bool) -> u32 {
+pub(crate) fn check_flags(on: bool) -> u32 {
     const MF_CHECKED_BIT: u32 = 0x0000_0008;
     const MF_BYCOMMAND_0: u32 = 0x0000_0000;
     MF_BYCOMMAND_0 | if on { MF_CHECKED_BIT } else { 0 }
@@ -119,7 +119,11 @@ pub fn clicking_item_flags(running: bool) -> u32 {
 
 /// Tooltip text: mode + clicker state. Refreshed together with the check marks.
 pub fn tip_text(work_mode: bool, running: bool) -> String {
-    let mode = if work_mode { "Work Mode" } else { "Autoclicker" };
+    let mode = if work_mode {
+        "Work Mode"
+    } else {
+        "Autoclicker"
+    };
     let state = if running { "clicking" } else { "idle" };
     format!("NanoClick — {mode} · {state}")
 }
@@ -265,10 +269,11 @@ impl Drop for TrayHandle {
 #[cfg(target_os = "windows")]
 mod win {
     use super::{
-        clicking_item_flags, fill_wide, mode_item_flags, perform, tip_text, tray_action_for_command,
-        tray_click_for_event, TrayAction, TrayClick, TrayHandle, MENU_ID_OPEN, MENU_ID_QUIT,
-        MENU_ID_RELOAD_UI, MENU_ID_RESTART_APP, MENU_ID_TOGGLE_CLICKING, MENU_ID_TOGGLE_HUD,
-        MENU_ID_TOGGLE_MODE, TRAY_TIP, WM_TRAY_CALLBACK,
+        clicking_item_flags, fill_wide, mode_item_flags, perform, tip_text,
+        tray_action_for_command, tray_click_for_event, TrayAction, TrayClick, TrayHandle,
+        MENU_ID_OPEN, MENU_ID_QUIT, MENU_ID_RELOAD_UI, MENU_ID_RESTART_APP,
+        MENU_ID_TOGGLE_CLICKING, MENU_ID_TOGGLE_HUD, MENU_ID_TOGGLE_MODE, TRAY_TIP,
+        WM_TRAY_CALLBACK,
     };
     use std::sync::atomic::{AtomicPtr, Ordering};
     use std::sync::mpsc::{channel, Sender};
@@ -279,18 +284,17 @@ mod win {
     use windows::Win32::Graphics::Gdi::HBRUSH;
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::Shell::{
-        Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO, NIM_ADD,
-        NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NOTIFYICONDATAW, NOTIFYICON_VERSION_4,
+        Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO,
+        NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NOTIFYICONDATAW, NOTIFYICON_VERSION_4,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, CheckMenuItem, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
-        DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics, HCURSOR,
-        HICON, HMENU, IDI_APPLICATION, IMAGE_ICON, LR_DEFAULTCOLOR, LoadIconW, LoadImageW,
-        MF_SEPARATOR, MF_STRING, MSG, PostMessageW, PostQuitMessage, RegisterClassW,
-        RegisterWindowMessageW, SM_CXSMICON, SM_CYSMICON, SetForegroundWindow, TPM_RETURNCMD,
-        TPM_RIGHTBUTTON, TrackPopupMenuEx, TranslateMessage, UnregisterClassW, WM_CLOSE,
-        WM_DESTROY, WM_ENDSESSION, WM_NULL, WNDCLASS_STYLES, WNDCLASSW, WS_EX_TOOLWINDOW,
-        WS_POPUP,
+        DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics, LoadIconW,
+        LoadImageW, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW,
+        SetForegroundWindow, TrackPopupMenuEx, TranslateMessage, UnregisterClassW, HCURSOR, HICON,
+        HMENU, IDI_APPLICATION, IMAGE_ICON, LR_DEFAULTCOLOR, MF_SEPARATOR, MF_STRING, MSG,
+        SM_CXSMICON, SM_CYSMICON, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_CLOSE, WM_DESTROY,
+        WM_ENDSESSION, WM_NULL, WNDCLASSW, WNDCLASS_STYLES, WS_EX_TOOLWINDOW, WS_POPUP,
     };
 
     /// Class name of the invisible message window. It is also written literally
@@ -489,7 +493,6 @@ mod win {
         }
     }
 
-
     /// Load the tray icon. Primary: the icon resource embedded in this binary.
     /// Fallback: a generic system icon — a binary without resources (the lib
     /// unittest target, precisely the `0xC0000139` case) must not fail here.
@@ -505,7 +508,7 @@ mod win {
             LR_DEFAULTCOLOR,
         ) {
             if h.0 != 0 {
-                return HICON(h.0 as isize);
+                return HICON(h.0);
             }
         }
         match LoadIconW(HINSTANCE::default(), IDI_APPLICATION) {
@@ -518,6 +521,7 @@ mod win {
     }
 
     /// `NOTIFYICONDATAW` for our one icon (version 4 callback semantics).
+    #[allow(clippy::field_reassign_with_default)]
     fn icon_data(hwnd: HWND, icon: HICON) -> NOTIFYICONDATAW {
         let mut nid = NOTIFYICONDATAW::default();
         nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
@@ -644,12 +648,14 @@ mod win {
             // the clicker state can be read, and the user is about to act on them.
             let work_mode = crate::tray_work_mode_active(&state.app);
             let clicking = crate::tray_clicking_active(&state.app);
+            let hud = crate::tray_hud_visible(&state.app);
             let _ = CheckMenuItem(state.menu, MENU_ID_TOGGLE_MODE, mode_item_flags(work_mode));
             let _ = CheckMenuItem(
                 state.menu,
                 MENU_ID_TOGGLE_CLICKING,
                 clicking_item_flags(clicking),
             );
+            let _ = CheckMenuItem(state.menu, MENU_ID_TOGGLE_HUD, super::check_flags(hud));
             update_tip(state, &tip_text(work_mode, clicking));
             // The shell requires the owner window to be foreground, otherwise the
             // menu stays on screen when the user clicks elsewhere.
@@ -664,7 +670,6 @@ mod win {
             }
         }
     }
-
 }
 
 #[cfg(test)]
@@ -673,7 +678,10 @@ mod tests {
 
     #[test]
     fn menu_ids_map_to_actions() {
-        assert_eq!(tray_action_for_command(MENU_ID_OPEN), Some(TrayAction::Open));
+        assert_eq!(
+            tray_action_for_command(MENU_ID_OPEN),
+            Some(TrayAction::Open)
+        );
         assert_eq!(
             tray_action_for_command(MENU_ID_TOGGLE_CLICKING),
             Some(TrayAction::ToggleClicking)
@@ -694,7 +702,10 @@ mod tests {
             tray_action_for_command(MENU_ID_RESTART_APP),
             Some(TrayAction::RestartApp)
         );
-        assert_eq!(tray_action_for_command(MENU_ID_QUIT), Some(TrayAction::Quit));
+        assert_eq!(
+            tray_action_for_command(MENU_ID_QUIT),
+            Some(TrayAction::Quit)
+        );
     }
 
     /// The mode item carries a check mark while Work Mode is on: with deep sleep
@@ -829,5 +840,3 @@ mod tests {
         );
     }
 }
-
-

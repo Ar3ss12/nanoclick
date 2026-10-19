@@ -67,16 +67,13 @@ impl FocusWatchStop {
         // `wake` holds Option<NativeEventHandle>; on linux/macos the alias
         // itself is Option<Arc> (double nesting), on Windows it is Arc.
         if let Ok(g) = self.wake.lock() {
-            match g.as_ref() {
-                Some(h) => {
-                    #[cfg(target_os = "windows")]
+            if let Some(h) = g.as_ref() {
+                #[cfg(target_os = "windows")]
+                h.store(true, Ordering::Release);
+                #[cfg(not(target_os = "windows"))]
+                if let Some(h) = h {
                     h.store(true, Ordering::Release);
-                    #[cfg(not(target_os = "windows"))]
-                    if let Some(h) = h {
-                        h.store(true, Ordering::Release);
-                    }
                 }
-                None => {}
             }
         }
         !self.claimed.swap(true, Ordering::AcqRel)
@@ -244,15 +241,30 @@ mod tests {
     fn focus_lost_reads_the_guard_not_the_os() {
         let guard = FocusGuard::new(true);
         guard.arm(Some("baseline.exe".into()));
-        assert!(!focus_lost(&guard, Some("baseline.exe")), "unchanged focus keeps running");
-        assert!(!focus_lost(&guard, None), "an unknown foreground fails open");
-        assert!(focus_lost(&guard, Some("intruder.exe")), "a foreign foreground stops the run");
+        assert!(
+            !focus_lost(&guard, Some("baseline.exe")),
+            "unchanged focus keeps running"
+        );
+        assert!(
+            !focus_lost(&guard, None),
+            "an unknown foreground fails open"
+        );
+        assert!(
+            focus_lost(&guard, Some("intruder.exe")),
+            "a foreign foreground stops the run"
+        );
         if let Some(own) = crate::platform::own_exe_name() {
-            assert!(!focus_lost(&guard, Some(own.as_str())), "our own image is exempt");
+            assert!(
+                !focus_lost(&guard, Some(own.as_str())),
+                "our own image is exempt"
+            );
         }
         let off = FocusGuard::new(false);
         off.arm(Some("baseline.exe".into()));
-        assert!(!focus_lost(&off, Some("intruder.exe")), "guard OFF never stops");
+        assert!(
+            !focus_lost(&off, Some("intruder.exe")),
+            "guard OFF never stops"
+        );
     }
 
     /// Regression guard for a test-side trap, not a product bug: this test used
@@ -278,7 +290,10 @@ mod tests {
     #[test]
     fn watcher_fails_open_on_unknown_foreground() {
         let (active, stop) = run_watcher(|| None, true, "baseline.exe");
-        assert!(active, "an unknown foreground (lock screen) must never stop the run");
+        assert!(
+            active,
+            "an unknown foreground (lock screen) must never stop the run"
+        );
         assert!(!stop.is_requested());
     }
 

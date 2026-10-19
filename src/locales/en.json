@@ -56,6 +56,8 @@
   "dash_hold_duration": "Hold Dur (ms)",
   "dash_hold_pause": "Hold Pause (ms)",
   "dash_card_position": "POSITION",
+  "dash_jitter_3d_label": "3D games: relative motion",
+  "dash_jitter_3d_hint": "Moves the camera in 3D games via relative shift; the cursor barely trembles on the desktop",
   "dash_pos_cursor": "Current Cursor Position",
   "dash_pos_fixed": "Fixed Position",
   "dash_pick_pos_title": "Hover anywhere and press ENTER to capture position",
@@ -521,5 +523,9 @@
   "save_failed": "Settings were NOT saved — the write failed. See %TEMP%\\nanoclick_web.log for the reason.",
   "notice_cfg_load_failed_title": "Settings could not be loaded",
   "notice_cfg_load_failed_msg": "Your config.json could not be read, so the app is running on factory defaults and WILL NOT SAVE anything you change. Close the app, check that config.json is readable, and start it again — a backup of the previous file may be next to it (config.json.bak-*).",
+  "satellite_deferred_ripple": "Ripple will appear together with the window (the app is in the tray).",
+  "satellite_deferred_hud": "HUD will appear together with the window (the app is in the tray).",
+  "satellite_busy_ripple": "Ripple toggle in progress — try again in a second.",
+  "satellite_busy_hud": "HUD toggle in progress — try again in a second.",
   "presets_export_empty": "No presets to export — the library is empty."
 }

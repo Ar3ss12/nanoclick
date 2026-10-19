@@ -61,8 +61,8 @@ fn unharden_last_good(_path: &Path) {}
 #[cfg(target_os = "windows")]
 fn set_file_attrs(path: &Path, attrs: u32) {
     use std::os::windows::ffi::OsStrExt;
-    use windows::Win32::Storage::FileSystem::{SetFileAttributesW, FILE_FLAGS_AND_ATTRIBUTES};
     use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{SetFileAttributesW, FILE_FLAGS_AND_ATTRIBUTES};
     let wide: Vec<u16> = path
         .as_os_str()
         .encode_wide()
@@ -118,7 +118,11 @@ static LAST_PROMOTED: OnceLock<Mutex<HashMap<PathBuf, SystemTime>>> = OnceLock::
 
 /// Promote a cleanly parsed file into the golden snapshot, at most once per
 /// source revision (see [`LAST_PROMOTED`]).
-fn promote_last_good_once(config_path: &Path, source_mtime: Option<SystemTime>, config: &AppConfig) {
+fn promote_last_good_once(
+    config_path: &Path,
+    source_mtime: Option<SystemTime>,
+    config: &AppConfig,
+) {
     let Some(mtime) = source_mtime else {
         // No mtime to reason about (exotic filesystem): keep the old behaviour.
         write_last_good_snapshot(config_path, config);
@@ -155,11 +159,12 @@ fn load_last_good_snapshot(config_path: &Path) -> Option<AppConfig> {
 /// Parse the embedded default configuration template into an `AppConfig`.
 /// Falls back to `AppConfig::default()` in the impossible event of a deserialization error.
 pub fn get_embedded_default_config() -> AppConfig {
-    serde_json::from_str::<AppConfig>(EMBEDDED_DEFAULT_CONFIG_JSON)
-        .unwrap_or_else(|e| {
-            eprintln!("[defaults] Embedded config JSON deserialization failed: {e}. Using Rust default.");
-            AppConfig::default()
-        })
+    serde_json::from_str::<AppConfig>(EMBEDDED_DEFAULT_CONFIG_JSON).unwrap_or_else(|e| {
+        eprintln!(
+            "[defaults] Embedded config JSON deserialization failed: {e}. Using Rust default."
+        );
+        AppConfig::default()
+    })
 }
 
 /// Atomically write an AppConfig to disk via a temporary file and rename.
@@ -192,7 +197,10 @@ pub fn backup_corrupted_file(config_path: &Path) -> Option<PathBuf> {
     }
 
     let parent = config_path.parent().unwrap_or_else(|| Path::new("."));
-    let stem = config_path.file_name().and_then(|s| s.to_str()).unwrap_or("config.json");
+    let stem = config_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("config.json");
 
     let now_epoch = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -348,7 +356,9 @@ pub fn repair_and_patch_value(user_val: &Value) -> Result<(AppConfig, Vec<String
         if matches!(m, "autoclicker" | "work") {
             default_obj.insert("active_mode".into(), Value::from(m));
         } else {
-            details.push(format!("active_mode '{m}' invalid; repaired to 'autoclicker'"));
+            details.push(format!(
+                "active_mode '{m}' invalid; repaired to 'autoclicker'"
+            ));
         }
     }
 
@@ -366,7 +376,9 @@ pub fn repair_and_patch_value(user_val: &Value) -> Result<(AppConfig, Vec<String
             if cps > 0.0 && cps <= 1000.0 && cps.is_finite() {
                 default_engine.insert("target_cps".into(), Value::from(cps));
             } else {
-                details.push(format!("engine.target_cps {cps} out of range; repaired to 10.0"));
+                details.push(format!(
+                    "engine.target_cps {cps} out of range; repaired to 10.0"
+                ));
             }
         } else if user_engine.contains_key("target_cps") || user_engine.contains_key("cps") {
             details.push("engine.target_cps invalid type; repaired to 10.0".into());
@@ -394,7 +406,9 @@ pub fn repair_and_patch_value(user_val: &Value) -> Result<(AppConfig, Vec<String
             if matches!(ct, "single" | "double" | "hold") {
                 default_engine.insert("click_type".into(), Value::from(ct));
             } else {
-                details.push(format!("engine.click_type '{ct}' invalid; repaired to 'single'"));
+                details.push(format!(
+                    "engine.click_type '{ct}' invalid; repaired to 'single'"
+                ));
             }
         }
         if let Some(pm) = user_engine.get("position_mode").and_then(Value::as_str) {
@@ -422,7 +436,10 @@ pub fn repair_and_patch_value(user_val: &Value) -> Result<(AppConfig, Vec<String
         if let Some(hi) = user_engine.get("hold_interval_ms").and_then(Value::as_u64) {
             default_engine.insert("hold_interval_ms".into(), Value::from(hi));
         }
-        if let Some(ri) = user_engine.get("repeat_interval_ms").and_then(Value::as_u64) {
+        if let Some(ri) = user_engine
+            .get("repeat_interval_ms")
+            .and_then(Value::as_u64)
+        {
             default_engine.insert("repeat_interval_ms".into(), Value::from(ri));
         }
         if let Some(sd) = user_engine.get("start_delay_ms").and_then(Value::as_u64) {
@@ -442,7 +459,7 @@ pub fn repair_and_patch_value(user_val: &Value) -> Result<(AppConfig, Vec<String
         }
         if let Some(tq) = user_engine.get("technique").and_then(Value::as_str) {
             let norm = crate::config::normalize_technique(tq);
-            if norm == "auto" && tq.trim().to_ascii_lowercase() != "auto" {
+            if norm == "auto" && !tq.trim().eq_ignore_ascii_case("auto") {
                 details.push(format!(
                     "engine.technique '{tq}' invalid; repaired to 'auto'"
                 ));
@@ -468,7 +485,10 @@ pub fn repair_and_patch_value(user_val: &Value) -> Result<(AppConfig, Vec<String
         if let Some(ms) = user_stop_ms {
             default_engine.insert("stop_duration_ms".into(), Value::from(ms));
         }
-        if let Some(unit) = user_engine.get("stop_duration_unit").and_then(Value::as_str) {
+        if let Some(unit) = user_engine
+            .get("stop_duration_unit")
+            .and_then(Value::as_str)
+        {
             default_engine.insert("stop_duration_unit".into(), Value::from(unit));
         }
         if let Some(st) = user_engine.get("stop_time_str").and_then(Value::as_str) {
@@ -504,17 +524,17 @@ pub fn repair_and_patch_value(user_val: &Value) -> Result<(AppConfig, Vec<String
                 .get("stop_time_str")
                 .and_then(Value::as_str)
                 .is_some_and(|s| !s.trim().is_empty());
-            let derived = crate::config::resolve_stop_mode(
-                "none",
-                ms,
-                if has_wallclock { 1 } else { 0 },
-            );
+            let derived =
+                crate::config::resolve_stop_mode("none", ms, if has_wallclock { 1 } else { 0 });
             default_engine.insert("stop_mode".into(), Value::from(derived));
         }
         if let Some(gl) = user_engine.get("gui_lock_ms").and_then(Value::as_u64) {
             default_engine.insert("gui_lock_ms".into(), Value::from(gl));
         }
-        if let Some(deb) = user_engine.get("hotkey_debounce_ms").and_then(Value::as_u64) {
+        if let Some(deb) = user_engine
+            .get("hotkey_debounce_ms")
+            .and_then(Value::as_u64)
+        {
             default_engine.insert("hotkey_debounce_ms".into(), Value::from(deb));
         }
         if let Some(pts) = user_engine.get("sequence_points").and_then(Value::as_array) {
@@ -524,7 +544,9 @@ pub fn repair_and_patch_value(user_val: &Value) -> Result<(AppConfig, Vec<String
 
     // 5. hotkeys
     if let (Some(default_hotkeys), Some(user_hotkeys)) = (
-        default_obj.get_mut("hotkeys").and_then(Value::as_object_mut),
+        default_obj
+            .get_mut("hotkeys")
+            .and_then(Value::as_object_mut),
         user_obj.get("hotkeys").and_then(Value::as_object),
     ) {
         let key_mappings = [
@@ -959,7 +981,10 @@ mod tests {
         let (recovered_cfg, action) = ensure_config_file(&config_file);
 
         match action {
-            SelfHealingAction::CorruptedAndRecovered { backup_path, restored_from_last_good } => {
+            SelfHealingAction::CorruptedAndRecovered {
+                backup_path,
+                restored_from_last_good,
+            } => {
                 assert!(backup_path.exists());
                 // No snapshot existed in this fresh dir -> factory default.
                 assert!(!restored_from_last_good);
@@ -984,11 +1009,17 @@ mod tests {
 
         let (cfg, action) = ensure_config_file(&config_file);
         match action {
-            SelfHealingAction::CorruptedAndRecovered { backup_path, restored_from_last_good } => {
+            SelfHealingAction::CorruptedAndRecovered {
+                backup_path,
+                restored_from_last_good,
+            } => {
                 assert!(backup_path.exists());
                 assert!(!restored_from_last_good);
             }
-            other => panic!("Expected CorruptedAndRecovered for empty file, got {:?}", other),
+            other => panic!(
+                "Expected CorruptedAndRecovered for empty file, got {:?}",
+                other
+            ),
         }
         assert_eq!(cfg.engine.target_cps, 10.0);
 
@@ -1085,14 +1116,17 @@ mod tests {
         assert_eq!(action, SelfHealingAction::LoadedExisting);
         assert_eq!(cfg.hotkeys.toggle, "F9");
         let snap = last_good_path(&config_file);
-        assert!(snap.exists(), "last_good snapshot must exist after clean parse");
+        assert!(
+            snap.exists(),
+            "last_good snapshot must exist after clean parse"
+        );
         #[cfg(target_os = "windows")]
         {
             use std::os::windows::ffi::OsStrExt;
+            use windows::core::PCWSTR;
             use windows::Win32::Storage::FileSystem::{
                 GetFileAttributesW, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_READONLY,
             };
-            use windows::core::PCWSTR;
             let wide: Vec<u16> = snap
                 .as_os_str()
                 .encode_wide()
@@ -1100,7 +1134,11 @@ mod tests {
                 .collect();
             let got = unsafe { GetFileAttributesW(PCWSTR::from_raw(wide.as_ptr())) };
             assert_ne!(got, u32::MAX, "snapshot attributes must be readable");
-            assert_ne!(got & FILE_ATTRIBUTE_READONLY.0, 0, "snapshot must be readonly-hardened");
+            assert_ne!(
+                got & FILE_ATTRIBUTE_READONLY.0,
+                0,
+                "snapshot must be readonly-hardened"
+            );
             assert_ne!(got & FILE_ATTRIBUTE_HIDDEN.0, 0, "snapshot must be hidden");
         }
 
@@ -1108,17 +1146,20 @@ mod tests {
         fs::write(&config_file, "{\"engine\": {\"target_cps\": 42.0}.").unwrap();
         let (recovered, action2) = ensure_config_file(&config_file);
         match action2 {
-            SelfHealingAction::CorruptedAndRecovered { backup_path, restored_from_last_good } => {
+            SelfHealingAction::CorruptedAndRecovered {
+                backup_path,
+                restored_from_last_good,
+            } => {
                 // Quarantine is the broken file, VISIBLE (no hardening).
                 assert!(backup_path.exists(), "quarantine must exist");
                 assert!(restored_from_last_good, "must restore LKG, not factory");
                 #[cfg(target_os = "windows")]
                 {
                     use std::os::windows::ffi::OsStrExt;
+                    use windows::core::PCWSTR;
                     use windows::Win32::Storage::FileSystem::{
                         GetFileAttributesW, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_READONLY,
                     };
-                    use windows::core::PCWSTR;
                     let wide: Vec<u16> = backup_path
                         .as_os_str()
                         .encode_wide()
@@ -1126,8 +1167,16 @@ mod tests {
                         .collect();
                     let got = unsafe { GetFileAttributesW(PCWSTR::from_raw(wide.as_ptr())) };
                     assert_ne!(got, u32::MAX, "quarantine attributes must be readable");
-                    assert_eq!(got & FILE_ATTRIBUTE_READONLY.0, 0, "quarantine must stay writable");
-                    assert_eq!(got & FILE_ATTRIBUTE_HIDDEN.0, 0, "quarantine must stay visible");
+                    assert_eq!(
+                        got & FILE_ATTRIBUTE_READONLY.0,
+                        0,
+                        "quarantine must stay writable"
+                    );
+                    assert_eq!(
+                        got & FILE_ATTRIBUTE_HIDDEN.0,
+                        0,
+                        "quarantine must stay visible"
+                    );
                 }
             }
             other => panic!("Expected CorruptedAndRecovered with LKG, got {:?}", other),
@@ -1147,8 +1196,14 @@ mod tests {
         fs::write(&config_file, "also broken...").unwrap();
         let (fallback, action3) = ensure_config_file(&config_file);
         match action3 {
-            SelfHealingAction::CorruptedAndRecovered { restored_from_last_good, .. } => {
-                assert!(!restored_from_last_good, "broken snapshot must not be trusted");
+            SelfHealingAction::CorruptedAndRecovered {
+                restored_from_last_good,
+                ..
+            } => {
+                assert!(
+                    !restored_from_last_good,
+                    "broken snapshot must not be trusted"
+                );
             }
             other => panic!("Expected factory fallback, got {:?}", other),
         }
@@ -1176,7 +1231,8 @@ mod tests {
     /// disk at all.
     #[test]
     fn clean_load_promotes_the_snapshot_once_per_change() {
-        let dir = std::env::temp_dir().join(format!("nanoclick_test_promote_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("nanoclick_test_promote_{}", std::process::id()));
         let config_file = dir.join("config.json");
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::create_dir_all(&dir);
@@ -1190,7 +1246,10 @@ mod tests {
         assert_eq!(action, SelfHealingAction::LoadedExisting);
         assert_eq!(cfg.engine.target_cps, 33.0);
         let snap = last_good_path(&config_file);
-        assert!(snap.exists(), "a clean parse must still create the snapshot");
+        assert!(
+            snap.exists(),
+            "a clean parse must still create the snapshot"
+        );
         let first = fs::metadata(&snap).unwrap().modified().unwrap();
 
         // 2. Two more reads of the SAME revision -> no disk write. NTFS has a
@@ -1212,7 +1271,10 @@ mod tests {
         let (cfg2, _) = ensure_config_file(&config_file);
         assert_eq!(cfg2.engine.target_cps, 44.0);
         let third = fs::metadata(&snap).unwrap().modified().unwrap();
-        assert_ne!(second, third, "a changed config must refresh the golden snapshot");
+        assert_ne!(
+            second, third,
+            "a changed config must refresh the golden snapshot"
+        );
         let snap_cfg: AppConfig =
             serde_json::from_str(&fs::read_to_string(&snap).unwrap()).unwrap();
         assert_eq!(snap_cfg.engine.target_cps, 44.0);
@@ -1222,7 +1284,8 @@ mod tests {
 
     #[test]
     fn repair_replaces_corrupted_field_and_preserves_valid_settings() {
-        let dir = std::env::temp_dir().join(format!("nanoclick_test_repair_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("nanoclick_test_repair_{}", std::process::id()));
         let config_file = dir.join("config.json");
         let _ = fs::create_dir_all(&dir);
 
@@ -1245,7 +1308,10 @@ mod tests {
         let (cfg, action) = ensure_config_file(&config_file);
 
         match action {
-            SelfHealingAction::RepairedAndPatched { backup_path, details } => {
+            SelfHealingAction::RepairedAndPatched {
+                backup_path,
+                details,
+            } => {
                 assert!(backup_path.exists());
                 assert!(!details.is_empty());
             }
@@ -1346,6 +1412,10 @@ mod tests {
         // Wall-clock guard only: repair is pure CPU work, machine load may spike
         // right after a from-scratch build (cold dylib pages, AV scan). The real
         // assertion is correctness above; this just catches 10x regressions.
-        assert!(elapsed.as_millis() < 150, "100 in-memory repairs took {:?}", elapsed);
+        assert!(
+            elapsed.as_millis() < 150,
+            "100 in-memory repairs took {:?}",
+            elapsed
+        );
     }
 }

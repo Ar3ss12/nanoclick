@@ -8,9 +8,10 @@
 use serde::{Deserialize, Serialize};
 
 /// Mouse button selector. Matches the 5 buttons supported by Win32 SendInput.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum MouseButton {
+    #[default]
     Left,
     Right,
     Middle,
@@ -29,12 +30,6 @@ impl MouseButton {
             MouseButton::X1 => "X1",
             MouseButton::X2 => "X2",
         }
-    }
-}
-
-impl Default for MouseButton {
-    fn default() -> Self {
-        MouseButton::Left
     }
 }
 

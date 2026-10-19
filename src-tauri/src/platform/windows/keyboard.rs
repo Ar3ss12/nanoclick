@@ -6,8 +6,8 @@ use crate::core::action::MouseButton;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_KEYBOARD, INPUT_MOUSE, KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
     MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
-    MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
-    MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, VIRTUAL_KEY,
+    MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
+    MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
 
@@ -15,6 +15,33 @@ use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
 pub fn set_cursor_pos(x: i32, y: i32) {
     unsafe {
         let _ = SetCursorPos(x, y);
+    }
+}
+
+/// Synthesize hardware relative mouse movement (MOUSEEVENTF_MOVE).
+/// Used by 3D games (DirectInput/RawInput) for camera view rotation and dispersion recoil.
+pub fn mouse_move_relative(dx: i32, dy: i32) {
+    if dx == 0 && dy == 0 {
+        return;
+    }
+    let input = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
+            mi: MOUSEINPUT {
+                dx,
+                dy,
+                mouseData: 0,
+                dwFlags: MOUSEEVENTF_MOVE,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    unsafe {
+        let _ = windows::Win32::UI::Input::KeyboardAndMouse::SendInput(
+            &[input],
+            std::mem::size_of::<INPUT>() as i32,
+        );
     }
 }
 

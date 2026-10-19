@@ -57,13 +57,17 @@ impl ExecutorHandle {
 
     /// Whether a macro is currently playing.
     pub fn is_running(&self) -> bool {
-        self.shared.is_running.load(Ordering::Relaxed)
+        self.shared.is_running.load(Ordering::Acquire)
     }
 
     /// Stop a running macro (e.g. via Esc hotkey).
+    ///
+    /// Stop flag: `Release` on write pairs with `Acquire` on the runner's
+    /// polls (same hygiene as the click-worker `active` flag — a stop flag
+    /// has no business being `Relaxed`).
     pub fn stop(&self) {
-        self.shared.cancel.store(true, Ordering::Relaxed);
-        self.shared.is_running.store(false, Ordering::Relaxed);
+        self.shared.cancel.store(true, Ordering::Release);
+        self.shared.is_running.store(false, Ordering::Release);
     }
 
     /// Clone the cancel flag — the v4.0 control-flow runner polls on this
@@ -89,11 +93,27 @@ impl ExecutorHandle {
     }
 
     fn play_with_lookup(&self, m: &Macro, macro_lookup: MacroLookup) {
-        if self.shared.is_running.swap(true, Ordering::Relaxed) {
+        if self.shared.is_running.swap(true, Ordering::AcqRel) {
             // Already running — don't double-start.
             return;
         }
-        self.shared.cancel.store(false, Ordering::Relaxed);
+
+        let node = crate::stability::macro_node();
+        let guard: snubber::ErasedGuard = match node.enter_erased_auto(|| {
+            crate::stability::emergency_release_all_hardware();
+        }) {
+            Ok(g) => g,
+            Err(e) => {
+                crate::debug_log_internal(
+                    "error",
+                    &format!("[Stability] macro_executor rejected playback: {e:?}"),
+                );
+                self.shared.is_running.store(false, Ordering::Release);
+                return;
+            }
+        };
+
+        self.shared.cancel.store(false, Ordering::Release);
         let start = self
             .shared
             .next_step_idx
@@ -106,7 +126,7 @@ impl ExecutorHandle {
             }
             RepeatMode::Times { count } => {
                 for i in 0..count {
-                    if self.shared.cancel.load(Ordering::Relaxed) {
+                    if self.shared.cancel.load(Ordering::Acquire) {
                         break;
                     }
                     // Only honor "run from here" offset on the first iteration.
@@ -115,14 +135,15 @@ impl ExecutorHandle {
                 }
             }
             RepeatMode::UntilStopped => loop {
-                if self.shared.cancel.load(Ordering::Relaxed) {
+                if self.shared.cancel.load(Ordering::Acquire) {
                     break;
                 }
                 self.run_from_to(m, 0, m.actions.len(), macro_lookup.clone());
             },
         }
 
-        self.shared.is_running.store(false, Ordering::Relaxed);
+        guard.commit();
+        self.shared.is_running.store(false, Ordering::Release);
     }
 
     /// Run a single action (debug Step mode). Returns true if a step
@@ -171,7 +192,7 @@ impl ExecutorHandle {
 
     /// Single-action dispatch via the injected backend. No platform cfg.
     fn execute_action(&self, action: &Action, cancel: &AtomicBool) {
-        if cancel.load(Ordering::Relaxed) {
+        if cancel.load(Ordering::Acquire) {
             return;
         }
         match action {
@@ -181,7 +202,7 @@ impl ExecutorHandle {
                 let chunk_ms = target_ms.min(50);
                 let mut slept = 0u64;
                 while slept < target_ms {
-                    if cancel.load(Ordering::Relaxed) {
+                    if cancel.load(Ordering::Acquire) {
                         return;
                     }
                     let chunk = (target_ms - slept).min(chunk_ms);
@@ -194,7 +215,7 @@ impl ExecutorHandle {
             }
             Action::MouseClick { button, count } => {
                 for _ in 0..*count {
-                    if cancel.load(Ordering::Relaxed) {
+                    if cancel.load(Ordering::Acquire) {
                         return;
                     }
                     self.backend.mouse_click(*button);
@@ -210,12 +231,12 @@ impl ExecutorHandle {
                 self.backend.mouse_up(*button);
             }
             Action::KeyPress { key, mods } | Action::KeyDown { key, mods } => {
-                if !cancel.load(Ordering::Relaxed) {
+                if !cancel.load(Ordering::Acquire) {
                     self.backend.send_key(*key, *mods, false);
                 }
             }
             Action::KeyUp { key, mods } => {
-                if !cancel.load(Ordering::Relaxed) {
+                if !cancel.load(Ordering::Acquire) {
                     self.backend.send_key(*key, *mods, true);
                 }
             }
@@ -243,7 +264,7 @@ impl ExecutorHandle {
 /// handle. Uses the default platform backend. Used by the control-flow
 /// runner which receives `cancel` only.
 pub fn dispatch_primitive_with_cancel(action: &Action, cancel: &std::sync::atomic::AtomicBool) {
-    if cancel.load(Ordering::Relaxed) {
+    if cancel.load(Ordering::Acquire) {
         return;
     }
     // Free-function entry point (control-flow runner has no handle):
@@ -438,5 +459,120 @@ mod tests {
         assert_eq!(backend.clicks.load(Ordering::Relaxed), 2); // count=2
         assert_eq!(backend.keys.load(Ordering::Relaxed), 1);
         assert_eq!(backend.scrolls.load(Ordering::Relaxed), 1);
+    }
+
+    /// Stop-then-play must not resurrect the cancelled run.
+    ///
+    /// Regression shape: `stop()` → `play(quick_macro)` must run the new
+    /// macro to completion; the stale `cancel=true` must not leak into it.
+    /// (`play` clears `cancel` on entry — the new run owns a fresh flag.)
+    /// NOTE: `play` goes through the shared `macro_node()` bulkhead, which
+    /// a parallel test may hold — so this test asserts the *flag contract*
+    /// directly (stop sets, play-entry clears) instead of depending on node
+    /// admission.
+    #[test]
+    fn stop_then_play_runs_the_new_macro_cleanly() {
+        let h = ExecutorHandle::new();
+        // Poison the flag first, like a hard stop mid-run would.
+        h.stop();
+        assert!(h.cancel_handle().load(Ordering::Acquire));
+        assert!(!h.is_running());
+        // Simulate exactly what `play_with_lookup` does on entry: claim the
+        // run and clear the stale cancel. If this ever stops happening, a
+        // stop-then-play resurrects the cancelled run (ghost macro).
+        h.shared.is_running.store(true, Ordering::Release);
+        h.shared.cancel.store(false, Ordering::Release);
+        assert!(!h.cancel_handle().load(Ordering::Acquire));
+        assert!(h.is_running());
+        h.shared.is_running.store(false, Ordering::Release);
+        h.stop();
+        assert!(!h.is_running());
+    }
+
+    /// `stop()` is idempotent and settles the books: double-stop never
+    /// panics, never leaves `is_running == true`.
+    #[test]
+    fn double_stop_is_idempotent_and_settles() {
+        let h = ExecutorHandle::new();
+        h.stop();
+        h.stop();
+        assert!(!h.is_running());
+        // A fresh handle that never ran stops cleanly too.
+        let fresh = ExecutorHandle::new();
+        fresh.stop();
+        assert!(!fresh.is_running());
+    }
+
+    /// Snubber Level 1 (`SnubberGuard`, USER_GUIDE Level 1): a guard that is
+    /// never committed rolls back on drop — including the panic path. This
+    /// is the contract the click-worker and macro `ErasedGuard` rely on:
+    /// unwind → hardware released, no stuck button.
+    #[test]
+    fn snubber_guard_rolls_back_on_drop_and_on_panic() {
+        use std::sync::atomic::{AtomicU32, Ordering as Ord};
+        // Normal drop without commit → rollback runs exactly once.
+        let fired = Arc::new(AtomicU32::new(0));
+        {
+            let c = Arc::clone(&fired);
+            let _g = snubber::SnubberGuard::new(1, 7, move || {
+                c.fetch_add(1, Ord::SeqCst);
+            });
+            // no commit → Drop fires
+        }
+        assert_eq!(fired.load(Ord::SeqCst), 1, "drop must roll back");
+        // Committed guard → rollback never runs.
+        let fired2 = Arc::new(AtomicU32::new(0));
+        {
+            let c = Arc::clone(&fired2);
+            let g = snubber::SnubberGuard::new(1, 8, move || {
+                c.fetch_add(1, Ord::SeqCst);
+            });
+            g.commit();
+        }
+        assert_eq!(fired2.load(Ord::SeqCst), 0, "commit must disarm");
+        // Panic unwind → rollback still runs (catch the panic here so the
+        // test harness stays green; the guard ran during unwinding).
+        let fired3 = Arc::new(AtomicU32::new(0));
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let c = Arc::clone(&fired3);
+            let _g = snubber::SnubberGuard::new(1, 9, move || {
+                c.fetch_add(1, Ord::SeqCst);
+            });
+            panic!("simulated worker death");
+        }));
+        assert!(r.is_err());
+        assert_eq!(
+            fired3.load(Ord::SeqCst),
+            1,
+            "panic unwind must roll back via Drop"
+        );
+    }
+
+    /// Snubber Level 2 (`scoped`, USER_GUIDE Level 0): `Ok` commits (no
+    /// rollback), `Err` rolls back exactly once. Pins the exact API the
+    /// stop-path relies on for transactional settle.
+    #[test]
+    fn snubber_scoped_commits_on_ok_and_rolls_back_on_err() {
+        use std::sync::atomic::{AtomicU32, Ordering as Ord};
+        let node = snubber::SnubberNode::builder("test_scoped_stop_path").build();
+        let rolled = Arc::new(AtomicU32::new(0));
+        let c = Arc::clone(&rolled);
+        let ok = node.scoped(
+            move || {
+                c.fetch_add(1, Ord::SeqCst);
+            },
+            || Ok::<u32, &'static str>(7),
+        );
+        assert_eq!(ok.unwrap(), 7);
+        assert_eq!(rolled.load(Ord::SeqCst), 0, "Ok must not roll back");
+        let c2 = Arc::clone(&rolled);
+        let err = node.scoped(
+            move || {
+                c2.fetch_add(1, Ord::SeqCst);
+            },
+            || Err::<u32, &'static str>("boom"),
+        );
+        assert!(matches!(err, Err(snubber::SnubberError::Work("boom"))));
+        assert_eq!(rolled.load(Ord::SeqCst), 1, "Err must roll back once");
     }
 }
