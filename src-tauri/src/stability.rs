@@ -3,7 +3,7 @@
 //! Transaction admission (bulkheads), failure classification (catastrophic
 //! vs. shedding), circuit breaking, scoped rollback execution, task
 //! steering (`TaskConduit` / `TaskHandle` / `Directive`) and cold
-//! diagnostics (`SnapshotV1`, `NodeRegistry`, `[DIAG 0x...]` lines).
+//! diagnostics (`SnapshotV1`, `NodeSet`, `[DIAG 0x...]` lines).
 //!
 //! Layering: `snubber` provides admission math, guard lifecycle and the
 //! 512 B snapshot codec. This file owns the node set, the worker
@@ -323,26 +323,26 @@ pub fn validate_click_invariants(
 }
 
 // ── 5. Poison-tolerant mutex access (delegates to `snubber::SafeLockExt`) ────
+
+/// Explicit-node lock: thin delegate over the core primitive.
 ///
-/// The local `safe_lock` free function and `SafeLockExt` trait are kept as
-/// thin shims over the `snubber` implementation so existing call sites keep
-/// compiling. New code: `use snubber::SafeLockExt; mutex.safe_lock(node)`.
-///
-/// Recovery semantic: poisoned mutex recovers via `into_inner()` and ticks
-/// one `poison_recoveries` on the bound node. The poison flag is sticky —
-/// each recovery on an already-poisoned mutex ticks again.
+/// Used by the click worker (`scheduler.rs`), which locks its config arcs
+/// against a run-local node instead of the shared click ledger.
+#[inline]
 pub fn safe_lock<'a, T>(mutex: &'a Mutex<T>, node: &SnubberNode) -> std::sync::MutexGuard<'a, T> {
     snubber::SafeLockExt::safe_lock(mutex, node)
 }
 
 /// Zero-arg poison-tolerant lock bound to the click worker ledger.
 ///
-/// The 98 hot-path call sites (`scheduler.rs`, hooks, recorder) cannot name
-/// a node per lock: they share one ledger (`click_node()`), the same node
-/// that owns the worker admission bulkhead. Recovery semantic (from
-/// `snubber::SafeLockExt`): poisoned mutex recovers via `into_inner()` and
-/// ticks one `poison_recoveries` on the click node. Explicit-node form stays
-/// available as `stability::safe_lock(&m, node)`.
+/// This trait is the official application facade over
+/// `snubber::SafeLockExt`: the 100+ hot-path call sites (`scheduler.rs`,
+/// hooks, recorder) cannot name a node per lock — they share one ledger
+/// (`click_node()`), the same node that owns the worker admission bulkhead.
+/// Recovery semantic (from the core): poisoned mutex recovers via
+/// `into_inner()` and ticks one `poison_recoveries` on the click node.
+/// The poison flag is sticky — each recovery on an already-poisoned
+/// mutex ticks again.
 pub trait SafeLockExt<T> {
     fn safe_lock(&self) -> std::sync::MutexGuard<'_, T>;
 }
@@ -391,36 +391,42 @@ pub fn total_system_faults() -> u64 {
         .sum()
 }
 
+// ── 6. Node aggregates (one static board, single registration site) ──────
+
+static ALL_NODES: OnceLock<snubber::NodeSet<'static>> = OnceLock::new();
+
+/// The single node board: all eight nodes registered once.
+///
+/// Every aggregate below reads this board — no per-call `register` lists,
+/// no second board type. Add a new node here and it appears in every
+/// ledger automatically.
+pub fn all_nodes() -> &'static snubber::NodeSet<'static> {
+    ALL_NODES.get_or_init(|| {
+        let mut set = snubber::NodeSet::new();
+        set.register("click_worker", click_node());
+        set.register("click_state", click_state_node());
+        set.register("hotkey_hook", hotkey_node());
+        set.register("macro_executor", macro_node());
+        set.register("file_watcher", watcher_node());
+        set.register("profile_switch", profile_switch_node());
+        set.register("satellite_window", satellite_node());
+        set.register("config_save", config_node());
+        set
+    })
+}
+
 /// Catastrophic fault sum across worker nodes (panic/timeout/process-died/
 /// implicit-drop). Non-zero means a code defect — inspect the fault ledger.
 /// Name kept (`total_nuclear_breaches`) for the status-bar/test call sites.
-/// Aggregation delegates to `snubber::NodeSet` (saturating in-memory sums).
 pub fn total_nuclear_breaches() -> u64 {
-    let mut set = snubber::NodeSet::new();
-    set.register("click_worker", click_node());
-    set.register("hotkey_hook", hotkey_node());
-    set.register("macro_executor", macro_node());
-    set.register("file_watcher", watcher_node());
-    set.register("profile_switch", profile_switch_node());
-    set.register("satellite_window", satellite_node());
-    set.register("config_save", config_node());
-    set.total_catastrophic_faults()
+    all_nodes().total_catastrophic_faults()
 }
 
 /// Shedding sum across worker nodes: `(bulkhead, rate, stale)` stay separate
 /// columns (saturated worker vs. input spam vs. stale epoch) — never merged.
 /// Name kept (`total_hydraulic_shed`) for the status-bar/test call sites.
-/// Aggregation delegates to `snubber::NodeSet` (saturating in-memory sums).
 pub fn total_hydraulic_shed() -> (u64, u64, u64) {
-    let mut set = snubber::NodeSet::new();
-    set.register("click_worker", click_node());
-    set.register("hotkey_hook", hotkey_node());
-    set.register("macro_executor", macro_node());
-    set.register("file_watcher", watcher_node());
-    set.register("profile_switch", profile_switch_node());
-    set.register("satellite_window", satellite_node());
-    set.register("config_save", config_node());
-    set.total_hydraulic_shed()
+    all_nodes().total_hydraulic_shed()
 }
 
 // ── 7. Cold persistence (snapshot files) + board + diagnosis ───────────────
@@ -527,8 +533,8 @@ pub fn boot_diagnosis_from_snapshots() {
 
 /// Explicit multi-node board for diagnostics (never a `static` inside
 /// the crate — the app builds it on demand from its own handles).
-pub fn board_all_nodes() -> snubber::NodeRegistry<'static> {
-    let mut board = snubber::NodeRegistry::new();
+pub fn board_all_nodes() -> snubber::NodeSet<'static> {
+    let mut board = snubber::NodeSet::new();
     board.register("click_worker", click_node());
     board.register("hotkey_hook", hotkey_node());
     board.register("macro_executor", macro_node());
@@ -578,7 +584,7 @@ mod tests {
         assert!(m.is_poisoned());
 
         // Recovery via into_inner, one poison_recoveries tick on the node.
-        let val = safe_lock(&m, &node);
+        let val = crate::stability::safe_lock(&*m, &node);
         assert_eq!(*val, 42);
         assert_eq!(node.stats().poison_recoveries, 1);
     }
@@ -647,7 +653,7 @@ mod tests {
         let back = snubber::SnapshotV1::decode(&bytes).expect("decode own frame");
         assert_eq!(back, snap);
         // Board: explicit handles, cold scan, silence when healthy.
-        let mut board = snubber::NodeRegistry::new();
+        let mut board = snubber::NodeSet::new();
         board.register("test_board_node", &node);
         assert_eq!(board.len(), 1);
         let hits = board.find_all_anomalies(&snubber::AnomalyPolicy::default());

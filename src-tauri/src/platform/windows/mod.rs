@@ -326,6 +326,8 @@ pub fn spawn_global_hotkey_listener(scheduler: Arc<ClickScheduler>, app_handle: 
     }
     GLOBAL_HOTKEY_STOP.store(false, Ordering::Release);
     thread::spawn(move || {
+        // Manual entry: the guard spans the hook thread lifetime (hours);
+        // scoped() would hide an hours-long bulkhead hold inside a closure.
         let guard = match crate::stability::hotkey_node().enter_auto(|| {
             shutdown_global_hotkey_listener();
         }) {
