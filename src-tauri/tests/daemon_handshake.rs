@@ -1,4 +1,4 @@
-//! Stage F gates: handshake daemon<->UI + kill-UI chaos.
+//! Stage F gates: handshake daemon<->UI + UI-disconnect resilience.
 //! The daemon is the truth; a dead UI never stops the engine.
 //! Heavy `#[ignore]` chaos (real process kill) lives here too.
 use nanoclick::daemon_client::call_addr_timeout;
@@ -60,13 +60,13 @@ fn unknown_cmd_is_err_not_panic() {
     let err = call_addr_timeout(&addr, "nope", serde_json::json!({}), Duration::from_secs(2));
     assert!(err.is_err(), "unknown cmd must be Err, never a hang");
 }
-/// Kill-UI chaos (mirror of snubber `chaos_dual_terminal`, fast version):
+/// UI-disconnect resilience (mirror of snubber `chaos_dual_terminal`, fast version):
 /// drop the client mid-session — the daemon state survives, the next UI
 /// reconnects and reads the same truth. `#[ignore]` = real-process variant
 /// below does the OS kill; this one proves the server side never depends on
 /// any single connection lifetime.
 #[test]
-fn kill_ui_connection_daemon_truth_survives() {
+fn ui_disconnect_daemon_truth_survives() {
     let state = Arc::new(DaemonState::new());
     let addr = spawn_test_server(Arc::clone(&state));
     // Client 1 connects, reads state, then "dies" (socket dropped).
@@ -85,12 +85,12 @@ fn kill_ui_connection_daemon_truth_survives() {
     .expect("reconnect must answer");
     assert_eq!(st["active"], serde_json::Value::from(false));
 }
-/// Real-process kill-UI chaos: spawn the daemon binary, kill the "UI"
+/// Real-process UI-disconnect chaos: spawn the daemon binary, drop the "UI"
 /// connection with a hard socket close under load, verify the engine never
 /// flinches. Ignored by default (spawns processes, ~5 s).
 #[test]
 #[ignore]
-fn chaos_kill_ui_process_engine_keeps_running() {
+fn chaos_ui_disconnect_engine_keeps_running() {
     let state = Arc::new(DaemonState::new());
     let addr = spawn_test_server(Arc::clone(&state));
     // Simulate 50 rapid UI deaths while hammering get_state.
