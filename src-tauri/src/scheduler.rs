@@ -2385,7 +2385,10 @@ pub(crate) fn outlier_interval_ns(
 /// Moments: E = 0, Var = p²/9 (uniform would be p²/3). NO ×√3 compensation
 /// on purpose: rescaling would push edges to ±p×1.73 and break the ±35% promise.
 pub(crate) fn bates_jitter_factor(rng: &mut impl rand::Rng, pct_frac: f64) -> f64 {
-    if pct_frac <= 0.0 {
+    // NaN guard: `NaN <= 0.0` is false, so the explicit `is_nan` comes
+    // first — NaN means "no jitter", never NaN out. Zero/negative likewise.
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
+    if !(pct_frac > 0.0) {
         return 0.0;
     }
     let r1 = rng.gen_range(-pct_frac..=pct_frac);
@@ -2437,7 +2440,9 @@ impl<'a, B: crate::platform::backend::InputBackend + ?Sized> Drop for MouseHoldG
 /// Bates B3 distribution: mean of 3 uniform draws in [mean - radius, mean + radius].
 /// Returns a value strictly bounded within [mean - radius, mean + radius] with Gaussian-like clustering.
 pub(crate) fn bates_b3(rng: &mut impl rand::Rng, mean: f64, radius: f64) -> f64 {
-    if radius <= 0.0 {
+    // NaN radius means "no spread" (same guard shape as bates_jitter_factor).
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
+    if !(radius > 0.0) {
         return mean;
     }
     let r1 = rng.gen_range(-radius..=radius);

@@ -380,18 +380,41 @@ fn reset_config_to_defaults(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<AppConfig, String> {
-    let prev = state.config_manager.load();
-    let app_cfg = state.config_manager.reset_to_defaults()?;
-    state
-        .scheduler
-        .set_config(config::Config::from(app_cfg.clone()));
+    // Same bulkhead as save_app_config: reset races the close-time flush.
+    // Scoped: commit on Ok, explicit abort on Err — no implicit-drop path.
+    let node = crate::stability::config_node();
+    let outcome: Result<(AppConfig, bool, bool, bool, bool), snubber::SnubberError<String>> = node
+        .scoped(
+            || {},
+            || -> Result<(AppConfig, bool, bool, bool, bool), String> {
+                let prev = state.config_manager.load();
+                let app_cfg = state.config_manager.reset_to_defaults()?;
+                state
+                    .scheduler
+                    .set_config(config::Config::from(app_cfg.clone()));
+                let ripple_changed = app_cfg.ui.visual_ripple != prev.ui.visual_ripple;
+                let want_ripple = app_cfg.ui.visual_ripple;
+                let hud_changed = app_cfg.ui.show_hud != prev.ui.show_hud;
+                let want_hud = app_cfg.ui.show_hud;
+                Ok((app_cfg, ripple_changed, want_ripple, hud_changed, want_hud))
+            },
+        );
+    let (app_cfg, ripple_changed, want_ripple, hud_changed, want_hud) = match outcome {
+        Ok(v) => v,
+        Err(snubber::SnubberError::Admission(_)) => {
+            return Err("config busy - retry".into());
+        }
+        Err(snubber::SnubberError::Work(e)) => return Err(e),
+    };
+    // Post-commit side-effects (bulkhead released): satellite toggles run
+    // through their own bulkhead and may block on WebView2 init.
     // Same lazy-WebView sync as save_app_config: defaults flip visual_ripple
     // (true) / show_hud (false), so create/destroy on demand.
-    if app_cfg.ui.visual_ripple != prev.ui.visual_ripple {
-        let _ = overlay::toggle_overlay(app.clone(), app_cfg.ui.visual_ripple);
+    if ripple_changed {
+        let _ = overlay::toggle_overlay(app.clone(), want_ripple);
     }
-    if app_cfg.ui.show_hud != prev.ui.show_hud {
-        let _ = toggle_hud_window(app.clone(), app_cfg.ui.show_hud);
+    if hud_changed {
+        let _ = toggle_hud_window(app.clone(), want_hud);
     }
     Ok(app_cfg)
 }
@@ -917,12 +940,31 @@ pub(crate) fn toggle_hud_from_tray(app: &AppHandle) {
     let Some(state) = app.try_state::<AppState>() else {
         return;
     };
-    let mut cfg = state.config_manager.load();
-    let show = !cfg.ui.show_hud;
-    cfg.ui.show_hud = show;
-    if let Err(e) = state.config_manager.save(&cfg) {
-        debug_log_internal("warn", &format!("[Tray] HUD setting not persisted: {e}"));
-    }
+    // Same bulkhead as save_app_config: the tray writes behind the page's
+    // back, so a parallel save must not interleave. Scoped: commit on Ok,
+    // explicit abort on Err.
+    let node = crate::stability::config_node();
+    let outcome: Result<bool, snubber::SnubberError<String>> = node.scoped(
+        || {},
+        || -> Result<bool, String> {
+            let mut cfg = state.config_manager.load();
+            let show = !cfg.ui.show_hud;
+            cfg.ui.show_hud = show;
+            state.config_manager.save(&cfg)?;
+            Ok(show)
+        },
+    );
+    let show = match outcome {
+        Ok(v) => v,
+        Err(snubber::SnubberError::Admission(_)) => {
+            report_tray_action(app, "Settings busy — try again in a second");
+            return;
+        }
+        Err(snubber::SnubberError::Work(e)) => {
+            debug_log_internal("warn", &format!("[Tray] HUD setting not persisted: {e}"));
+            return;
+        }
+    };
     let applied = main_window_visible(app);
     if applied {
         let _ = toggle_hud_window(app.clone(), show);
@@ -959,13 +1001,39 @@ pub(crate) fn apply_mode_toggle(app: &AppHandle) -> String {
     let Some(state) = app.try_state::<AppState>() else {
         return "autoclicker".into();
     };
-    // The scheduler emits `status-update` itself, so a live page follows along.
-    let new_mode = state.scheduler.toggle_mode(Some(app));
-    let mut cfg = state.config_manager.load();
-    cfg.active_mode = new_mode.clone();
-    if let Err(e) = state.config_manager.save(&cfg) {
-        debug_log_internal("warn", &format!("[Tray] mode not persisted: {e}"));
-    }
+    // Same bulkhead: the mode flip persists one field — never under a save.
+    // Scoped: commit on Ok, explicit abort on Err.
+    let node = crate::stability::config_node();
+    let outcome: Result<String, snubber::SnubberError<String>> = node.scoped(
+        || {},
+        || -> Result<String, String> {
+            // The scheduler emits `status-update` itself, so a live page follows along.
+            let new_mode = state.scheduler.toggle_mode(Some(app));
+            let mut cfg = state.config_manager.load();
+            cfg.active_mode = new_mode.clone();
+            state.config_manager.save(&cfg)?;
+            Ok(new_mode)
+        },
+    );
+    let new_mode = match outcome {
+        Ok(v) => v,
+        Err(snubber::SnubberError::Admission(_)) => {
+            report_tray_action(app, "Settings busy — try again in a second");
+            if state.scheduler.is_autoclicker_mode() {
+                "autoclicker".to_string()
+            } else {
+                "work".to_string()
+            }
+        }
+        Err(snubber::SnubberError::Work(e)) => {
+            debug_log_internal("warn", &format!("[Tray] mode not persisted: {e}"));
+            if state.scheduler.is_autoclicker_mode() {
+                "autoclicker".to_string()
+            } else {
+                "work".to_string()
+            }
+        }
+    };
     debug_log_internal("info", &format!("[Tray] mode toggled -> {new_mode}"));
     new_mode
 }
@@ -1209,13 +1277,32 @@ fn persist_window_visibility(app: &AppHandle, visible: bool) {
     let Some(state) = app.try_state::<AppState>() else {
         return;
     };
-    let mut cfg = state.config_manager.load();
-    if cfg.ui.window_was_visible == visible {
-        return;
-    }
-    cfg.ui.window_was_visible = visible;
-    if let Err(e) = state.config_manager.save(&cfg) {
-        debug_log_internal("warn", &format!("[Tray] window state not persisted: {e}"));
+    // Bulkhead with skip-on-busy: the in-memory flag above is already correct,
+    // and the next transition (or the next save_app_config, which stamps the
+    // same field from the live window) will persist it. Losing this race must
+    // never block the tray pump. Scoped: commit on Ok, explicit abort on Err.
+    let node = crate::stability::config_node();
+    let outcome: Result<bool, snubber::SnubberError<String>> = node.scoped(
+        || {},
+        || -> Result<bool, String> {
+            let mut cfg = state.config_manager.load();
+            if cfg.ui.window_was_visible == visible {
+                return Ok(false);
+            }
+            cfg.ui.window_was_visible = visible;
+            state.config_manager.save(&cfg)?;
+            Ok(true)
+        },
+    );
+    let changed = match outcome {
+        Ok(v) => v,
+        Err(snubber::SnubberError::Admission(_)) => return,
+        Err(snubber::SnubberError::Work(e)) => {
+            debug_log_internal("warn", &format!("[Tray] window state not persisted: {e}"));
+            return;
+        }
+    };
+    if !changed {
         return;
     }
     // Marked inside `save()` — no manual call needed.
