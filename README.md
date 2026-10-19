@@ -4,7 +4,7 @@
 
 Built with **Tauri 2 + Rust + vanilla JS**. No Electron, no bundler, no bloat: the production installer is **~2.3 MB**, the portable binary **~5.2 MB**.
 
-![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue) ![Version](https://img.shields.io/badge/version-1.3.0-brightgreen) ![Tests](https://img.shields.io/badge/tests-396%2F396-brightgreen) ![i18n](https://img.shields.io/badge/i18n-UA%20%7C%20RU%20%7C%20EN-blue) ![Tauri](https://img.shields.io/badge/Tauri-2.x-FFC131) ![Rust](https://img.shields.io/badge/rust-stable--msvc-DEA584)
+![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue) ![Version](https://img.shields.io/badge/version-1.3.0-brightgreen) ![Tests](https://img.shields.io/badge/tests-456%2F456-brightgreen) ![i18n](https://img.shields.io/badge/i18n-UA%20%7C%20RU%20%7C%20EN-blue) ![Tauri](https://img.shields.io/badge/Tauri-2.x-FFC131) ![Rust](https://img.shields.io/badge/rust-stable--msvc-DEA584)
 
 ---
 
@@ -145,8 +145,8 @@ left alone. The new JSON is parsed *before* it is written, because a malformed
 ```bash
 cd src-tauri
 cargo test --release -j 1 -- --skip physical_
-# → 306 passed; 0 failed (7 `physical_` tests filtered out; measured 2026-10-14, release profile)
-# Full run incl. integration: 306 lib + 95 integration = 401 green (measured 2026-10-14, release profile)
+# → 352 passed; 0 failed (7 `physical_` tests filtered out; measured 2026-10-19, release profile)
+# Full run incl. integration: 352 lib + 3 daemon_handshake + 101 test_assets = 456 green (measured 2026-10-19, release profile)
 ```
 
 The test suite covers:
