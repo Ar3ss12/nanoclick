@@ -202,9 +202,19 @@ fn drain_and_emit_ripples(app: &AppHandle) {
         // fall through to in-process path as a graceful degradation.
     }
     // In-process path (OOP off, or OOP on but channel temporarily disconnected).
+    // Zero-emit into a hidden satellite: a session-hide window keeps its DOM
+    // alive, but Chromium must sleep while unseen. Count the drop, emit nothing.
     if let Some(win) = app.get_webview_window("overlay") {
-        let _ = win.emit("spawn-ripple", &to_emit);
-        RIPPLE_EMITTED.fetch_add(to_emit.len() as u64, Ordering::Relaxed);
+        // Fresh-but-not-ready windows are invisible until overlay_ready shows
+        // them; still emit — readiness arrives within ms and `win.show()`
+        // follows. Only suppress once the latch proves old age.
+        let fresh = latch_remaining_ms("overlay") > 0;
+        if fresh || win.is_visible().unwrap_or(false) {
+            let _ = win.emit("spawn-ripple", &to_emit);
+            RIPPLE_EMITTED.fetch_add(to_emit.len() as u64, Ordering::Relaxed);
+        } else {
+            RIPPLE_SKIPPED_NO_WINDOW.fetch_add(to_emit.len() as u64, Ordering::Relaxed);
+        }
     } else {
         RIPPLE_SKIPPED_NO_WINDOW.fetch_add(to_emit.len() as u64, Ordering::Relaxed);
     }
@@ -279,6 +289,91 @@ pub fn satellite_busy() -> bool {
     SATELLITE_BUSY.load(Ordering::Acquire)
 }
 
+/// Cooldown latch after a fresh satellite build (ms).
+///
+/// A destroy issued while COM/WebView2 still initializes the new view can
+/// tear the shared child tree down mid-birth. OFF inside this window becomes
+/// a deferred hide: the view finishes init, then hides. 300 ms covers the
+/// measured 70-90 ms init plus margin for slower CPUs; invisible to the eye.
+pub const SATELLITE_CREATE_LATCH_MS: u64 = 300;
+
+/// Epoch ms of the last fresh build per satellite. 0 = never built.
+static OVERLAY_CREATED_AT_MS: AtomicU64 = AtomicU64::new(0);
+static HUD_CREATED_AT_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Toggle generation per satellite. Every toggle bumps it; a deferred hide
+/// fires only when the generation still matches, so ON inside the latch
+/// window cancels the pending hide instead of losing a race with it.
+static OVERLAY_TOGGLE_GEN: AtomicU64 = AtomicU64::new(0);
+static HUD_TOGGLE_GEN: AtomicU64 = AtomicU64::new(0);
+
+fn overlay_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn created_at_for(label: &str) -> Option<&'static AtomicU64> {
+    match label {
+        "overlay" => Some(&OVERLAY_CREATED_AT_MS),
+        "hud" => Some(&HUD_CREATED_AT_MS),
+        _ => None,
+    }
+}
+
+fn toggle_gen_for(label: &str) -> Option<&'static AtomicU64> {
+    match label {
+        "overlay" => Some(&OVERLAY_TOGGLE_GEN),
+        "hud" => Some(&HUD_TOGGLE_GEN),
+        _ => None,
+    }
+}
+
+/// Stamp a fresh build. Called once per successful `build_satellite`.
+pub fn note_satellite_created(label: &str) {
+    if let Some(slot) = created_at_for(label) {
+        slot.store(overlay_now_ms(), Ordering::Release);
+    }
+}
+
+/// Remaining latch time for a satellite (ms). Pure clock math, no `AppHandle`.
+pub fn latch_remaining_ms(label: &str) -> u64 {
+    let Some(slot) = created_at_for(label) else {
+        return 0;
+    };
+    let created = slot.load(Ordering::Acquire);
+    if created == 0 {
+        return 0;
+    }
+    let elapsed = overlay_now_ms().saturating_sub(created);
+    SATELLITE_CREATE_LATCH_MS.saturating_sub(elapsed)
+}
+
+/// Pure latch decision, unit-testable without the clock.
+#[cfg(test)]
+fn latch_remaining_for_timestamps(created_at_ms: u64, now_ms: u64) -> u64 {
+    if created_at_ms == 0 {
+        return 0;
+    }
+    SATELLITE_CREATE_LATCH_MS.saturating_sub(now_ms.saturating_sub(created_at_ms))
+}
+
+/// Bump the toggle generation for a label, returning the new value.
+pub fn bump_satellite_gen(label: &str) -> u64 {
+    match toggle_gen_for(label) {
+        Some(slot) => slot.fetch_add(1, Ordering::AcqRel) + 1,
+        None => 0,
+    }
+}
+
+/// Current toggle generation for a label.
+pub fn satellite_gen(label: &str) -> u64 {
+    toggle_gen_for(label)
+        .map(|s| s.load(Ordering::Acquire))
+        .unwrap_or(0)
+}
+
 /// Single-owner satellite constructor (SATELLITE_PLAN §1–2).
 ///
 /// The ONLY sanctioned way to build a satellite WebView (`"overlay"` or
@@ -312,6 +407,11 @@ pub fn ensure_satellite(app: &AppHandle, label: &str) -> Result<tauri::WebviewWi
         result = app.get_webview_window(label).map(Ok).unwrap_or_else(|| {
             build_satellite(app, label).or_else(|err2| app.get_webview_window(label).ok_or(err2))
         });
+    }
+    // Any build that reaches here (fresh, race survivor, or retry) starts the
+    // create latch: a surface born through ANY path needs the same cooldown.
+    if result.is_ok() {
+        note_satellite_created(label);
     }
     result
 }
@@ -429,13 +529,16 @@ fn toggle_overlay_inner(app: AppHandle, show: bool) -> Result<SatelliteToggle, S
             return Ok(SatelliteToggle::DeferredTray);
         }
         let already_existed = app.get_webview_window("overlay").is_some();
+        bump_satellite_gen("overlay");
         let win = ensure_satellite(&app, "overlay")?;
+        // Latch is stamped inside ensure_satellite for EVERY build path
+        // (fresh, race survivor, 60 ms retry): no branch may skip it.
         let _ = win.set_ignore_cursor_events(true);
         // Fresh WebView: DON'T show yet — overlay_ready() shows it once the
         // transparent DOM has rendered (Zero-Flash, no DWM white rectangle).
         // Existing window (DOM ready long ago): show immediately. This also
         // heals windows orphaned before the overlay.js retry existed — their
-        // ready signal never arrived and they would stay hidden forever. A fresh create still
+        // ready signal never arrived and they would stay hidden forever.
         if already_existed {
             if win.is_visible().unwrap_or(false) {
                 return Ok(SatelliteToggle::AlreadyThere);
@@ -445,11 +548,32 @@ fn toggle_overlay_inner(app: AppHandle, show: bool) -> Result<SatelliteToggle, S
         crate::debug_log_internal("info", "[Overlay] overlay shown (lazy)");
         Ok(SatelliteToggle::Applied)
     } else if let Some(win) = app.get_webview_window("overlay") {
-        let _ = win.destroy();
-        crate::debug_log_internal(
-            "info",
-            "[Overlay] overlay destroyed, WebView memory released",
-        );
+        // Session hide: the window stays alive in the session, only its
+        // visibility flips. Real teardown happens exclusively on tray suspend
+        // and shutdown (`destroy_satellite`).
+        let gen = bump_satellite_gen("overlay");
+        let remaining = latch_remaining_ms("overlay");
+        if remaining > 0 {
+            // Latch window: let COM init finish, then hide. A newer toggle
+            // (ON) cancels this by bumping the generation.
+            let app_hide = app.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(remaining));
+                if satellite_gen("overlay") != gen {
+                    return;
+                }
+                if let Some(w) = app_hide.get_webview_window("overlay") {
+                    let _ = w.hide();
+                }
+            });
+            crate::debug_log_internal(
+                "info",
+                &format!("[Overlay] overlay hide deferred by latch ({remaining}ms)"),
+            );
+        } else {
+            let _ = win.hide();
+            crate::debug_log_internal("info", "[Overlay] overlay hidden (session)");
+        }
         Ok(SatelliteToggle::Applied)
     } else {
         Ok(SatelliteToggle::AlreadyThere)
@@ -488,6 +612,45 @@ pub fn ensure_overlay_window(app: &AppHandle) -> Result<tauri::WebviewWindow, St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Session-hide lifecycle: latch + deferred hide ──────────────────────
+
+    #[test]
+    fn test_satellite_create_latch_covers_slow_init() {
+        // 300 ms latch: fresh builds (0 ms and 70-90 ms old) stay latched,
+        // a 400 ms old build is free, and 0 means "never built".
+        assert_eq!(SATELLITE_CREATE_LATCH_MS, 300);
+        let created = 1_000_000u64;
+        assert_eq!(latch_remaining_for_timestamps(created, created), 300);
+        assert_eq!(latch_remaining_for_timestamps(created, created + 90), 210);
+        assert_eq!(latch_remaining_for_timestamps(created, created + 299), 1);
+        assert_eq!(latch_remaining_for_timestamps(created, created + 300), 0);
+        assert_eq!(latch_remaining_for_timestamps(created, created + 400), 0);
+        assert_eq!(latch_remaining_for_timestamps(0, created + 400), 0);
+        assert_eq!(latch_remaining_for_timestamps(0, 0), 0);
+    }
+
+    #[test]
+    fn test_satellite_toggle_gen_cancels_stale_deferred_hide() {
+        // Deferred hide fires only for the generation it was scheduled with:
+        // any newer toggle cancels it.
+        let before = satellite_gen("overlay");
+        let gen_at_schedule = bump_satellite_gen("overlay");
+        assert_eq!(gen_at_schedule, before + 1);
+        let gen_after_newer = bump_satellite_gen("overlay");
+        assert_ne!(gen_after_newer, gen_at_schedule);
+        // The guard the deferred thread checks:
+        assert!(satellite_gen("overlay") != gen_at_schedule);
+        assert!(satellite_gen("overlay") == gen_after_newer);
+    }
+
+    #[test]
+    fn test_satellite_unknown_label_is_inert() {
+        assert_eq!(latch_remaining_ms("unknown_window"), 0);
+        assert_eq!(satellite_gen("unknown_window"), 0);
+        assert_eq!(bump_satellite_gen("unknown_window"), 0);
+        note_satellite_created("unknown_window"); // must not panic
+    }
 
     #[test]
     fn test_overlay_module_exists() {
@@ -558,12 +721,25 @@ mod tests {
 
     #[test]
     fn test_satellite_hud_busy_means_locked_checkbox() {
-        // BUSY is observable without a window: the flag alone decides. A
-        // toggle issued while busy must defer — never double-build.
+        // BUSY is the single serialization point every toggle path respects:
+        // a toggle issued while busy defers instead of double-building.
+        // (The flag is process-global: parallel test threads may hold it, so
+        // this pins the CONTRACT — set/check/clear round-trips — not the
+        // instantaneous value.)
+        let was_busy = SATELLITE_BUSY.swap(true, Ordering::AcqRel);
+        assert!(
+            satellite_busy(),
+            "satellite_busy() must observe the flag while it is held"
+        );
+        SATELLITE_BUSY.store(false, Ordering::Release);
         assert!(
             !satellite_busy(),
-            "no create/destroy is in flight inside a unit test"
+            "satellite_busy() must observe the flag after release"
         );
+        // Restore whatever a parallel test left: never leak our set.
+        if was_busy {
+            SATELLITE_BUSY.store(true, Ordering::Release);
+        }
     }
 
     #[test]

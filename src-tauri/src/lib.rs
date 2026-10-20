@@ -1677,10 +1677,10 @@ pub(crate) fn suspend_main_webview_to_tray(app: &AppHandle) {
         );
         let app_main = app.clone();
         let _ = app.run_on_main_thread(move || {
+            // Satellite teardown through the single-owner facade (SATELLITE_PLAN §1):
+            // no direct `WebviewWindowBuilder` / `destroy` outside overlay.rs.
             for label in ["hud", "overlay"] {
-                if let Some(w) = app_main.get_webview_window(label) {
-                    let _ = w.destroy();
-                }
+                crate::overlay::destroy_satellite(&app_main, label);
             }
             if let Some(w) = app_main.get_webview_window("main") {
                 let _ = w.destroy();
@@ -1828,7 +1828,10 @@ fn toggle_hud_window_inner(app: AppHandle, show: bool) -> Result<overlay::Satell
             return Ok(SatelliteToggle::DeferredTray);
         }
         let already_existed = app.get_webview_window("hud").is_some();
+        overlay::bump_satellite_gen("hud");
         overlay::ensure_satellite(&app, "hud")?;
+        // Latch is stamped inside ensure_satellite for EVERY build path
+        // (fresh, race survivor, 60 ms retry): no branch may skip it.
         if let Some(win) = app.get_webview_window("hud") {
             let _ = win.set_ignore_cursor_events(true);
             // Fresh WebView: hidden until hud_ready() fires after DOM render
@@ -1844,11 +1847,32 @@ fn toggle_hud_window_inner(app: AppHandle, show: bool) -> Result<overlay::Satell
             Ok(SatelliteToggle::DeferredTray)
         }
     } else if let Some(win) = app.get_webview_window("hud") {
-        let _ = win.destroy();
-        debug_log_internal(
-            "info",
-            "[HUD] hud window destroyed, WebView memory released",
-        );
+        // Session hide: the window stays alive in the session, only its
+        // visibility flips. Real teardown happens exclusively on tray suspend
+        // and shutdown (`destroy_satellite`).
+        let gen = overlay::bump_satellite_gen("hud");
+        let remaining = overlay::latch_remaining_ms("hud");
+        if remaining > 0 {
+            // Latch window: let COM init finish, then hide. A newer toggle
+            // (ON) cancels this by bumping the generation.
+            let app_hide = app.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(remaining));
+                if overlay::satellite_gen("hud") != gen {
+                    return;
+                }
+                if let Some(w) = app_hide.get_webview_window("hud") {
+                    let _ = w.hide();
+                }
+            });
+            debug_log_internal(
+                "info",
+                &format!("[HUD] hud hide deferred by latch ({remaining}ms)"),
+            );
+        } else {
+            let _ = win.hide();
+            debug_log_internal("info", "[HUD] hud window hidden (session)");
+        }
         Ok(SatelliteToggle::Applied)
     } else {
         Ok(SatelliteToggle::AlreadyThere)

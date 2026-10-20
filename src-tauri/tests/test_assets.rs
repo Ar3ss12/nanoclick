@@ -619,9 +619,26 @@ fn test_lazy_windows_built_at_runtime() {
         overlay_src.contains("overlay.html"),
         "overlay.rs must load overlay.html at runtime"
     );
+    // Session-hide lifecycle: toggle OFF hides the window in-session, real
+    // teardown lives exclusively on tray suspend and shutdown via
+    // `destroy_satellite`. No toggle path may destroy mid-session.
+    let toggle_overlay = overlay_src
+        .find("fn toggle_overlay_inner")
+        .map(|s| &overlay_src[s..])
+        .expect("toggle_overlay_inner must exist");
+    let toggle_overlay = &toggle_overlay[..toggle_overlay.find("fn build_hud_window").unwrap_or(toggle_overlay.len())];
     assert!(
-        overlay_src.contains("win.destroy()") || overlay_src.contains("win.destroy"),
-        "toggle_overlay(false) must destroy the WebView to free RAM"
+        toggle_overlay.contains(".hide()"),
+        "toggle_overlay(false) must hide the window (session-hide)"
+    );
+    assert!(
+        !toggle_overlay.contains(".destroy()"),
+        "toggle_overlay must never destroy: teardown belongs to tray/shutdown"
+    );
+    assert!(
+        overlay_src.contains("SATELLITE_CREATE_LATCH_MS")
+            && overlay_src.contains("latch_remaining_ms"),
+        "fresh builds must be guarded by the create latch"
     );
 
     let lib_src = include_str!("../src/lib.rs");
@@ -3773,6 +3790,33 @@ fn test_secondary_windows_never_outlive_the_main_window() {
         toggle_hud.contains("main_window_visible"),
         "toggle_hud_window must not create a standalone HUD"
     );
+    // Session-hide lifecycle: OFF hides in-session, teardown is tray/shutdown only.
+    let toggle_hud_inner = section(
+        lib_src,
+        "fn toggle_hud_window_inner",
+        "fn ensure_hud_window",
+    );
+    assert!(
+        toggle_hud_inner.contains(".hide()"),
+        "toggle_hud_window(false) must hide the window (session-hide)"
+    );
+    // The toggle body hides (rollback closure above it still destroys on abort).
+    // NOTE: the section starts at the FIRST `} else if ... "hud"` in the file
+    // (the `DeferredTray` fallback of the show branch), so assert on the inner
+    // fn: it must contain a hide and no destroy AFTER its own else-if line.
+    let off_at = toggle_hud_inner
+        .find("} else if let Some(win) = app.get_webview_window(\"hud\") {")
+        .expect("HUD OFF branch must exist");
+    let hud_off_branch = &toggle_hud_inner[off_at..];
+    assert!(
+        hud_off_branch.contains(".hide()") && !hud_off_branch.contains(".destroy()"),
+        "the HUD OFF branch must hide, never destroy"
+    );
+    assert!(
+        lib_src.contains("crate::overlay::destroy_satellite(&app_main, label)")
+            || lib_src.contains("crate::overlay::destroy_satellite(app, label)"),
+        "tray suspend must tear satellites down through the single-owner facade"
+    );
     let show_secondary = section(
         lib_src,
         "fn show_secondary_windows",
@@ -6904,5 +6948,36 @@ fn test_graceful_shutdown_destroys_satellites_before_main_exit() {
     assert!(
         shut.contains("SHUTTING_DOWN.swap(true"),
         "shutdown_application must be re-entry safe"
+    );
+}
+
+/// Session-hide teardown contract: `destroy` is legitimate in exactly three
+/// places — tray suspend, shutdown, and the snubber abort rollback.
+/// Toggle bodies hide; they never destroy.
+#[test]
+fn test_satellite_destroy_lives_only_on_tray_shutdown_and_rollback() {
+    let overlay_src = include_str!("../src/overlay.rs");
+    let lib_src = include_str!("../src/lib.rs");
+
+    // Rollback (abort path) keeps its best-effort destroy.
+    assert!(
+        overlay_src.contains("pub fn rollback_satellite"),
+        "abort rollback must still clean half-built satellites"
+    );
+    // Tray suspend + shutdown go through the single-owner destructor.
+    for needle in [
+        "crate::overlay::destroy_satellite(&app_main, label)",
+        "crate::overlay::destroy_satellite(app, label)",
+    ] {
+        assert!(
+            lib_src.contains(needle),
+            "tray/shutdown teardown must use destroy_satellite ({needle})"
+        );
+    }
+    // Zero-emit gate: the drain worker never emits into a hidden satellite.
+    assert!(
+        overlay_src.contains("RIPPLE_SKIPPED_NO_WINDOW")
+            && overlay_src.contains("is_visible()"),
+        "drain_and_emit_ripples must skip hidden satellites instead of emitting"
     );
 }
