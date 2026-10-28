@@ -12,6 +12,13 @@ path = "src/main.rs"
 name = "nanoclick-daemon"
 path = "src/main-daemon.rs"
 
+# Harness=false: the bench prints its own ProfileHarness report cards, it has
+# no libtest assertions. `cargo test --lib` never builds bench targets, so the
+# unit-test gate is unaffected; run explicitly with `cargo bench --bench click_pacing`.
+[[bench]]
+name = "click_pacing"
+harness = false
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 tauri-codegen = { version = "2", features = [] }

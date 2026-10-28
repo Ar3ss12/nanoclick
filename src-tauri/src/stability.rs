@@ -290,6 +290,12 @@ pub fn click_node() -> &'static SnubberNode {
 /// - Telemetry only. A run that commits with 0 clicks injected did nothing,
 ///   which is exactly the "RUNNING but no clicks" class of bug; the floor is
 ///   one payload byte (one click), so the counter names it.
+/// - Wall bounds 0 BY MEASUREMENT (benches/click_pacing.rs, `cargo bench`):
+///   the per-click pacing compute measured ≤ 223 ns in the worst corridor
+///   (jitter 35%, outlier 0.10, 1 CPS), against a minimum legal interval of
+///   6.25 ms — the run wall is sleep-dominated, so any ceiling tight enough
+///   to catch a wedged run would fire on a legal 1-second sleep instead.
+///   The payload floor is the detector; walls would only be noise.
 /// - `trip_after_failures(0)`: an envelope miss is telemetry, never breaker
 ///   fuel (same law as the crate's `envelope_underflows` column).
 /// - Wide bulkhead: a preempting preset spawns the next run while the old one
@@ -555,7 +561,6 @@ fn maintenance_loop() {
     let mut last_cpu = process_cpu_ms();
     // One line per wedged body, not one per second.
     let mut reported_rollback_epoch = [u64::MAX; 3];
-    let mut memory_pressured = false;
     let mut tick: u64 = 0;
     loop {
         std::thread::sleep(Duration::from_millis(MAINTENANCE_TICK_MS));
@@ -576,11 +581,26 @@ fn maintenance_loop() {
                     CLICK_STALL_CEILING_MS,
                 );
                 click_node().note_pulse_stall(idle_ms);
+                // Only the two hard classes latch a refusal: `SleepBlocked`
+                // is an OS/EDR pause below the ceiling, and refusing Start on
+                // every slow driver callback would be worse than the stall.
+                let hard = matches!(kind, StallKind::CpuSpin | StallKind::DeadlockStall);
+                if hard && !ENGINE_STUCK.swap(true, Ordering::AcqRel) {
+                    crate::debug_log_internal(
+                        "error",
+                        &format!("[Stability] engine_stuck latched (kind={kind:?})"),
+                    );
+                }
                 crate::debug_log_internal(
                     "error",
                     &format!(
                         "[Stability] click_worker pulse stalled {idle_ms}ms (kind={kind:?}, cpu_delta={cpu_delta}ms)"
                     ),
+                );
+            } else if ENGINE_STUCK.swap(false, Ordering::AcqRel) {
+                crate::debug_log_internal(
+                    "warn",
+                    "[Stability] engine_stuck cleared — click_worker pulse landed again",
                 );
             }
         }
@@ -607,7 +627,7 @@ fn maintenance_loop() {
         }
 
         // ── 1 Hz: rollback bodies + memory ─────────────────────────────
-        if tick % 5 == 0 {
+        if tick.is_multiple_of(5) {
             let watched = [
                 ("click_worker", click_node()),
                 ("macro_executor", macro_node()),
@@ -628,12 +648,29 @@ fn maintenance_loop() {
                 }
             }
 
+            // ── Release latch: a rollback body may still hold hardware ──
+            // Sampled from the phase mirror (atomics only), not from the log
+            // path above: a body that finished between reads must clear the
+            // latch on this very tick, or Start stays refused forever.
+            let phase = click_node().rollback_phase();
+            let release_pending = phase.active && phase.elapsed_ms > ROLLBACK_BUDGET_MS;
+            if release_pending != ROLLBACK_PENDING.load(Ordering::Acquire) {
+                ROLLBACK_PENDING.store(release_pending, Ordering::Release);
+                crate::debug_log_internal(
+                    if release_pending { "error" } else { "warn" },
+                    &format!(
+                        "[Stability] release_pending -> {release_pending} (elapsed={}ms budget={}ms)",
+                        phase.elapsed_ms, ROLLBACK_BUDGET_MS
+                    ),
+                );
+            }
+
             if let Some(used_kb) = process_rss_kb() {
                 let verdict = click_node().note_memory_kb(used_kb);
-                if verdict.is_pressured() != memory_pressured {
-                    memory_pressured = verdict.is_pressured();
+                let level = memory_level(verdict);
+                if MEMORY_LEVEL.swap(level, Ordering::AcqRel) != level {
                     crate::debug_log_internal(
-                        "warn",
+                        if verdict.is_hard() { "error" } else { "warn" },
                         &format!(
                             "[Stability] memory {} — rss={}kb soft={}kb hard={}kb",
                             verdict.code(),
@@ -647,9 +684,173 @@ fn maintenance_loop() {
         }
 
         // ── 30 s: keep the cold snapshot files close to live ──────────
-        if tick % 150 == 0 {
+        if tick.is_multiple_of(150) {
             flush_all_snapshots(SNAPSHOT_GENERATION);
         }
+    }
+}
+
+// ── 2d. Reaction policy: an observation becomes a refusal ─────────────────
+// P1 taught the maintenance tick to *see* a wedged rollback body, a frozen
+// pulse and memory pressure — and every verdict ended in a log line while a
+// Start press still armed hardware. The latches below are the whole reaction
+// surface. They are lock-free on purpose: `start_refusal()` sits on the
+// toggle path (hotkey/hook thread) and must never take the node lock.
+
+/// A rollback body has been running past `ROLLBACK_BUDGET_MS`. That body may
+/// be mid-`SendInput` on a held button, so a new run would race the release.
+static ROLLBACK_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// The click-worker pulse is frozen in a hard class (`CpuSpin` /
+/// `DeadlockStall`). Latched by the maintenance tick, cleared when the pulse
+/// lands again or when the user stops the run explicitly (see
+/// `clear_engine_stuck`).
+static ENGINE_STUCK: AtomicBool = AtomicBool::new(false);
+
+/// Last memory verdict, as a rank so it fits one atomic.
+static MEMORY_LEVEL: AtomicU64 = AtomicU64::new(LEVEL_OK);
+const LEVEL_OK: u64 = 0;
+const LEVEL_SOFT: u64 = 1;
+const LEVEL_HARD: u64 = 2;
+
+/// Rank one crate verdict. `Soft` and `Hard` stay distinct: the node refuses
+/// admissions at `Soft` too, but they mean different operator actions.
+fn memory_level(verdict: MemoryVerdict) -> u64 {
+    if verdict.is_hard() {
+        LEVEL_HARD
+    } else if verdict.is_pressured() {
+        LEVEL_SOFT
+    } else {
+        LEVEL_OK
+    }
+}
+
+/// Stability verdicts for the poll surfaces (`get_status`, daemon frames).
+/// Live `status-update` frames carry the override text instead (see
+/// [`status_text_override`]), so they keep their existing shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct StabilityStatus {
+    /// A rollback body overran its budget and has not returned yet.
+    pub release_pending: bool,
+    /// The worker pulse is frozen in a hard stall class.
+    pub engine_stuck: bool,
+    /// `"ok"` / `"soft"` / `"hard"` — `MemoryVerdict::code()` of the last RSS
+    /// sample.
+    pub memory: &'static str,
+    /// Catastrophic faults (panic/timeout/process-died/implicit drop).
+    pub catastrophic_faults: u64,
+    /// Shedding columns, kept separate: `(bulkhead, rate, stale)`.
+    pub shed_bulkhead: u64,
+    pub shed_rate: u64,
+    pub shed_stale: u64,
+}
+
+fn memory_code(level: u64) -> &'static str {
+    match level {
+        LEVEL_HARD => "hard",
+        LEVEL_SOFT => "soft",
+        _ => "ok",
+    }
+}
+
+/// Pure refusal matrix (unit-tested without touching the latches).
+fn refusal_from(release_pending: bool, engine_stuck: bool, memory: u64) -> Option<&'static str> {
+    if release_pending {
+        return Some("release_pending");
+    }
+    if engine_stuck {
+        return Some("engine_stuck");
+    }
+    match memory {
+        LEVEL_HARD => Some("memory_hard"),
+        LEVEL_SOFT => Some("memory_soft"),
+        _ => None,
+    }
+}
+
+/// Pure label matrix (the texts the page shows for a latch).
+fn label_from(release_pending: bool, engine_stuck: bool, memory: u64) -> Option<&'static str> {
+    if release_pending {
+        return Some("RELEASE_PENDING");
+    }
+    if engine_stuck {
+        return Some("ENGINE_STUCK");
+    }
+    match memory {
+        LEVEL_HARD => Some("MEMORY_HARD"),
+        LEVEL_SOFT => Some("MEMORY_PRESSURE"),
+        _ => None,
+    }
+}
+
+/// Pure override matrix. Only `RUNNING` is replaced: `IDLE` is already the
+/// truth for a stopped clicker, and labels like `LIMIT` / `BREAKER OPEN`
+/// carry the run outcome, not engine health.
+fn override_from(
+    current: &str,
+    release_pending: bool,
+    engine_stuck: bool,
+    memory: u64,
+) -> Option<&'static str> {
+    if current != "RUNNING" {
+        return None;
+    }
+    label_from(release_pending, engine_stuck, memory)
+}
+
+/// Why a Start must be refused right now, or `None`.
+///
+/// Order is severity, not age: an unfinished release outranks a stuck engine
+/// (the release owns the hardware), and both outrank memory pressure.
+pub fn start_refusal() -> Option<&'static str> {
+    refusal_from(
+        ROLLBACK_PENDING.load(Ordering::Acquire),
+        ENGINE_STUCK.load(Ordering::Acquire),
+        MEMORY_LEVEL.load(Ordering::Acquire),
+    )
+}
+
+/// Status text a surface must show INSTEAD of the click loop's own text.
+pub fn status_text_override(current: &str) -> Option<&'static str> {
+    override_from(
+        current,
+        ROLLBACK_PENDING.load(Ordering::Acquire),
+        ENGINE_STUCK.load(Ordering::Acquire),
+        MEMORY_LEVEL.load(Ordering::Acquire),
+    )
+}
+
+/// Label for a refused start, usable when there is no run to override
+/// (the page button, the tray toast). Same texts as the `RUNNING` override.
+pub fn refusal_text() -> Option<&'static str> {
+    label_from(
+        ROLLBACK_PENDING.load(Ordering::Acquire),
+        ENGINE_STUCK.load(Ordering::Acquire),
+        MEMORY_LEVEL.load(Ordering::Acquire),
+    )
+}
+
+/// Snapshot of every reaction latch (one board read for the aggregates).
+pub fn status() -> StabilityStatus {
+    let (shed_bulkhead, shed_rate, shed_stale) = total_hydraulic_shed();
+    StabilityStatus {
+        release_pending: ROLLBACK_PENDING.load(Ordering::Acquire),
+        engine_stuck: ENGINE_STUCK.load(Ordering::Acquire),
+        memory: memory_code(MEMORY_LEVEL.load(Ordering::Acquire)),
+        catastrophic_faults: total_nuclear_breaches(),
+        shed_bulkhead,
+        shed_rate,
+        shed_stale,
+    }
+}
+
+/// Explicit Stop is the user's acknowledgement of a wedged run: the state
+/// machine is back at Idle and the next Start mints a fresh worker, so the
+/// latch must not outlive the run. Without this, an engine that wedged once
+/// could never be started again in the same session.
+pub fn clear_engine_stuck() {
+    if ENGINE_STUCK.swap(false, Ordering::AcqRel) {
+        crate::debug_log_internal("warn", "[Stability] engine_stuck cleared by explicit stop");
     }
 }
 
@@ -904,9 +1105,12 @@ pub fn cold_snapshot_path() -> std::path::PathBuf {
 /// generation seam (`snapshot_v1_in`) is 1 today: one engine per process.
 pub const SNAPSHOT_GENERATION: u64 = 1;
 
+/// A `.snub` frame owner: its name and the constructor of its node.
+pub type SnapshotNodeEntry = (&'static str, fn() -> &'static SnubberNode);
+
 /// Every node that owns a `.snub` frame, in one place: flush, diagnosis and
 /// the diagnostics board all iterate this table, so a new node is added once.
-pub const SNAPSHOT_NODES: [(&str, fn() -> &'static SnubberNode); 9] = [
+pub const SNAPSHOT_NODES: [SnapshotNodeEntry; 9] = [
     ("click_worker", click_node),
     ("click_state", click_state_node),
     ("click_run", click_run_node),
@@ -1035,9 +1239,17 @@ fn snapshot_pairs() -> Vec<(&'static str, SnapshotV1)> {
 
 /// Exit hook: flush final frames, then write the triage artifact.
 ///
-/// `nanoclick_triage.txt` holds, per node, the crate's `write_triage` card
-/// plus the `SnapshotDiff` against the boot baseline — a real file, not a
-/// promise in a plan document. Cold path: once per process exit.
+/// `nanoclick_triage.txt` holds a header (schema, app version, generation,
+/// wall clock) plus, per node, the crate's `write_triage` card and the
+/// `SnapshotDiff` against the boot baseline — a real file, not a promise in
+/// a plan document. The previous triage is kept one write back as
+/// `nanoclick_triage.prev.txt`: a run that crashes BETWEEN rotate and write
+/// leaves the last good file readable, and a triage from two exits ago is
+/// archaeology, not evidence. Cold path: once per process exit.
+///
+/// The `.snub` frames themselves need no extra versioning on this side: the
+/// crate stamps `SNUB` + `SNAPSHOT_VERSION` into every 512 B frame and
+/// refuses anything else as `BadVersion` / `BadCrc` on read.
 pub fn shutdown_snapshot_cycle() {
     flush_all_snapshots(SNAPSHOT_GENERATION);
     let baseline = BOARD_BASELINE
@@ -1046,7 +1258,7 @@ pub fn shutdown_snapshot_cycle() {
         .map(|g| g.clone())
         .unwrap_or_default();
     let current = snapshot_pairs();
-    let mut out = String::with_capacity(4096);
+    let mut out = triage_header();
     for (name, snap) in &current {
         let _ = snubber::write_triage(&mut out, name, snap);
         if let Some((_, before)) = baseline.iter().find(|(n, _)| n == name) {
@@ -1058,6 +1270,7 @@ pub fn shutdown_snapshot_cycle() {
         out.push('\n');
     }
     let path = triage_path();
+    rotate_triage(&path);
     match std::fs::write(&path, out.as_bytes()) {
         Ok(()) => crate::debug_log_internal(
             "warn",
@@ -1067,6 +1280,39 @@ pub fn shutdown_snapshot_cycle() {
             "warn",
             &format!("[Stability] triage write failed ({}): {e}", path.display()),
         ),
+    }
+}
+
+/// Triage artifact schema version. Bump when the file layout changes in a
+/// way a reader must know about (today: header + per-node cards + diffs).
+pub const TRIAGE_SCHEMA_VERSION: u32 = 1;
+
+/// First lines of the triage file. Pinned numbers only: app version, the
+/// crate's snapshot schema, our generation and the wall clock (unix seconds,
+/// no chrono dependency).
+fn triage_header() -> String {
+    let unix_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!(
+        "nanoclick triage schema v{TRIAGE_SCHEMA_VERSION}\n\
+         app={} snapshot_schema={} generation={SNAPSHOT_GENERATION} written_unix={unix_secs}\n\n",
+        env!("CARGO_PKG_VERSION"),
+        snubber::SNAPSHOT_VERSION,
+    )
+}
+
+/// One-backup rotation: current -> `.prev.txt`, overwriting any stale backup.
+/// Best effort — a failed rotation must not stop the fresh write.
+fn rotate_triage(path: &std::path::Path) {
+    let prev = path.with_extension("prev.txt");
+    let _ = std::fs::remove_file(&prev);
+    if std::fs::rename(path, &prev).is_ok() {
+        crate::debug_log_internal(
+            "warn",
+            &format!("[Stability] previous triage kept: {}", prev.display()),
+        );
     }
 }
 
@@ -1087,6 +1333,90 @@ pub fn board_all_nodes() -> snubber::NodeSet<'static> {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn test_refusal_precedence_release_engine_memory() {
+        // No latch -> Start allowed.
+        assert_eq!(refusal_from(false, false, LEVEL_OK), None);
+        // The node refuses admissions at Soft too, so a Start would only
+        // produce a dead run — refuse it, but name Soft separately from Hard.
+        assert_eq!(refusal_from(false, false, LEVEL_SOFT), Some("memory_soft"));
+        assert_eq!(refusal_from(false, false, LEVEL_HARD), Some("memory_hard"));
+        // Engine stall outranks memory pressure.
+        assert_eq!(refusal_from(false, true, LEVEL_HARD), Some("engine_stuck"));
+        // An unfinished release outranks everything: it owns the hardware.
+        assert_eq!(
+            refusal_from(true, true, LEVEL_HARD),
+            Some("release_pending")
+        );
+    }
+
+    #[test]
+    fn test_status_text_override_only_touches_running() {
+        assert_eq!(override_from("RUNNING", false, false, LEVEL_OK), None);
+        assert_eq!(
+            override_from("RUNNING", true, false, LEVEL_OK),
+            Some("RELEASE_PENDING")
+        );
+        assert_eq!(
+            override_from("RUNNING", false, true, LEVEL_OK),
+            Some("ENGINE_STUCK")
+        );
+        assert_eq!(
+            override_from("RUNNING", false, false, LEVEL_SOFT),
+            Some("MEMORY_PRESSURE")
+        );
+        assert_eq!(
+            override_from("RUNNING", false, false, LEVEL_HARD),
+            Some("MEMORY_HARD")
+        );
+        // Outcome labels pass through: the override must not swallow them.
+        assert_eq!(override_from("IDLE", true, true, LEVEL_HARD), None);
+        assert_eq!(override_from("LIMIT", true, true, LEVEL_HARD), None);
+    }
+
+    #[test]
+    fn test_memory_verdict_maps_to_three_distinct_levels() {
+        assert_eq!(memory_level(MemoryVerdict::Ok), LEVEL_OK);
+        assert_eq!(memory_level(MemoryVerdict::Soft), LEVEL_SOFT);
+        assert_eq!(memory_level(MemoryVerdict::Hard), LEVEL_HARD);
+        assert_eq!(memory_code(LEVEL_OK), "ok");
+        assert_eq!(memory_code(LEVEL_SOFT), "soft");
+        assert_eq!(memory_code(LEVEL_HARD), "hard");
+    }
+
+    #[test]
+    fn test_triage_header_pins_versions_and_generation() {
+        let h = triage_header();
+        assert!(h.starts_with(&format!("nanoclick triage schema v{TRIAGE_SCHEMA_VERSION}\n")));
+        assert!(h.contains(&format!("app={}", env!("CARGO_PKG_VERSION"))));
+        assert!(h.contains(&format!("snapshot_schema={}", snubber::SNAPSHOT_VERSION)));
+        assert!(h.contains(&format!("generation={SNAPSHOT_GENERATION}")));
+        assert!(h.contains("written_unix="));
+    }
+
+    #[test]
+    fn test_triage_rotation_keeps_one_backup() {
+        let unique = std::process::id();
+        let path = std::env::temp_dir().join(format!("nanoclick_triage_test_{unique}.txt"));
+        let prev = path.with_extension("prev.txt");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&prev);
+        // No current file: rotation is a no-op, nothing appears.
+        rotate_triage(&path);
+        assert!(!prev.exists());
+        // One current file: it moves to .prev.txt and the current slot is free.
+        std::fs::write(&path, b"older").unwrap();
+        rotate_triage(&path);
+        assert!(!path.exists());
+        assert_eq!(std::fs::read(&prev).unwrap(), b"older");
+        // A stale backup is replaced, not duplicated.
+        std::fs::write(&path, b"newer").unwrap();
+        rotate_triage(&path);
+        assert_eq!(std::fs::read(&prev).unwrap(), b"newer");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&prev);
+    }
 
     #[test]
     fn test_invariants_pass_on_valid_inputs() {

@@ -128,6 +128,7 @@ pub fn handle_request(state: &DaemonState, req: &IpcRequest) -> IpcResponse {
                     "rollback_active": rollback_active,
                     "rollback_elapsed_ms": rollback_elapsed_ms,
                     "rollback_budget_ms": crate::stability::ROLLBACK_BUDGET_MS,
+                    "stability": crate::stability::status(),
                 }),
             )
         }
@@ -166,13 +167,21 @@ fn s_start(state: &DaemonState) -> Result<String, String> {
 }
 fn push_status_now(state: &DaemonState) {
     let s = &state.scheduler;
+    // Same engine-health labels as the in-process path (`status_and_hud_emit`):
+    // a RUNNING frame over a wedged or draining engine is a lie.
+    let status_text = if s.is_active() {
+        crate::stability::status_text_override("RUNNING").unwrap_or("RUNNING")
+    } else {
+        "IDLE"
+    };
     let ev = DaemonEvent::new(
         EVENT_STATUS_UPDATE,
         serde_json::json!({
             "active": s.is_active(),
             "mode": if s.is_autoclicker_mode() { "autoclicker" } else { "work" },
             "clicks_done": s.get_clicks_done(),
-            "status_text": if s.is_active() { "RUNNING" } else { "IDLE" },
+            "status_text": status_text,
+            "stability": crate::stability::status(),
         }),
     );
     state.broadcast(&ev);

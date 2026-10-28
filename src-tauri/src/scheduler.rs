@@ -331,6 +331,11 @@ pub enum ToggleOutcome {
     BlockedByTyping,
     /// Start refused: an accepted toggle happened moments ago (fast double tap).
     BlockedByDebounce,
+    /// Start refused by the stability layer: a rollback body is still
+    /// releasing hardware, the click engine is latched as stuck, or memory is
+    /// over its soft/hard mark. The exact reason is
+    /// `stability::start_refusal()`; stopping is never refused.
+    BlockedByStability,
 }
 
 /// Gate order for one toggle press. This is the *only* place where the rules
@@ -841,6 +846,16 @@ impl ClickScheduler {
                 toggle_diag_report("veto=toggle_typing_guard");
                 return mode_str.into();
             }
+            ToggleOutcome::BlockedByStability => {
+                // Not produced by `decide_toggle` (the gate lives in the
+                // apply point, `set_active`); kept exhaustive so a future
+                // gate order cannot fall through to a blind inversion.
+                toggle_diag_report(format!(
+                    "veto=toggle_stability:{}",
+                    crate::stability::start_refusal().unwrap_or("unknown")
+                ));
+                return mode_str.into();
+            }
             ToggleOutcome::IgnoredWorkMode => {
                 toggle_diag_report("veto=toggle_work_mode");
                 self.set_active(false, app_handle);
@@ -918,6 +933,9 @@ impl ClickScheduler {
     /// and must NOT rotate the handle its successor polls — see the
     /// `worker_self_stop` note below instead.
     fn finish_stop(&self, reason: &str, app_handle: Option<&AppHandle>) {
+        // A stop is also the acknowledgement of a wedged run: the next Start
+        // needs a fresh worker, so the latch must not survive it.
+        crate::stability::clear_engine_stuck();
         crate::stability::send_worker_directive(snubber::Directive::Cancel("stop"));
         let handle = self.stop_event.safe_lock().clone();
         platform::signal_stop_event(handle);
@@ -960,6 +978,15 @@ impl ClickScheduler {
                     _ => "[Hotkeys] start blocked",
                 });
                 return outcome;
+            }
+
+            // Stability interlock: a release still in flight owns the
+            // hardware, a latched engine stall cannot run, and the node
+            // itself refuses admissions past the memory soft mark — starting
+            // here would only produce a dead run. Atomics only, no node lock.
+            if let Some(reason) = crate::stability::start_refusal() {
+                toggle_diag_push(format!("[Hotkeys] start blocked: {reason}"));
+                return ToggleOutcome::BlockedByStability;
             }
         }
 
@@ -1085,6 +1112,9 @@ impl ClickScheduler {
 
         // Instant physical hardware unstick
         crate::stability::emergency_release_all_hardware();
+        // Emergency stop is unconditional: the latch must not outlive it even
+        // when the state machine was already Idle (forced stop of a wedged run).
+        crate::stability::clear_engine_stuck();
 
         // Stop macro engine
         if let Some(exec) = crate::core::global() {
@@ -1426,6 +1456,13 @@ impl ClickScheduler {
                 toggle_diag_report(format!("preset {preset_id} start blocked: {outcome:?}"));
                 return outcome;
             }
+            // Same interlock as `set_active`, checked BEFORE the preset
+            // rewrites the run parameters: a refused start must leave the
+            // scheduler exactly as it found it.
+            if let Some(reason) = crate::stability::start_refusal() {
+                toggle_diag_report(format!("preset {preset_id} start blocked: {reason}"));
+                return ToggleOutcome::BlockedByStability;
+            }
 
             let target_preset = self
                 .presets
@@ -1501,6 +1538,11 @@ impl ClickScheduler {
         status_text: &str,
         active: bool,
     ) {
+        // Engine health outranks the loop's own label: a RUNNING clicker
+        // whose worker is wedged or whose hardware release is still in
+        // flight must not paint RUNNING. IDLE and outcome labels pass
+        // through untouched.
+        let status_text = crate::stability::status_text_override(status_text).unwrap_or(status_text);
         // Targeted emit: hud-clicks only to "hud" window.
         // app.emit() = broadcast to ALL windows → floods HUD IPC queue at high CPS.
         if let Some(hud) = app.get_webview_window("hud") {
@@ -2647,7 +2689,9 @@ pub(crate) fn calc_dynamic_hold_time(rng: &mut impl rand::Rng, target_interval_m
 
 /// Single click timing with human fatigue model (asymmetrical tail) and biological hesitation,
 /// which dynamically fades out at high CPS (>30..80 CPS) allowing full 160 CPS overdrive.
-pub(crate) fn calc_single_timing(
+/// `pub`: the `click_pacing` bench measures exactly this function; no other
+/// caller outside the crate exists.
+pub fn calc_single_timing(
     mut rng: &mut impl rand::Rng,
     target_interval_ms: f64,
     jitter_pct: f64,

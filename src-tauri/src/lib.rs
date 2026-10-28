@@ -30,6 +30,9 @@ mod recorder;
 pub mod satellite;
 mod scheduler;
 pub mod stability;
+// Narrow re-export for the `click_pacing` bench (see benches/): the pacing
+// math is public, the rest of the scheduler module stays private.
+pub use scheduler::calc_single_timing;
 mod stats_agg;
 mod status_sink;
 mod tauri_sink;
@@ -459,34 +462,57 @@ fn toggle_autoclicker(app_handle: AppHandle, state: State<'_, AppState>) -> bool
     if outcome != scheduler::ToggleOutcome::Start {
         // Stop and vetoed paths emit nothing by themselves (the click worker's
         // telemetry only exists during a live run), so the UI would freeze on
-        // its optimistic guess. Say what really happened.
-        state
-            .scheduler
-            .emit_status_now(&app_handle, if active { "RUNNING" } else { "IDLE" });
+        // its optimistic guess. Say what really happened. A stability veto
+        // names its own latch instead of a bare IDLE.
+        let text = match outcome {
+            scheduler::ToggleOutcome::BlockedByStability => {
+                crate::stability::refusal_text().unwrap_or("IDLE")
+            }
+            _ if active => "RUNNING",
+            _ => "IDLE",
+        };
+        state.scheduler.emit_status_now(&app_handle, text);
     }
     active
 }
 
+/// `get_status` payload: the clicker frame plus the stability verdicts.
+/// Flattened, so every existing field keeps its name and the page needs no
+/// change while `release_pending` / `engine_stuck` / `memory` become readable.
+#[derive(serde::Serialize)]
+struct StatusSnapshot {
+    #[serde(flatten)]
+    clicker: scheduler::StatusUpdate,
+    #[serde(flatten)]
+    stability: crate::stability::StabilityStatus,
+}
+
 #[tauri::command]
-fn get_status(state: State<'_, AppState>) -> scheduler::StatusUpdate {
+fn get_status(state: State<'_, AppState>) -> StatusSnapshot {
     let is_auto = state.scheduler.is_autoclicker_mode();
     let is_act = state.scheduler.is_active();
-    scheduler::StatusUpdate {
-        active: is_act,
-        mode: if is_auto {
-            "autoclicker".into()
-        } else {
-            "work".into()
+    let status_text = if !is_auto {
+        "WORK MODE (PAUSED)".to_string()
+    } else if is_act {
+        crate::stability::status_text_override("RUNNING")
+            .unwrap_or("RUNNING")
+            .to_string()
+    } else {
+        "IDLE".to_string()
+    };
+    StatusSnapshot {
+        clicker: scheduler::StatusUpdate {
+            active: is_act,
+            mode: if is_auto {
+                "autoclicker".into()
+            } else {
+                "work".into()
+            },
+            clicks_done: state.scheduler.get_clicks_done(),
+            cps: state.scheduler.get_config().cps,
+            status_text,
         },
-        clicks_done: state.scheduler.get_clicks_done(),
-        cps: state.scheduler.get_config().cps,
-        status_text: if !is_auto {
-            "WORK MODE (PAUSED)".into()
-        } else if is_act {
-            "RUNNING".into()
-        } else {
-            "IDLE".into()
-        },
+        stability: crate::stability::status(),
     }
 }
 
@@ -977,12 +1003,15 @@ pub(crate) fn toggle_clicking_from_tray(app: &AppHandle) {
         outcome,
         scheduler::ToggleOutcome::Start | scheduler::ToggleOutcome::Stop
     ) {
-        // Vetoed (Work Mode / typing guard): the clicker deliberately ignored
-        // the menu item. Tell the page, so it can explain itself with a toast
-        // instead of looking broken.
+        // Vetoed (Work Mode / typing guard / stability interlock): the clicker
+        // deliberately ignored the menu item. Tell the page, so it can explain
+        // itself with a toast instead of looking broken.
         let reason = match outcome {
             scheduler::ToggleOutcome::BlockedByTyping => "typing",
             scheduler::ToggleOutcome::IgnoredWorkMode => "work_mode",
+            scheduler::ToggleOutcome::BlockedByStability => {
+                crate::stability::start_refusal().unwrap_or("stability")
+            }
             _ => "blocked",
         };
         report_tray_action(
@@ -990,6 +1019,9 @@ pub(crate) fn toggle_clicking_from_tray(app: &AppHandle) {
             match reason {
                 "typing" => "Start blocked: you are typing",
                 "work_mode" => "Start blocked: Work Mode is active",
+                "release_pending" => "Start blocked: previous run is still releasing hardware",
+                "engine_stuck" => "Start blocked: click engine is stuck (stop, then start)",
+                "memory_soft" | "memory_hard" => "Start blocked: memory pressure",
                 _ => "Start blocked",
             },
         );
