@@ -18,6 +18,12 @@
 //! abort, kill, crash, a panic that escaped to the top — releases L/R/M with
 //! `SendInput` before the guardian exits.
 //!
+//! It must be reachable by nothing that kills the app: Task Manager's
+//! "End task" and `taskkill /T` walk live parent links, so the boot path
+//! starts a one-shot launcher (`--input-watchdog-detach`) that spawns the real
+//! guardian and exits immediately. The guardian's recorded parent is then a
+//! pid that no longer exists, and the tree kill cannot follow the chain to it.
+//!
 //! Cost: one blocked process per engine process (no window, no Tauri, no
 //! WebView — the flag is handled before `run()`).
 
@@ -48,17 +54,38 @@ mod imp {
     /// argv flag that turns this binary into a guardian host.
     pub const WATCHDOG_FLAG: &str = "--input-watchdog";
 
+    /// argv flag for the one-shot launcher hop. The launcher spawns the real
+    /// guardian and exits at once, so a tree kill cannot follow the parent
+    /// chain to the guardian.
+    pub const DETACH_FLAG: &str = "--input-watchdog-detach";
+
     /// `SYNCHRONIZE` (0x0010_0000) is all the guardian needs: wait on the
     /// process handle, wait on the event handle.
     const SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
     const INFINITE_WAIT: u32 = u32::MAX;
     const WAIT_OBJECT_0: u32 = 0;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    /// Start outside the app's job object when it is allowed: a kill-on-close
+    /// job would otherwise take the guardian down with the app.
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
     const CLEAN_EVENT_PREFIX: &str = r"Local\NanoClickCleanExit_";
+
+    /// Exit codes. The guardian is detached, so these are for tests and for a
+    /// future parent that wants to observe the rescue.
+    pub const EXIT_CLEAN: i32 = 0;
+    const EXIT_USAGE: i32 = 2;
+    /// Abnormal exit, all three releases accepted by `SendInput`.
+    pub const EXIT_INJECTED: i32 = 3;
+    /// Abnormal exit, at least one `SendInput` rejected (UIPI, no desktop).
+    pub const EXIT_INJECT_PARTIAL: i32 = 4;
 
     /// Test hook: set to anything to skip `SendInput` (the death path is still
     /// exercised end-to-end; only the injection is suppressed).
     const DRY_RUN_ENV: &str = "NANOCLICK_WATCHDOG_DRY_RUN";
+
+    /// L/R/M — the buttons a stalled clicker can leave down.
+    const RESCUE_BUTTONS: [MouseButton; 3] =
+        [MouseButton::Left, MouseButton::Right, MouseButton::Middle];
 
     static CLEAN_EVENT: OnceLock<isize> = OnceLock::new();
 
@@ -99,22 +126,67 @@ mod imp {
             return;
         }
         let _ = CLEAN_EVENT.set(handle);
-        let exe = match std::env::current_exe() {
-            Ok(e) => e,
-            Err(_) => return,
+        // The launcher hop: a failure here is a missing safety net, not a boot
+        // failure, so no retries and no error surface.
+        let _ = spawn_self(&[
+            WATCHDOG_FLAG.to_string(),
+            pid.to_string(),
+            name,
+            DETACH_FLAG.to_string(),
+        ]);
+    }
+
+    /// Spawn this same binary with `args`, no console attached, and — when the
+    /// enclosing job object allows it — outside that job, so a kill-on-close
+    /// job cannot take the guardian down with the app. `CreateProcess` fails
+    /// with `ERROR_ACCESS_DENIED` when the job forbids breakaway, hence the
+    /// fallback: a guardian inside the job still beats no guardian.
+    fn spawn_self(args: &[String]) -> std::io::Result<std::process::Child> {
+        let exe = std::env::current_exe()?;
+        let build = |flags: u32| {
+            let mut cmd = std::process::Command::new(&exe);
+            cmd.args(args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .creation_flags(flags);
+            cmd.spawn()
         };
-        // Detached, no console: the guardian must not outlive the parent by
-        // more than one syscall, so no retries — a failure here is a missing
-        // safety net, not a boot failure.
-        let _ = std::process::Command::new(exe)
-            .arg(WATCHDOG_FLAG)
-            .arg(pid.to_string())
-            .arg(&name)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn();
+        build(CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB).or_else(|_| build(CREATE_NO_WINDOW))
+    }
+
+    /// Detach hop: start the real guardian and return immediately. The
+    /// guardian's recorded parent then points at this process, which is already
+    /// gone by the time anything walks the tree.
+    fn spawn_orphan(pid: u32, name: &str) {
+        let _ = spawn_self(&[WATCHDOG_FLAG.to_string(), pid.to_string(), name.to_string()]);
+    }
+
+    /// What the argv says. Pure so the parsing is testable without spawning
+    /// anything (`Some(Err(()))` = the flag is present but the pid is not).
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Invocation {
+        pub pid: u32,
+        pub name: String,
+        pub detach: bool,
+    }
+
+    pub fn parse_invocation(args: &[String]) -> Option<Result<Invocation, ()>> {
+        let idx = args.iter().position(|a| a == WATCHDOG_FLAG)?;
+        let detach = args[idx..].iter().any(|a| a == DETACH_FLAG);
+        let positional: Vec<&String> = args[idx + 1..]
+            .iter()
+            .filter(|a| a.as_str() != DETACH_FLAG)
+            .collect();
+        let pid = match positional.first().and_then(|p| p.parse::<u32>().ok()) {
+            Some(p) => p,
+            None => return Some(Err(())),
+        };
+        let name = positional
+            .get(1)
+            .map(|s| (*s).clone())
+            .unwrap_or_else(|| clean_event_name(pid));
+        Some(Ok(Invocation { pid, name, detach }))
     }
 
     /// Mark this process as deliberately ending. The guardian sees the event
@@ -127,34 +199,45 @@ mod imp {
         }
     }
 
-    /// Entry point for `--input-watchdog <pid> [event]`. `Some(code)` = this
-    /// process is the guardian and must exit with `code`.
+    /// Entry point for `--input-watchdog <pid> [event] [--input-watchdog-detach]`.
+    /// `Some(code)` = this process is the guardian (or its launcher) and must
+    /// exit with `code`.
     pub fn run_if_watchdog(args: &[String]) -> Option<i32> {
-        let idx = args.iter().position(|a| a == WATCHDOG_FLAG)?;
-        let pid = match args.get(idx + 1).and_then(|p| p.parse::<u32>().ok()) {
-            Some(p) => p,
-            None => {
+        let invocation = match parse_invocation(args)? {
+            Ok(invocation) => invocation,
+            Err(()) => {
                 eprintln!("[guardian] usage: {WATCHDOG_FLAG} <parent-pid> [clean-event]");
-                return Some(2);
+                return Some(EXIT_USAGE);
             }
         };
-        let name = args
-            .get(idx + 2)
-            .cloned()
-            .unwrap_or_else(|| clean_event_name(pid));
-        let inject = std::env::var_os(DRY_RUN_ENV).is_none();
-        if watch(pid, &name) == ExitVerdict::Abnormal {
-            if inject {
-                release_buttons();
-            }
-            let _ = std::panic::catch_unwind(|| {
-                crate::debug_log_internal(
-                    "warn",
-                    &format!("[Guardian] parent pid {pid} ended abnormally (inject={inject})"),
-                );
-            });
+        let Invocation { pid, name, detach } = invocation;
+        if detach {
+            spawn_orphan(pid, &name);
+            return Some(EXIT_CLEAN);
         }
-        Some(0)
+        if watch(pid, &name) == ExitVerdict::Clean {
+            return Some(EXIT_CLEAN);
+        }
+        let inject = std::env::var_os(DRY_RUN_ENV).is_none();
+        let injected = if inject { release_buttons() } else { 0 };
+        let _ = std::panic::catch_unwind(|| {
+            crate::debug_log_internal(
+                "warn",
+                &format!(
+                    "[Guardian] parent pid {pid} ended abnormally (inject={inject}, \
+                     injected={injected}/{})",
+                    RESCUE_BUTTONS.len()
+                ),
+            );
+        });
+        if !inject {
+            return Some(EXIT_CLEAN);
+        }
+        Some(if injected as usize == RESCUE_BUTTONS.len() {
+            EXIT_INJECTED
+        } else {
+            EXIT_INJECT_PARTIAL
+        })
     }
 
     /// Block until `pid` ends, then classify the exit.
@@ -206,12 +289,14 @@ mod imp {
         signaled
     }
 
-    fn release_buttons() {
-        // Direct platform primitives: the guardian's own state is clean, and
-        // this path must not depend on the dead process's log/config globals.
-        crate::platform::windows::keyboard::mouse_up(MouseButton::Left);
-        crate::platform::windows::keyboard::mouse_up(MouseButton::Right);
-        crate::platform::windows::keyboard::mouse_up(MouseButton::Middle);
+    /// Release L/R/M and report how many events the OS actually inserted.
+    /// Direct platform primitives: the guardian's own state is clean, and this
+    /// path must not depend on the dead process's log/config globals.
+    fn release_buttons() -> u32 {
+        RESCUE_BUTTONS
+            .iter()
+            .filter(|button| crate::platform::windows::keyboard::mouse_up(**button))
+            .count() as u32
     }
 
     #[cfg(test)]
@@ -227,8 +312,61 @@ mod imp {
         fn guardian_rejects_missing_pid() {
             assert_eq!(
                 run_if_watchdog(&["nanoclick.exe".into(), WATCHDOG_FLAG.into()]),
-                Some(2)
+                Some(EXIT_USAGE)
             );
+        }
+
+        #[test]
+        fn invocation_parses_pid_name_and_detach() {
+            let args: Vec<String> = ["nanoclick.exe", WATCHDOG_FLAG, "4242"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            let inv = parse_invocation(&args)
+                .expect("flag present")
+                .expect("pid parses");
+            assert_eq!(inv.pid, 4242);
+            assert_eq!(inv.name, clean_event_name(4242));
+            assert!(!inv.detach);
+
+            let mut with_name = args.clone();
+            with_name.push(r"Local\NanoClickCleanExit_4242".into());
+            with_name.push(DETACH_FLAG.into());
+            let inv = parse_invocation(&with_name)
+                .expect("flag present")
+                .expect("pid parses");
+            assert_eq!(inv.name, r"Local\NanoClickCleanExit_4242");
+            assert!(
+                inv.detach,
+                "the detach flag must not be read as the event name"
+            );
+        }
+
+        #[test]
+        fn invocation_without_the_flag_is_not_ours() {
+            assert!(parse_invocation(&["nanoclick.exe".to_string()]).is_none());
+            let bad: Vec<String> = ["exe", WATCHDOG_FLAG, "not-a-pid"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            assert!(
+                parse_invocation(&bad).expect("flag present").is_err(),
+                "a non-numeric pid must be a usage error, not a default"
+            );
+        }
+
+        #[test]
+        fn detach_positionals_are_never_mistaken_for_the_name() {
+            // The launcher hop is spawned as `<pid> <name> --detach`; a
+            // regression that counted the flag as a positional would wait on
+            // the wrong event and inject on every clean exit.
+            let args: Vec<String> = [WATCHDOG_FLAG, "77", DETACH_FLAG]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            let inv = parse_invocation(&args).unwrap().unwrap();
+            assert_eq!(inv.name, clean_event_name(77));
+            assert!(inv.detach);
         }
 
         #[test]
@@ -339,11 +477,25 @@ mod imp {
 
 #[cfg(target_os = "windows")]
 pub use imp::{
-    clean_event_name, mark_clean_exit, run_if_watchdog, spawn_guardian, ExitVerdict, WATCHDOG_FLAG,
+    clean_event_name, mark_clean_exit, parse_invocation, run_if_watchdog, spawn_guardian,
+    ExitVerdict, Invocation, DETACH_FLAG, EXIT_CLEAN, EXIT_INJECTED, EXIT_INJECT_PARTIAL,
+    WATCHDOG_FLAG,
 };
 
 #[cfg(not(target_os = "windows"))]
 pub const WATCHDOG_FLAG: &str = "--input-watchdog";
+
+#[cfg(not(target_os = "windows"))]
+pub const DETACH_FLAG: &str = "--input-watchdog-detach";
+
+#[cfg(not(target_os = "windows"))]
+pub const EXIT_CLEAN: i32 = 0;
+
+#[cfg(not(target_os = "windows"))]
+pub const EXIT_INJECTED: i32 = 3;
+
+#[cfg(not(target_os = "windows"))]
+pub const EXIT_INJECT_PARTIAL: i32 = 4;
 
 #[cfg(not(target_os = "windows"))]
 pub fn spawn_guardian() {}

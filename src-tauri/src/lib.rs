@@ -546,7 +546,7 @@ struct LogItem {
 
 /// Path of the shared Rust/JS log. One definition so the panic hook and the
 /// regular logger can never drift to different files.
-fn log_file_path() -> std::path::PathBuf {
+pub fn log_file_path() -> std::path::PathBuf {
     std::env::temp_dir().join("nanoclick_web.log")
 }
 

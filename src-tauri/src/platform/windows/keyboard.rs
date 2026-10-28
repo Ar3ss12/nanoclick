@@ -57,8 +57,9 @@ pub fn mouse_down(button: MouseButton) {
     send_mouse_input(flags, data);
 }
 
-/// Release the mouse button.
-pub fn mouse_up(button: MouseButton) {
+/// Release the mouse button. Returns whether the OS accepted the event — the
+/// only observable proof that the out-of-process rescue actually injected.
+pub fn mouse_up(button: MouseButton) -> bool {
     let (flags, data) = match button {
         MouseButton::Left => (MOUSEEVENTF_LEFTUP, 0u32),
         MouseButton::Right => (MOUSEEVENTF_RIGHTUP, 0u32),
@@ -66,7 +67,7 @@ pub fn mouse_up(button: MouseButton) {
         MouseButton::X1 => (MOUSEEVENTF_XUP, 1u32),
         MouseButton::X2 => (MOUSEEVENTF_XUP, 2u32),
     };
-    send_mouse_input(flags, data);
+    send_mouse_input(flags, data)
 }
 
 /// Single click (press + release) of a button.
@@ -116,7 +117,7 @@ pub fn send_key(vk: u16, ctrl: bool, alt: bool, shift: bool, win: bool, is_up: b
 fn send_mouse_input(
     flags: windows::Win32::UI::Input::KeyboardAndMouse::MOUSE_EVENT_FLAGS,
     data: u32,
-) {
+) -> bool {
     let input = INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
@@ -131,10 +132,10 @@ fn send_mouse_input(
         },
     };
     unsafe {
-        let _ = windows::Win32::UI::Input::KeyboardAndMouse::SendInput(
+        windows::Win32::UI::Input::KeyboardAndMouse::SendInput(
             &[input],
             std::mem::size_of::<INPUT>() as i32,
-        );
+        ) == 1
     }
 }
 

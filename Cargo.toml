@@ -26,11 +26,12 @@ strip = true        # Strip all debug and symbol tables from binary
 # abort path was wrong — a green suite never proved abort behaviour, and the
 # guard rollback test in `core/executor.rs` was always running on unwind.
 #
-# MEASURED 2026-10-28, identical source, this profile (opt-level = "z", lto,
-# strip), two separate target dirs:
+# MEASURED 2026-10-28, two target dirs, same source except the panic setting:
 #   panic = "abort"   nanoclick.exe  5,616,128 B   nanoclick-daemon.exe 1,830,912 B
 #   panic = "unwind"  nanoclick.exe 10,028,032 B   nanoclick-daemon.exe 2,965,504 B
 # Unwind costs +78.6% / +62.0% — the old "abort saves 15-30%" figure was wrong
 # by a factor of two or more. Kept anyway: a permanently held mouse button is
 # worse than 4.4 MB of installer (3,601,320 B with NSIS, measured same day).
+# Later guardian work (counted SendInput + launcher hop) moved unwind to
+# 10,030,592 B / 2,967,552 B; the abort column was not rebuilt.
 
