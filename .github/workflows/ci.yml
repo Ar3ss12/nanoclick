@@ -23,10 +23,12 @@ jobs:
       run:
         shell: bash
     steps:
-      # The snubber dependency is a path dep (../../../snubber relative to
-      # src-tauri), so the workspace layout must be:
-      #   $GITHUB_WORKSPACE/nanoclick  <- this repo
-      #   $GITHUB_WORKSPACE/snubber    <- path dep, pinned to the released ref
+      # The snubber dependency is a path dep (`../../../snubber` relative to
+      # src-tauri). From $GITHUB_WORKSPACE/nanoclick/src-tauri that resolves
+      # TWO levels above $GITHUB_WORKSPACE (measured: first CI run died with
+      # "failed to read G:\snubber\Cargo.toml" — actions/checkout cannot
+      # check out outside the workspace), so after the checkout the tree is
+      # copied to the location the path dep actually resolves to.
       - name: Checkout nanoclick
         uses: actions/checkout@v4
         with:
@@ -40,6 +42,11 @@ jobs:
           # branch name and the git fetch dies (measured: first CI run).
           ref: 3849cf6527d557070310fae1ab883745caf1d4d0
           path: snubber
+
+      - name: Stage snubber where the path dependency resolves
+        run: |
+          rm -rf "$GITHUB_WORKSPACE/../snubber"
+          cp -r "$GITHUB_WORKSPACE/snubber" "$GITHUB_WORKSPACE/../snubber"
 
       - name: Install Node 20
         uses: actions/setup-node@v4
