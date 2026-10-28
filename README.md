@@ -67,14 +67,15 @@ What's new: [CHANGELOG.md](CHANGELOG.md).
 
 ## 🥊 Why NanoClick
 
-| | Typical clicker from download sites | AutoHotkey | **NanoClick** |
-|---|---|---|---|
-| What it is | closed `.exe` of unclear origin | a scripting language — you write the automation yourself | **open-source app with a full GUI** |
-| Size & idle RAM | Electron builds eat 150+ MB RAM; bundles of unknown content | small runtime, no GUI | **9.7 MB portable, 5.3 MB in tray** (measured) |
-| If it crashes | the click loop can stick — nothing releases it | whatever your script does | **out-of-process guardian releases the mouse** (E2E-proven) |
-| Click realism | fixed interval, metronome-flat | DIY math | **Bates-model jitter + spatial variance, ns-level pacing measured** |
-| Updates | rarely signed, adware-bundling risk | manual | **signed minisign updater; portable swaps in place** |
-| Platform | Windows | Windows | **Windows 10/11** |
+| Tool | What it is | Size & idle RAM | If it crashes | Click realism | Source & trust |
+|---|---|---|---|---|---|
+| Typical "clicker suite" from download sites | closed `.exe` of unclear origin | Electron UIs eat **150+ MB RAM**; bundles of unknown content | the click loop can stick — nothing releases it | fixed interval, metronome-flat | unsigned, adware-bundling risk |
+| [OP Auto Clicker](https://www.opautoclicker.com/) | dedicated single-point clicker | **512 KB** portable | nothing releases a stuck loop | fixed interval, no humanization | closed-source freeware |
+| [GS Auto Clicker](https://www.opauto-clicker.com/op-auto-clicker-vs-gs-auto-clicker) | one-point repeated clicking with a hotkey | lightweight | nothing releases a stuck loop | fixed interval | closed-source freeware |
+| [TinyTask](https://tinytask.net/) | macro **recorder** — record & replay, no editing | **36 KB** | playback can wedge mid-run | replays exactly what you did — jitter included, randomness not | closed-source freeware |
+| [AutoHotkey](https://www.autohotkey.com/) | scripting language — you write the automation yourself | small runtime, no GUI | whatever your script does | DIY math | open source |
+| [AlphaClicker](https://thetinytask.com/best-auto-clicker-windows/) | open-source clicker | lightweight | nothing releases a stuck loop | fixed interval | MIT open source |
+| **NanoClick** | **open-source app with a full GUI: clicker + recorder + visual editor** | **9.7 MB portable, 5.3 MB in tray** (measured) | **out-of-process guardian releases the mouse** (E2E-proven) | **Bates-model jitter + spatial variance; ns-level pacing measured** | **open source (PolyForm), signed updater** |
 
 ---
 
