@@ -11,7 +11,7 @@ a stability interlock (snubber), the interface becomes disposable, and the
 repository ships with a real CI gate. Suite green: **494 tests** (387 lib +
 102 asset tripwires + 3 daemon handshake + 2 guardian e2e), clippy
 `-D warnings`, all lanes on the GitHub Actions runner in one measured
-20 m 14 s pass.
+14 m 58 s pass (run 40747211602, 2026-10-28).
 
 ### Added
 
@@ -33,10 +33,16 @@ repository ships with a real CI gate. Suite green: **494 tests** (387 lib +
   per-click humanization compute — **35–223 ns** in the worst corridor
   (jitter 35 %, hesitation 0.10) against a 6.25 ms minimum interval at 160 CPS.
 - **GitHub Actions CI** (`.github/workflows/ci.yml`): windows-latest, one
-  gate job — JS gates → `panic = "abort"` compile gate (lib + both bins) →
-  lib tests (non-physical + physical lanes) → clippy `-D warnings` → asset
-  tripwires → daemon handshake (+ ignored chaos lane) → guardian e2e. All
-  lanes `--locked -j 2`.
+  gate job — JS gates → clippy `-D warnings` → `panic = "abort"` compile gate
+  (lib + both bins) → lib tests (non-physical + physical lanes) → integration
+  suites (asset tripwires, daemon handshake, guardian e2e in one cargo
+  invocation) → ignored chaos lane. All lanes `--locked -j 2`. Test lanes run
+  on `[profile.ci-test]`: same opt-level, `panic = "unwind"` and `strip` as
+  release, with ThinLTO and 16 codegen units, so each `tests/*.rs` executable
+  stops paying a whole-program FatLTO pass over the dependency graph; the
+  shipped binary is still built from `[profile.release]`. Doc-only pushes
+  (`**.md`, `docs/**`, `.github/assets/**`, `LICENSE*`, `.gitignore`) do not
+  start a run at all.
 - Settings: System/Typing behavior cards split with toggle switches, custom
   theme dropdown; the interface language swaps without a reload (cached
   dictionaries); backup button with honest states, in-page import modal and a
@@ -65,7 +71,8 @@ repository ships with a real CI gate. Suite green: **494 tests** (387 lib +
   under `catch_unwind`, so a panicking callback cannot take the process down
   while `Drop` guards still run. Test *execution* under abort is impossible
   with today's tooling (4 measured probes; rust-lang/rust#67650) — CI compiles
-  lib + bins with `panic = "abort"` and executes tests on the shipped profile.
+  lib + bins with `panic = "abort"` and executes tests on
+  `[profile.ci-test]`.
 - Deep-sleep / hide lifecycle: satellite windows are created behind a 300 ms
   latch and **destroyed** (never `hide()`) on close — a hidden WebView keeps
   ~120 MB alive and a stray `show()` resurrects it; restore rebuilds from the
