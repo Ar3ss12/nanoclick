@@ -54,10 +54,11 @@ $edits = @(
        # parsed as group 11 (which does not exist), and .NET then substitutes the
        # LITERAL text `$11` — the prefix disappears and the JSON breaks. That is
        # exactly how a bump once produced `$11.1.1",` and killed every build.
-       Replacement = ('${1}' + $Version + '${3}') },
-    @{ Path = 'README.md'
-       Pattern = '(badge/version-)(\d+\.\d+\.\d+)(-)'
        Replacement = ('${1}' + $Version + '${3}') }
+    # README.md is NOT in this list on purpose: it carries no version strings.
+    # The Version badge was removed 2026-10-28 (badges are instruments, not
+    # confetti) and the install section links the tag instead of pinning a
+    # version, so there is nothing left for a bumper to rewrite there.
 )
 
 if (-not $SkipDocs) {
