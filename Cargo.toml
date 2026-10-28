@@ -59,3 +59,22 @@ opt-level = 1
 lto = "off"
 codegen-units = 16
 
+# CI test-execution profile. MEASURED on a toy workspace, rustc argv:
+# `cargo test --release` compiles test targets from [profile.release]
+# (`-C lto -C codegen-units=2`) — NOT from [profile.bench]; the bench profile
+# only drives `cargo bench`. Profiles must also live in this root manifest:
+# in a member manifest cargo ignores them ("profiles for the non root package
+# will be ignored").
+#
+# Every file in tests/ is a separate executable, and under [profile.release]
+# each of its links runs a whole-program FatLTO pass over the ~400-crate
+# dependency graph on a 2-core runner. This profile keeps the optimization
+# level, panic strategy and strip setting identical and changes only the code
+# shape (ThinLTO, 16 codegen units). It is a build-time knob, not a behavior
+# knob: no test assertion can observe LTO choices. The shipped executable is
+# still produced by [profile.release] via `cargo tauri build`.
+[profile.ci-test]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+

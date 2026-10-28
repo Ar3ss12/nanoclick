@@ -86,12 +86,15 @@ jobs:
       # Fast-fail beats deep-fail: clippy costs ~1m on a warm cache, while the
       # abort compile + test lanes below cost ~10m together. A lint error is
       # cheaper to discover before either of them has run.
+      # Runs on the ci-test profile so it shares dependency artifacts with the
+      # test lanes below; --release here would compile the whole dep graph a
+      # second time under a profile nothing else uses.
       # Test targets are intentionally excluded: the local gate keeps include_str
       # tripwire strings byte-exact, and clippy --fix on tests risks rewriting
       # them. CI must never be weaker than the local gate.
       - name: Clippy (lib, -D warnings)
         working-directory: nanoclick/src-tauri
-        run: cargo clippy --release --locked -j 2 --lib -- -D warnings
+        run: cargo clippy --profile ci-test --locked -j 2 --lib -- -D warnings
 
       # ── 2. Abort-shaped compile gate ─────────────────────────────────────
       # Lib + both bins compiled with panic=abort on stable. Running TESTS
@@ -107,28 +110,30 @@ jobs:
         working-directory: nanoclick/src-tauri
         run: cargo build --profile ci-abort --locked -j 2
 
-      # ── 3. Test lane, shipped profile (panic = unwind) ──────────────────
-      - name: Lib tests (release, non-physical)
+      # ── 3. Test lane, ci-test profile ───────────────────────────────────
+      # `cargo test --release` links every test target with FatLTO over the
+      # whole dependency graph — one whole-program pass per tests/*.rs
+      # executable. The ci-test profile (root Cargo.toml) keeps opt-level,
+      # panic=unwind and strip identical and only swaps code shape for
+      # ThinLTO + 16 codegen units, which is a link-time knob no assertion
+      # can observe. The shipped executable still comes from [profile.release].
+      - name: Lib tests (ci-test, non-physical)
         working-directory: nanoclick/src-tauri
-        run: cargo test --release --locked -j 2 --lib -- --skip physical_
+        run: cargo test --profile ci-test --locked -j 2 --lib -- --skip physical_
 
-      - name: Lib tests (release, physical)
+      - name: Lib tests (ci-test, physical)
         working-directory: nanoclick/src-tauri
-        run: cargo test --release --locked -j 2 --lib -- physical
+        run: cargo test --profile ci-test --locked -j 2 --lib -- physical
 
       # ── 4. Integration suites ───────────────────────────────────────────
-      - name: Asset tripwires
+      # One cargo invocation for all three executables: dependency artifacts
+      # are resolved once and the links can overlap under -j 2. Cargo still
+      # builds a separate executable per file and runs them sequentially, so
+      # the injection e2e never overlaps the daemon handshake.
+      - name: Integration suites (assets + daemon + guardian e2e)
         working-directory: nanoclick/src-tauri
-        run: cargo test --release --locked -j 2 --test test_assets
-
-      - name: Daemon handshake
-        working-directory: nanoclick/src-tauri
-        run: cargo test --release --locked -j 2 --test daemon_handshake
+        run: cargo test --profile ci-test --locked -j 2 --test test_assets --test daemon_handshake --test input_guardian_e2e
 
       - name: Daemon handshake (ignored chaos lane)
         working-directory: nanoclick/src-tauri
-        run: cargo test --release --locked -j 2 --test daemon_handshake -- --ignored
-
-      - name: Guardian e2e
-        working-directory: nanoclick/src-tauri
-        run: cargo test --release --locked -j 2 --test input_guardian_e2e
+        run: cargo test --profile ci-test --locked -j 2 --test daemon_handshake -- --ignored
