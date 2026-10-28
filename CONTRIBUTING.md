@@ -101,3 +101,32 @@ cargo tauri build --bundles nsis
 
 > ⚠️ Keep the private updater key safe — installations already shipped only
 > trust updates signed with the same key they were built with.
+
+## Architecture
+
+```
+
+## Architecture
+
+```
+┌────────────────────────────  Frontend (vanilla JS) ───────────────────────────┐
+│  UI · presets · visual macro builder · IPC via window.__TAURI__.core.invoke  │
+└──────────────────────────────────────┬───────────────────────────────────────┘
+                                       │ Tauri commands (12)
+┌──────────────────────────────────────▼───────────────────────────────────────┐
+│                              Rust backend                                     │
+│  ┌───────────┐  ┌────────────┐  ┌─────────────┐  ┌────────────────────────┐  │
+│  │ Scheduler │  │  Recorder  │  │ Persistence │  │ Platform (windows/)    │  │
+│  │ CPS loop, │  │ WH_MOUSE/  │  │ config.json │  │ SendInput injection,   │  │
+│  │ timers,   │→ │ KEYBOARD_LL│  │ macros.json │  │ WH_KEYBOARD_LL hotkeys,│  │
+│  │ control   │  │ normalizer │  │ presets     │  │ single-instance lock   │  │
+│  └───────────┘  └────────────┘  └─────────────┘  └────────────────────────┘  │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+- All timing runs on a Rust worker thread — the UI never drives the click
+  loop; 66 ms (15 FPS) IPC telemetry from lock-free atomics.
+- Lazy secondary WebViews: cold boot creates only the main window; overlay and
+  HUD are built on demand and destroyed when toggled off.
+- In-process GPU mode is deliberately off (a DirectX reset would hang the
+  click/hook thread); RAM is saved by lazy windows instead.

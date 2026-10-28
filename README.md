@@ -1,14 +1,15 @@
 # ⚡ NanoClick
 
-**A Windows desktop automation tool** — autoclicker, macro recorder, and visual
-macro editor in one lightweight native app. Tauri 2 + Rust + vanilla JS: no
-Electron, no bundler, no bloat — the production installer is **~3.4 MB**, the
-portable binary **~9.7 MB** (measured 2026-10-28).
+**The lightweight native auto clicker for Windows** — human-like clicks, macro
+recorder, visual editor. No Electron, no bloat: **~3.4 MB** installer
+(measured 2026-10-28).
 
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue)
 [![CI](https://github.com/Ar3ss12/nanoclick/actions/workflows/ci.yml/badge.svg)](https://github.com/Ar3ss12/nanoclick/actions/workflows/ci.yml)
 
----
+**⬇️ [Download v1.3.0](https://github.com/Ar3ss12/nanoclick/releases/tag/v1.3.0)** —
+installer `NanoClick_1.3.0_x64-setup.exe` (~3.4 MB) or zero-install portable
+`NanoClick-portable.exe` (~9.7 MB)
 
 <p align="center">
   <img src=".github/assets/main_preview.png" alt="NanoClick Dashboard Preview" width="800">
@@ -16,77 +17,54 @@ portable binary **~9.7 MB** (measured 2026-10-28).
 
 ---
 
-## 📦 Install
+## Why NanoClick
 
-Download `v1.3.0` from [Releases](https://github.com/Ar3ss12/nanoclick/releases/tag/v1.3.0):
-
-```
-NanoClick_1.3.0_x64-setup.exe   (~3.4 MB)
-NanoClick-portable.exe          (~9.7 MB, zero-install)
-```
-
-- Installs per-user (no admin rights needed)
-- Uses the system WebView2 runtime; downloads it automatically if missing
-- Updates are delivered through the built-in updater (signed artifacts)
-
-What's new: [CHANGELOG.md](CHANGELOG.md).
+| A clicker from a random download site | NanoClick |
+|---|---|
+| Electron UI eating 150+ MB of RAM; an unsigned exe of unknown origin | **9.7 MB portable, 5.3 MB in tray** (measured) — open source, signed updates |
+| A crash can leave your mouse stuck in a click loop | **a watchdog *outside* the process releases the buttons — always, even after End Task** (proven end-to-end) |
+| Metronome-flat fixed-interval clicks a bot detector smells instantly | **human-like jitter and timing modeled on real hand biomechanics** — and the timing math costs nanoseconds per click, so your FPS never feels it (measured) |
 
 ---
 
-## ✨ What it does
+## What it does
 
-### 🖱️ Click engine
-- **Every click mode** — Single / Double / Hold / Butterfly / Drag, 0.1–160 CPS, hotkey speed adjustment on the fly, live telemetry
-- **Your FPS never feels it** — the per-click timing math costs **nanoseconds** (measured 35–223 ns against a 6.25 ms interval at 160 CPS): no background lag, no stutter, even in heavy games
-- **Human, not robotic** — every click carries Bates-model jitter (±0–35 %), spatial variance (±0–50 px), hold times and a fatigue tail, so the timing curve reads like a hand, not a metronome
-- **Click anywhere** — bind to a fixed point or follow the cursor; CPS/ms switcher right on the dashboard
+<table>
+<tr><th valign="top">🖱️ Clicker</th><th valign="top">🎬 Macros</th></tr>
+<tr><td valign="top">
 
-### 🎬 Macros
-- **Record or build** — capture real input in real time, or assemble macros from blocks in the visual editor (inline edit, rename, drag-to-reorder, run-from-here, step, disable, duplicate)
-- **Smart recording** — recorded drag paths are compressed by **80–95 %** (Ramer–Douglas–Peucker) while the trajectory stays smooth; redundant hover moves are stripped automatically, so a chaotic mouse swipe becomes a clean macro
-- **Logic included** — `Repeat`, `If/Else` with pixel-color conditions, variables (`SetVar`/`GetVar`), nested macro calls
-- **Presets** — instant hotkey switching between full engine profiles; import/export; click statistics persist across updates
+- Single / Double / Hold / Butterfly / Drag, 0.1–160 CPS
+- Hotkey speed adjustment on the fly, live telemetry
+- Human-like timing: Bates-model jitter (±0–35 %), spatial variance (±0–50 px), hold times and a fatigue tail — reads like a hand, not a metronome
+- Bind to a fixed point or follow the cursor
+- CPS/ms switcher right on the dashboard, floating HUD, 6 themes
 
-### 🛡️ Safety & reliability
-- **No stuck mouse — ever** — if the app freezes, crashes or is killed in Task Manager, an independent watchdog *outside* the process instantly releases the buttons (verified end-to-end: the OS accepts all three release paths). Even `taskkill /F /T` cannot reach it
-- **Honest status, not a lying `RUNNING`** — a 200 ms maintenance thread watches the click worker; if anything wedges, Start is refused and the app names the reason (`ENGINE_STUCK`, `RELEASE_PENDING`, `MEMORY_HARD`)
-- **Survives the window being killed** — the engine lives in a separate daemon process; close or kill the UI and clicking never flinches — proven by chaos tests
-- **Stops when you type** — Smart Typing Guard (default ON) halts clicking and locks hotkeys while you write real text; 2-second cooldown before re-arming
-- **Stops when you leave the window** — FocusGuard (opt-in) halts within **~50 ms** of a foreground change and names the process that stole focus
-- **Config that heals itself** — Last-Known-Good snapshots, quarantine of corrupt files, mandatory Deadbolt modal, factory reset with a 5-second cooldown
+</td><td valign="top">
+
+- Record real input in real time, or build macros from blocks
+- Visual editor: rename, drag-to-reorder, run-from-here, step, disable, duplicate
+- Recorded drag paths are compressed by **80–95 %** — a chaotic mouse swipe becomes a clean macro
+- Logic included: `Repeat`, `If/Else` with pixel-color conditions, variables, nested macro calls
+- Presets switch instantly on hotkeys; import/export; click stats persist across updates
+
+</td></tr>
+</table>
+
+### And it is hard to break
+
+- **No stuck mouse — ever.** If the app freezes, crashes or gets killed in
+  Task Manager, an independent watchdog outside the process instantly
+  releases the buttons
+- **Honest status.** If anything wedges internally, the app refuses to start
+  and tells you why — it never shows a fake "Running"
+- **Kill the window, nothing happens.** The engine lives in a separate daemon
+  process; closing or killing the UI never interrupts clicking
+- **Stops when you type** (default on) and **when you leave the window**
+  (optional) — FocusGuard reacts within ~50 ms and names the app that stole
+  focus
+- **Config that heals itself.** Last-Known-Good snapshots, quarantine of
+  corrupt files, factory reset with a 5-second cooldown
 - **Zero-latency stop** — <kbd>Escape</kbd> and hotkey stop land at 0 ms
-
-### 🖥️ Windows integration
-- **Event-driven hotkeys** (`WH_KEYBOARD_LL` / `WH_MOUSE_LL`) — zero busy-polling, sub-millisecond reaction; Mouse 4/5 work on gaming mice up to 8000 Hz
-- **Invisible in the background** — close to tray and the engine keeps clicking; deep sleep drops RAM to **5.3 MB** (measured `scripts/measure-ram.ps1`, from 117–123 MB) while hooks, scheduler and tray stay alive
-- **Elevated windows handled** — detects admin windows (Task Manager, admin consoles), warns with a chime + dialog, one-click restart as admin
-- **Multi-monitor DPI done right** — PerMonitorV2: zero coordinate drift across mixed-DPI screens
-- **6 themes**, floating HUD, autostart, UA + EN interface
-
----
-
-## 🥊 Why NanoClick
-
-The market in 2026 splits into four camps: closed freeware from the 2010s
-(OP / GS / TinyTask), ad-funded web brands (IO Auto Clicker), Microsoft Store
-suites (Automatic Clicker & co), and modern open-source hobby clickers. None
-of them combines an open source, a full visual macro editor and an
-out-of-process safety net.
-
-| Tool | What it is | Size & idle RAM | If it crashes | Click realism | Source & trust |
-|---|---|---|---|---|---|
-| Typical "clicker suite" from download sites | closed `.exe` of unclear origin | Electron UIs eat **150+ MB RAM**; bundles of unknown content | the click loop can stick — nothing releases it | fixed interval, metronome-flat | unsigned, adware-bundling risk |
-| [OP Auto Clicker](https://www.opautoclicker.com/) | the market default — first Google hit for "auto clicker" | **512 KB** portable | nothing releases a stuck loop | fixed interval, no humanization | closed-source freeware |
-| [GS Auto Clicker](https://www.opauto-clicker.com/op-auto-clicker-vs-gs-auto-clicker) | one-point repeated clicking with a hotkey | lightweight | nothing releases a stuck loop | fixed interval | closed-source freeware |
-| [TinyTask](https://tinytask.net/) | macro **recorder** — record & replay, no editing | **36 KB** | playback can wedge mid-run | replays exactly what you did — jitter included, randomness not | closed-source freeware |
-| [IO Auto Clicker](https://autoclicker.io/) | web-brand clicker, apps for Windows, Mac & Android | lightweight | — | fixed interval | closed-source freeware |
-| [Automatic Clicker](https://apps.microsoft.com/detail/9mszwlljjvb1) | MS Store suite: clicker + macro recorder + Visual Triggers | — | — | — | closed-source, Store-distributed |
-| [Flame Auto Clicker](https://sourceforge.net/projects/flame-auto-clicker/) | minimalist clicker, "Over 1000 CPS (For Real)" | lightweight | — | fixed interval, delay/limit options | open source |
-| [AutoHotkey](https://www.autohotkey.com/) | scripting language — you write the automation yourself | small runtime, no GUI | whatever your script does | DIY math | open source |
-| [BlurAutoClicker](https://github.com/Blur009/Blur-AutoClicker) | advanced open-source clicker: hotkeys, presets, sequence clicking | lightweight | — | fixed interval with extra tuning | open source (Python, Windows) |
-| [Rusty AutoClicker](https://github.com/MrTanoshii/rusty-autoclicker) | portable Rust clicker | lightweight | — | "Humanlike Mode" + tweened cursor movement | open source, cross-platform |
-| [Universal Autoclicker](https://clicker.rs/) | Rust clicker with a modern GUI | lightweight | — | CPS mode + jitter mode | open source, cross-platform |
-| **NanoClick** | **open-source app with a full GUI: clicker + recorder + visual editor** | **9.7 MB portable, 5.3 MB in tray** (measured) | **out-of-process guardian releases the mouse** (E2E-proven) | **Bates-model jitter + spatial variance; ns-level pacing measured** | **open source (PolyForm), signed updater** |
 
 ---
 
@@ -102,141 +80,34 @@ out-of-process safety net.
 | Capture screen coordinates | <kbd>Ctrl+P</kbd> |
 | Start / Stop macro recording | <kbd>Ctrl+Shift+R</kbd> |
 
-All hotkeys are handled by an event-driven `WH_KEYBOARD_LL` listener in Rust — zero busy-polling at idle, sub-millisecond reaction time.
+## 📦 System requirements
 
----
-
-## 🚫 Not for
-
-- **macOS / Linux** — the engine is Win32 (`SendInput`, `WH_*_LL` hooks); there is no cross-platform backend.
-- **Commercial use** — PolyForm Noncommercial (see [License](#-license)); selling binaries or operating paid automation services requires a separate license.
-- **Forcing clicks into elevated windows** — UIPI blocks are detected and reported, never bypassed.
-
----
+- Windows 10/11; installs per-user, no admin rights needed
+- WebView2 runtime (preinstalled on Windows 10/11; downloaded automatically if missing)
+- Updates are signed and verified before install
 
 ## 🛠️ Build from Source
 
-**Prerequisites:** [Rust](https://rustup.rs) (stable-msvc), Microsoft C++ Build Tools, WebView2 (preinstalled on Windows 10/11).
-
 ```bash
-# 1. Clone
 git clone https://github.com/Ar3ss12/nanoclick.git
 cd nanoclick
-
-# 2. Run in dev mode
-cargo tauri dev
-
-# 3. Or build the release installer (NSIS)
+cargo tauri dev          # dev mode
 cargo tauri build --bundles nsis
 # → target/release/bundle/nsis/NanoClick_*-setup.exe
 ```
 
-Before every release, strict gates run: browser-accurate JS syntax check,
-oxlint and boot-guard wiring — no bundler means one dead `main.js` module
-would otherwise ship silently. The maintainer kitchen — version bumps, the
-full gate table, test commands and the release/signing flow — lives in
-[CONTRIBUTING.md](CONTRIBUTING.md).
+**Prerequisites:** [Rust](https://rustup.rs) (stable-msvc), Microsoft C++ Build Tools.
 
-### Run tests
+Developer docs — test commands, the JS gate table, version bumps, the release
+and signing flow, and the architecture diagram — live in
+[CONTRIBUTING.md](CONTRIBUTING.md). What's new: [CHANGELOG.md](CHANGELOG.md).
 
-```bash
-cd src-tauri
-cargo test --release --locked -j 2 --lib -- --skip physical_
-# physical_ lanes are hardware-timing tests: run them separately
-cargo test --release --locked -j 2 --lib -- physical
+## 📄 License & good to know
 
-cargo test --release --locked -j 2 --tests
-# integration suites: asset tripwires, daemon handshake (+ chaos lane), guardian e2e
-```
-
-CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the full matrix on `windows-latest`: JS gates → `panic = "abort"` compile gate → lib test lanes → clippy `-D warnings` → integration suites. All lanes `--locked -j 2`.
-
----
-
-## 🏗️ Architecture
-
-```
-┌────────────────────────────  Frontend (vanilla JS) ───────────────────────────┐
-│  UI · presets · visual macro builder · IPC via window.__TAURI__.core.invoke  │
-└──────────────────────────────────────┬───────────────────────────────────────┘
-                                       │ Tauri commands (12)
-┌──────────────────────────────────────▼───────────────────────────────────────┐
-│                              Rust backend                                     │
-│  ┌───────────┐  ┌────────────┐  ┌─────────────┐  ┌────────────────────────┐  │
-│  │ Scheduler │  │  Recorder  │  │ Persistence │  │ Platform (windows/)    │  │
-│  │ CPS loop, │  │ WH_MOUSE/  │  │ config.json │  │ SendInput injection,   │  │
-│  │ timers,   │→ │ KEYBOARD_LL│  │ macros.json │  │ WH_KEYBOARD_LL hotkeys,│  │
-│  │ control   │  │ normalizer │  │ presets     │  │ single-instance lock   │  │
-│  └───────────┘  └────────────┘  └─────────────┘  └────────────────────────┘  │
-└──────────────────────────────────────────────────────────────────────────────┘
-```
-
-- **All timing runs on a Rust worker thread** — the UI never drives the click loop; 66 ms (15 FPS) IPC telemetry from lock-free atomics keeps overhead negligible even at 160 CPS
-- **Lazy secondary WebViews** — cold boot creates only the main window; the overlay and HUD are built on demand and fully `destroy()`ed when toggled off — idle RAM holds zero secondary WebViews
-- **Exactly-once stats finalize** — the `active→idle` transition is the single entry point per run; junk runs (`<5 clicks` and `<1s`) grow the counters but never pollute the history chart; disk writes happen only when clicks happened
-- **In-process GPU mode is deliberately off** — merging Chromium's GPU into our process would hang the click/hook thread on a DirectX reset; RAM is saved by lazy windows instead
-- **Updater**: artifacts signed with a minisign keypair; verification is mandatory and built into Tauri's updater plugin
-
----
-
-## 📁 Project Structure
-
-```
-nanoclick/
-├── src/                  # Frontend (no bundler):
-│   ├── locales/          #   i18n JSON dictionaries: ua.json, en.json
-│   ├── boot_guard.js     #   CLASSIC-script crash trap + boot watchdog (must load first)
-│   ├── i18n.js           #   Zero-dependency lazy-loading i18n engine
-│   ├── stats.js          #   Modular analytics & live Canvas CPS chart engine
-│   ├── uipi_manager.js   #   Windows UIPI detection, audio chime & elevation UI
-│   ├── main.js           #   Core UI logic, state bindings, presets & visual editor
-│   └── index.html / style.css
-├── src-tauri/
-│   ├── src/
-│   │   ├── core/         # Action engine, executor, conditions
-│   │   ├── recorder/     # Raw event capture, Smart Normalizer (RDP), optimizer
-│   │   ├── scheduler.rs  # Click loop, CPS, timers, stop events
-│   │   ├── persistence/  # Config, macros, presets (+ migrations, stats)
-│   │   ├── platform/     # windows/ (hooks, input, uipi.rs) + backend traits
-│   │   └── lib.rs        # Tauri commands, setup, logging, DPI initialization
-│   ├── build.rs          # Windows application manifest (ComCtl32 v6.0 + PerMonitorV2)
-│   ├── capabilities/     # Tauri 2 permission manifests
-│   └── tauri.conf.json
-└── scripts/              # check-js / release / measure-ram / set-version (PowerShell)
-```
-
----
-
-## 🔒 Signing & Updates
-
-Updates are proven authentic, not just downloaded: every artifact carries a
-minisign signature (`.sig` per build), verification is mandatory and built
-into Tauri's updater plugin, and portable updates swap the exe in place only
-after re-verification. A paid Windows certificate (removing SmartScreen
-warnings) is pending — see [CONTRIBUTING.md](CONTRIBUTING.md) for the signing
-and release flow.
-
----
-
-## 📄 License
-
-NanoClick is licensed under the **PolyForm Noncommercial License 1.0.0** plus the
-NanoClick Additional Terms (branding policy, permitted gaming/streaming uses,
-commercial-use examples, governing law). See [`LICENSE.md`](LICENSE.md) for the
-full text — the license file is the single source of truth and is bundled with
-each release.
-
-### 📋 License at a Glance
-
-| Activity / Use Case | Status | Terms |
-|---|:---:|---|
-| **Personal automation & productivity** | ✅ YES | Free for personal, hobby, and educational use |
-| **Gaming & community play** | ✅ YES | Permitted for personal gameplay and automation |
-| **Streaming on Twitch / YouTube** | ✅ YES | Streaming and monetized video content creation are 100% permitted |
-| **Source inspection & forks** | ✅ YES | Open for study; public redistributions must rebrand |
-| **Selling .exe / commercial licenses** | ❌ NO | Selling binaries or charging for access is strictly prohibited |
-| **Commercial bot-farms / paid services** | ❌ NO | Automated commercial operations require a commercial license |
-| **Adware / miner bundling** | ❌ NO | Strictly prohibited |
+- Free for personal use — PolyForm Noncommercial 1.0.0 plus the NanoClick
+  Additional Terms ([LICENSE.md](LICENSE.md) is the single source of truth)
+- Windows only — the engine is built on Win32 input APIs
+- Clicks into elevated windows are detected and warned about, never forced
 
 © 2026 Ar3ss12 · All rights not expressly granted are reserved.
 
