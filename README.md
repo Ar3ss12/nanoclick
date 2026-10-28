@@ -67,14 +67,22 @@ What's new: [CHANGELOG.md](CHANGELOG.md).
 
 ## 🥊 Why NanoClick
 
+The market in 2026 splits into four camps: closed freeware from the 2010s
+(OP / GS / TinyTask), ad-funded web brands (IO Auto Clicker), Microsoft Store
+suites (Automatic Clicker & co), and modern open-source hobby clickers. None
+of them combines an open source, a full visual macro editor and an
+out-of-process safety net.
+
 | Tool | What it is | Size & idle RAM | If it crashes | Click realism | Source & trust |
 |---|---|---|---|---|---|
 | Typical "clicker suite" from download sites | closed `.exe` of unclear origin | Electron UIs eat **150+ MB RAM**; bundles of unknown content | the click loop can stick — nothing releases it | fixed interval, metronome-flat | unsigned, adware-bundling risk |
-| [OP Auto Clicker](https://www.opautoclicker.com/) | dedicated single-point clicker | **512 KB** portable | nothing releases a stuck loop | fixed interval, no humanization | closed-source freeware |
+| [OP Auto Clicker](https://www.opautoclicker.com/) | the market default — first Google hit for "auto clicker" | **512 KB** portable | nothing releases a stuck loop | fixed interval, no humanization | closed-source freeware |
 | [GS Auto Clicker](https://www.opauto-clicker.com/op-auto-clicker-vs-gs-auto-clicker) | one-point repeated clicking with a hotkey | lightweight | nothing releases a stuck loop | fixed interval | closed-source freeware |
 | [TinyTask](https://tinytask.net/) | macro **recorder** — record & replay, no editing | **36 KB** | playback can wedge mid-run | replays exactly what you did — jitter included, randomness not | closed-source freeware |
+| [IO Auto Clicker](https://autoclicker.io/) | web-brand clicker, apps for Windows, Mac & Android | lightweight | — | fixed interval | closed-source freeware |
+| [Automatic Clicker](https://apps.microsoft.com/detail/9mszwlljjvb1) | MS Store suite: clicker + macro recorder + Visual Triggers | — | — | — | closed-source, Store-distributed |
+| [Flame Auto Clicker](https://sourceforge.net/projects/flame-auto-clicker/) | minimalist clicker, "Over 1000 CPS (For Real)" | lightweight | — | fixed interval, delay/limit options | open source |
 | [AutoHotkey](https://www.autohotkey.com/) | scripting language — you write the automation yourself | small runtime, no GUI | whatever your script does | DIY math | open source |
-| [AlphaClicker](https://thetinytask.com/best-auto-clicker-windows/) | open-source clicker | lightweight | nothing releases a stuck loop | fixed interval | MIT open source |
 | [BlurAutoClicker](https://github.com/Blur009/Blur-AutoClicker) | advanced open-source clicker: hotkeys, presets, sequence clicking | lightweight | — | fixed interval with extra tuning | open source (Python, Windows) |
 | [Rusty AutoClicker](https://github.com/MrTanoshii/rusty-autoclicker) | portable Rust clicker | lightweight | — | "Humanlike Mode" + tweened cursor movement | open source, cross-platform |
 | [Universal Autoclicker](https://clicker.rs/) | Rust clicker with a modern GUI | lightweight | — | CPS mode + jitter mode | open source, cross-platform |
