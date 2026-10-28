@@ -8,7 +8,7 @@ file.
 
 A resilience release: the click engine gains an out-of-process safety net and
 a stability interlock (snubber), the interface becomes disposable, and the
-repository ships with a real CI gate. Suite green: **494 tests** (387 lib +
+repository ships with a real CI gate. Suite green: **499 tests** (392 lib +
 102 asset tripwires + 3 daemon handshake + 2 guardian e2e), clippy
 `-D warnings`, all lanes on the GitHub Actions runner in one measured
 14 m 58 s pass (run 40747211602, 2026-10-28).
@@ -28,7 +28,8 @@ repository ships with a real CI gate. Suite green: **494 tests** (387 lib +
   `MEMORY_HARD`/`MEMORY_PRESSURE`), Start is refused with a named verdict, and
   the status surfaces (in-app status line + `get_full_state`) carry the
   verdicts to the UI. Cold diagnostics: one 512-byte `SNUB v6` frame per node
-  plus a one-write-back triage file (`nanoclick_triage.prev.txt`).
+  plus a one-write-back triage file, both scoped to the process role
+  (`nanoclick_<role>_<node>.snub`, `nanoclick_triage_<role>.txt`).
 - **Click-pacing bench**: `cargo bench --bench click_pacing` measures the
   per-click humanization compute — **35–223 ns** in the worst corridor
   (jitter 35 %, hesitation 0.10) against a 6.25 ms minimum interval at 160 CPS.
@@ -64,9 +65,27 @@ repository ships with a real CI gate. Suite green: **494 tests** (387 lib +
 - Satellite windows (HUD/overlay): a deferred HUD log is a warn, tray HUD
   toggles go through the facade, and the hide/show satellite model matches the
   tripwire gates (9 stale gates re-aligned).
+- Cold evidence no longer collides in the daemon topology: daemon and UI child
+  both run a maintenance thread, and the shared `%TEMP%/nanoclick_<node>.snub`
+  let the long-lived daemon overwrite the frames of the UI process that had
+  just crashed. Every snapshot and the triage file now carry the process role,
+  derived from `--ui-child` / the `nanoclick-daemon` exe stem.
+- `hotkey_hook` published a `rollback_budget_ms` that no tick read (the 1 Hz
+  watchdog polled three nodes by hand). `ROLLBACK_WATCHED` now owns the poll
+  list, and a test fails if a node publishes a budget no tick observes.
+- `ENGINE_STUCK` could be latched by a busy UI: the click-stall classifier
+  read the process-wide CPU delta, so a repainting WebView could turn a
+  blocked worker into `CpuSpin` and refuse Start. The worker publishes its TID
+  around the pulse and the tick samples `GetThreadTimes` through a reusable
+  `OpenThread` handle; the process delta stays a fallback only when the thread
+  cannot be opened.
 
 ### Changed
 
+- `snubber` 0.6.13 → 0.7.0. Erased admissions use the canonical
+  `probe_erased_auto` name: same semantics as the old alias (slot released at
+  entry, rollback still armed for an implicit drop), so a refused or panicking
+  run still releases mouse buttons through `SendInput`.
 - The shipped profile keeps `panic = "unwind"` on purpose: hook callbacks run
   under `catch_unwind`, so a panicking callback cannot take the process down
   while `Drop` guards still run. Test *execution* under abort is impossible

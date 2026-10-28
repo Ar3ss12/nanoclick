@@ -11,7 +11,7 @@
 
 use snubber::supervisor::ProcessToken;
 use snubber::*;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -499,6 +499,29 @@ static HOOK_PULSE: OnceLock<WorkerPulse> = OnceLock::new();
 /// clicker has no worker, and its frozen counter is not a stall.
 static CLICK_PULSE_ARMED: AtomicBool = AtomicBool::new(false);
 
+/// TID of the thread running the current click worker (0 = none). Published by
+/// the worker before it arms the pulse and cleared by the guard that owns the
+/// run generation, so the sampler never measures a recycled or foreign thread.
+#[cfg(target_os = "windows")]
+static CLICK_WORKER_TID: AtomicU32 = AtomicU32::new(0);
+
+/// Publish the calling thread as the click worker (worker thread only).
+pub fn note_click_worker_thread() {
+    #[cfg(target_os = "windows")]
+    {
+        let tid = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+        CLICK_WORKER_TID.store(tid, Ordering::Release);
+    }
+}
+
+/// The owning run is leaving: stop sampling its thread.
+pub fn clear_click_worker_thread() {
+    #[cfg(target_os = "windows")]
+    {
+        CLICK_WORKER_TID.store(0, Ordering::Release);
+    }
+}
+
 pub fn click_pulse() -> &'static WorkerPulse {
     CLICK_PULSE.get_or_init(WorkerPulse::new)
 }
@@ -555,12 +578,25 @@ pub fn start_maintenance() {
     }
 }
 
+/// Rollback-body owners polled by the 1 Hz tick. One table, so a node that
+/// publishes `rollback_budget_ms` cannot stay unread: the hook carried a
+/// budget nothing observed, which is the same dead-knob class the satellite
+/// node was cleaned of.
+type RollbackWatched = (&'static str, fn() -> &'static SnubberNode);
+const ROLLBACK_WATCHED: [RollbackWatched; 4] = [
+    ("click_worker", click_node),
+    ("hotkey_hook", hotkey_node),
+    ("macro_executor", macro_node),
+    ("file_watcher", watcher_node),
+];
+
 fn maintenance_loop() {
     let mut click_watch = PulseWatch::new(CLICK_PULSE_LEASE_MS);
     let mut hook_watch = PulseWatch::new(HOOK_PULSE_LEASE_MS);
     let mut last_cpu = process_cpu_ms();
+    let mut worker_cpu = WorkerCpuSampler::new();
     // One line per wedged body, not one per second.
-    let mut reported_rollback_epoch = [u64::MAX; 3];
+    let mut reported_rollback_epoch = [u64::MAX; ROLLBACK_WATCHED.len()];
     let mut tick: u64 = 0;
     loop {
         std::thread::sleep(Duration::from_millis(MAINTENANCE_TICK_MS));
@@ -572,7 +608,11 @@ fn maintenance_loop() {
             let landed = click_watch.observe(click_pulse().tick(), now);
             if !landed {
                 let idle_ms = click_watch.idle_ms(now);
-                let cpu_delta = cpu_delta_since(&mut last_cpu);
+                // Only the worker's own CPU may turn silence into a spin; a
+                // busy UI thread must not supply the delta. The process sample
+                // stays the fallback when the thread cannot be opened.
+                let process_delta = cpu_delta_since(&mut last_cpu);
+                let cpu_delta = worker_cpu.observe().unwrap_or(process_delta);
                 let kind = classify_stall_ceiling(
                     idle_ms,
                     cpu_delta,
@@ -628,13 +668,8 @@ fn maintenance_loop() {
 
         // ── 1 Hz: rollback bodies + memory ─────────────────────────────
         if tick.is_multiple_of(5) {
-            let watched = [
-                ("click_worker", click_node()),
-                ("macro_executor", macro_node()),
-                ("file_watcher", watcher_node()),
-            ];
-            for (idx, (name, node)) in watched.iter().enumerate() {
-                if let Some(stall) = snubber::watchdog::poll_rollback(node, ROLLBACK_BUDGET_MS) {
+            for (idx, (name, node)) in ROLLBACK_WATCHED.iter().enumerate() {
+                if let Some(stall) = snubber::watchdog::poll_rollback(node(), ROLLBACK_BUDGET_MS) {
                     if reported_rollback_epoch[idx] != stall.epoch {
                         reported_rollback_epoch[idx] = stall.epoch;
                         crate::debug_log_internal(
@@ -864,11 +899,11 @@ pub(crate) fn test_latch_engine_stuck(v: bool) {
 
 /// CPU-time delta (ms) of this process since the previous call.
 ///
-/// The crate's `classify_stall` wants an on-CPU sample; in-process we have
-/// no per-thread handle for the worker, so the sample is process-wide. That
-/// is the honest limit: a spinning worker always grows process CPU, while an
-/// idle UI cannot fake growth during the same window — but a busy UI can.
-/// The verdict is diagnostic aid, never a kill switch.
+/// The click stall uses [`WorkerCpuSampler`] first; this process-wide sample
+/// is the fallback when the worker thread cannot be opened, and the only
+/// source for the hook stall. A spinning worker always grows process CPU, but
+/// so does a busy UI in the same window — which is why the click verdict does
+/// not rely on it alone. The verdict is a diagnostic aid, never a kill switch.
 fn cpu_delta_since(last: &mut Option<u64>) -> u64 {
     let now = process_cpu_ms();
     let delta = match (*last, now) {
@@ -908,6 +943,112 @@ fn process_cpu_ms() -> Option<u64> {
 #[cfg(not(target_os = "windows"))]
 fn process_cpu_ms() -> Option<u64> {
     None
+}
+
+/// Thread-scoped CPU sample for the click worker.
+///
+/// The process-wide sample cannot separate a spinning worker from a busy UI
+/// thread: once the pulse is frozen, a repainting WebView supplies the CPU
+/// delta and `classify_stall_ceiling` answers `CpuSpin` — which latches
+/// `ENGINE_STUCK` and refuses Start. The worker publishes its TID; this
+/// sampler opens that thread and reads `GetThreadTimes`, so only the worker's
+/// own CPU can justify the spin verdict. `None` (no id, open failure, first
+/// contact) makes the caller fall back to the process delta.
+#[cfg(target_os = "windows")]
+struct WorkerCpuSampler {
+    tid: u32,
+    handle: Option<windows::Win32::Foundation::HANDLE>,
+    last_ms: Option<u64>,
+}
+
+#[cfg(target_os = "windows")]
+impl WorkerCpuSampler {
+    fn new() -> Self {
+        Self {
+            tid: 0,
+            handle: None,
+            last_ms: None,
+        }
+    }
+
+    fn observe(&mut self) -> Option<u64> {
+        self.observe_tid(CLICK_WORKER_TID.load(Ordering::Acquire))
+    }
+
+    fn observe_tid(&mut self, tid: u32) -> Option<u64> {
+        if tid == 0 {
+            self.release();
+            return None;
+        }
+        if tid != self.tid {
+            self.release();
+            self.tid = tid;
+            self.handle = unsafe {
+                windows::Win32::System::Threading::OpenThread(
+                    windows::Win32::System::Threading::THREAD_QUERY_LIMITED_INFORMATION,
+                    false,
+                    tid,
+                )
+            }
+            .ok();
+            self.last_ms = self.handle.and_then(thread_cpu_ms);
+            // First contact is a baseline, not a measurement.
+            return None;
+        }
+        let now = thread_cpu_ms(self.handle?);
+        let delta = match (self.last_ms, now) {
+            (Some(prev), Some(cur)) => Some(cur.saturating_sub(prev)),
+            _ => None,
+        };
+        self.last_ms = now;
+        delta
+    }
+
+    fn release(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            let _ = unsafe { windows::Win32::Foundation::CloseHandle(handle) };
+        }
+        self.tid = 0;
+        self.last_ms = None;
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for WorkerCpuSampler {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn thread_cpu_ms(handle: windows::Win32::Foundation::HANDLE) -> Option<u64> {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::GetThreadTimes;
+    let (mut create, mut exit, mut kernel, mut user) = (
+        FILETIME::default(),
+        FILETIME::default(),
+        FILETIME::default(),
+        FILETIME::default(),
+    );
+    unsafe { GetThreadTimes(handle, &mut create, &mut exit, &mut kernel, &mut user) }.ok()?;
+    let ms = |ft: FILETIME| {
+        ((u64::from(ft.dwHighDateTime) << 32) | u64::from(ft.dwLowDateTime)) / 10_000
+    };
+    Some(ms(kernel) + ms(user))
+}
+
+#[cfg(not(target_os = "windows"))]
+struct WorkerCpuSampler;
+
+#[cfg(not(target_os = "windows"))]
+impl WorkerCpuSampler {
+    fn new() -> Self {
+        Self
+    }
+
+    fn observe(&mut self) -> Option<u64> {
+        None
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -1104,9 +1245,39 @@ pub fn total_hydraulic_shed() -> (u64, u64, u64) {
 // The crate gives `SnapshotV1::encode() -> [u8; 512]`; THIS file owns the
 // path, the tmp+rename write and the boot diagnosis. No fs in snubber.
 
-/// Path of the cold snapshot (`%TEMP%/nanoclick_app.snub` on Windows).
-pub fn cold_snapshot_path() -> std::path::PathBuf {
-    std::env::temp_dir().join("nanoclick_app.snub")
+/// Role of this process in the shipped topology: `"ui"` for a daemon-owned UI
+/// child, `"daemon"` for the engine process, `"app"` for a standalone run.
+/// The role is part of every cold-evidence file name: in the daemon topology
+/// both processes run a maintenance thread, and an unscoped name let the
+/// long-lived daemon overwrite the frames of the UI process that had just
+/// crashed — destroying the evidence exactly when it was needed.
+pub fn process_role() -> &'static str {
+    static ROLE: OnceLock<&'static str> = OnceLock::new();
+    ROLE.get_or_init(|| {
+        let args: Vec<String> = std::env::args().collect();
+        let stem = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()));
+        process_role_from(&args, stem.as_deref())
+    })
+}
+
+fn process_role_from(args: &[String], exe_stem: Option<&str>) -> &'static str {
+    if crate::daemon_supervise::is_ui_child(args) {
+        "ui"
+    } else if exe_stem == Some("nanoclick-daemon") {
+        "daemon"
+    } else {
+        "app"
+    }
+}
+
+fn snapshot_file_name(role: &str, name: &str) -> String {
+    format!("nanoclick_{role}_{name}.snub")
+}
+
+fn triage_file_name(role: &str) -> String {
+    format!("nanoclick_triage_{role}.txt")
 }
 
 /// Generation stamped into every frame this process writes. The supervisor
@@ -1131,11 +1302,11 @@ pub const SNAPSHOT_NODES: [SnapshotNodeEntry; 9] = [
 ];
 
 fn snapshot_path(name: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("nanoclick_{name}.snub"))
+    std::env::temp_dir().join(snapshot_file_name(process_role(), name))
 }
 
 fn triage_path() -> std::path::PathBuf {
-    std::env::temp_dir().join("nanoclick_triage.txt")
+    std::env::temp_dir().join(triage_file_name(process_role()))
 }
 
 /// Flush one node's snapshot (crash-safe-ish: tmp + rename, no torn frame).
@@ -1148,10 +1319,11 @@ pub fn flush_node_snapshot(node: &SnubberNode, generation: u64, file_name: &str)
     }
 }
 
-/// Flush every node (one 512 B frame each, `nanoclick_<name>.snub`).
+/// Flush every node (one 512 B frame each, `nanoclick_<role>_<name>.snub`).
 pub fn flush_all_snapshots(generation: u64) {
+    let role = process_role();
     for (name, node) in SNAPSHOT_NODES {
-        flush_node_snapshot(node(), generation, &format!("nanoclick_{name}.snub"));
+        flush_node_snapshot(node(), generation, &snapshot_file_name(role, name));
     }
 }
 
@@ -1247,11 +1419,11 @@ fn snapshot_pairs() -> Vec<(&'static str, SnapshotV1)> {
 
 /// Exit hook: flush final frames, then write the triage artifact.
 ///
-/// `nanoclick_triage.txt` holds a header (schema, app version, generation,
+/// `nanoclick_triage_<role>.txt` holds a header (schema, app version, generation,
 /// wall clock) plus, per node, the crate's `write_triage` card and the
 /// `SnapshotDiff` against the boot baseline — a real file, not a promise in
 /// a plan document. The previous triage is kept one write back as
-/// `nanoclick_triage.prev.txt`: a run that crashes BETWEEN rotate and write
+/// `nanoclick_triage_<role>.prev.txt`: a run that crashes BETWEEN rotate and write
 /// leaves the last good file readable, and a triage from two exits ago is
 /// archaeology, not evidence. Cold path: once per process exit.
 ///
@@ -1424,6 +1596,97 @@ mod tests {
         assert_eq!(std::fs::read(&prev).unwrap(), b"newer");
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&prev);
+    }
+
+    #[test]
+    fn test_process_role_covers_the_three_topologies() {
+        let app = ["nanoclick.exe".to_string()];
+        assert_eq!(process_role_from(&app, Some("nanoclick")), "app");
+        let daemon = ["nanoclick-daemon.exe".to_string()];
+        assert_eq!(
+            process_role_from(&daemon, Some("nanoclick-daemon")),
+            "daemon"
+        );
+        // The UI child is the same exe as the daemon; the flag is the only
+        // evidence of its role.
+        let ui = ["nanoclick-daemon.exe".to_string(), "--ui-child".to_string()];
+        assert_eq!(process_role_from(&ui, Some("nanoclick-daemon")), "ui");
+    }
+
+    #[test]
+    fn test_cold_evidence_paths_cannot_collide_across_roles() {
+        for (name, _) in SNAPSHOT_NODES {
+            let app = snapshot_file_name("app", name);
+            let daemon = snapshot_file_name("daemon", name);
+            let ui = snapshot_file_name("ui", name);
+            assert_eq!(app, format!("nanoclick_app_{name}.snub"));
+            assert_ne!(app, daemon);
+            assert_ne!(daemon, ui);
+            assert_ne!(app, ui);
+        }
+        assert_eq!(triage_file_name("app"), "nanoclick_triage_app.txt");
+        assert_ne!(triage_file_name("daemon"), triage_file_name("ui"));
+        // The live paths resolve through the same scoped names in `%TEMP%`.
+        assert_eq!(
+            snapshot_path("click_worker"),
+            std::env::temp_dir().join(snapshot_file_name(process_role(), "click_worker"))
+        );
+        assert_eq!(
+            triage_path(),
+            std::env::temp_dir().join(triage_file_name(process_role()))
+        );
+    }
+
+    #[test]
+    fn test_click_worker_publishes_its_thread_for_the_cpu_sample() {
+        let src = include_str!("scheduler.rs");
+        assert!(src.contains("note_click_worker_thread()"));
+        assert!(src.contains("clear_click_worker_thread()"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_worker_cpu_sampler_measures_the_thread_not_the_process() {
+        use std::sync::mpsc;
+        let (tx, rx) = mpsc::channel();
+        let spinner = std::thread::spawn(move || {
+            let tid = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+            tx.send(tid).unwrap();
+            let until = std::time::Instant::now() + Duration::from_millis(200);
+            while std::time::Instant::now() < until {
+                std::hint::spin_loop();
+            }
+        });
+        let tid = rx.recv().unwrap();
+        let mut sampler = WorkerCpuSampler::new();
+        // No published worker: no sample, so the caller falls back to process.
+        assert_eq!(sampler.observe_tid(0), None);
+        // First contact is a baseline, not a delta.
+        assert_eq!(sampler.observe_tid(tid), None);
+        std::thread::sleep(Duration::from_millis(120));
+        let delta = sampler
+            .observe_tid(tid)
+            .expect("a live thread must be sampled once the baseline exists");
+        assert!(delta > 0, "a spinning thread must show CPU growth");
+        spinner.join().unwrap();
+        // Worker gone: the handle is released, never sampled again.
+        assert_eq!(sampler.observe_tid(0), None);
+        assert!(sampler.handle.is_none());
+    }
+
+    #[test]
+    fn test_every_published_rollback_budget_has_a_watcher() {
+        let watched: Vec<&str> = ROLLBACK_WATCHED.iter().map(|(name, _)| *name).collect();
+        // The hook runs `shutdown_global_hotkey_listener` as its rollback body;
+        // its budget used to be published and never read.
+        assert!(watched.contains(&"hotkey_hook"));
+        for (name, node) in SNAPSHOT_NODES {
+            let budget = node().rollback_phase().budget_ms;
+            assert!(
+                budget == 0 || watched.contains(&name),
+                "{name} publishes rollback_budget_ms={budget} that no tick observes"
+            );
+        }
     }
 
     #[test]

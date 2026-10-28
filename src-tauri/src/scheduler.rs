@@ -399,8 +399,9 @@ impl Drop for WorkerRunGuard {
         }
         // This run owns the pulse: a preempting run has already armed it for
         // itself, and its generation is the current one, so this drop cannot
-        // disarm the newcomer.
+        // disarm the newcomer — nor stop its per-thread CPU sample.
         crate::stability::arm_click_pulse(false);
+        crate::stability::clear_click_worker_thread();
         let mut state = self.state.safe_lock();
         if *state != ClickerState::Running {
             return;
@@ -1709,7 +1710,7 @@ impl ClickScheduler {
             let task_id = crate::stability::next_task_id();
             let (conduit, _steering_handle) = crate::stability::create_worker_steering();
 
-            let guard: snubber::ErasedGuard = match node.enter_erased_auto(|| {
+            let guard: snubber::ErasedGuard = match node.probe_erased_auto(|| {
                 crate::stability::emergency_release_all_hardware();
             }) {
                 Ok(g) => g,
@@ -1759,7 +1760,10 @@ impl ClickScheduler {
                 .enter_auto_profiled(|| {})
                 .ok();
             // The maintenance tick observes this pulse; `WorkerRunGuard`'s
-            // drop disarms it for the run that owns it.
+            // drop disarms it for the run that owns it. The TID is published
+            // first, so a stalled tick samples THIS thread's CPU instead of
+            // the process total (a busy UI must not look like a spin).
+            crate::stability::note_click_worker_thread();
             crate::stability::arm_click_pulse(true);
 
             #[cfg(target_os = "windows")]

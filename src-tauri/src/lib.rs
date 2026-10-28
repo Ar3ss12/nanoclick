@@ -1929,8 +1929,8 @@ pub(crate) fn shutdown_application(app: &AppHandle) {
     crate::stability::emergency_release_all_hardware();
 
     // 3c. Cold evidence for the NEXT boot: final `.snub` frames plus
-    //     `%TEMP%/nanoclick_triage.txt` (per-node triage cards and the diff
-    //     against this run's boot baseline). A `taskkill` skips this by
+    //     `%TEMP%/nanoclick_triage_<role>.txt` (per-node triage cards and the
+    //     diff against this run's boot baseline). A `taskkill` skips this by
     //     definition; the ≤30 s periodic frame then stands as the evidence.
     crate::stability::shutdown_snapshot_cycle();
 
