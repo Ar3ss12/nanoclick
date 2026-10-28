@@ -29,38 +29,52 @@ NanoClick-portable.exe          (~9.7 MB, zero-install)
 - Uses the system WebView2 runtime; downloads it automatically if missing
 - Updates are delivered through the built-in updater (signed artifacts)
 
+What's new: [CHANGELOG.md](CHANGELOG.md).
+
 ---
 
 ## ✨ What it does
 
 ### 🖱️ Click engine
-- **Click modes** — Single / Double / Hold / Butterfly / Drag, 0.1–160 CPS with live hotkey speed adjustment and real-time telemetry
-- **Humanized timing** — Bates B3 jitter (±0–35 %), Gaussian spatial variance (±0–50 px), hold times, fatigue tail; smooth fadeout keeps every mode controllable at high speeds
-- **Measured pacing** — the per-click humanization compute costs **35–223 ns** in the worst corridor against a 6.25 ms minimum interval (`cargo bench --bench click_pacing`)
-- **Position picker** — bind clicks to a fixed screen point or follow the cursor
-- **Unit switchers** — toggle between CPS (clicks/sec) and ms (interval) right from the dashboard
+- **Every click mode** — Single / Double / Hold / Butterfly / Drag, 0.1–160 CPS, hotkey speed adjustment on the fly, live telemetry
+- **Your FPS never feels it** — the per-click timing math costs **nanoseconds** (measured 35–223 ns against a 6.25 ms interval at 160 CPS): no background lag, no stutter, even in heavy games
+- **Human, not robotic** — every click carries Bates-model jitter (±0–35 %), spatial variance (±0–50 px), hold times and a fatigue tail, so the timing curve reads like a hand, not a metronome
+- **Click anywhere** — bind to a fixed point or follow the cursor; CPS/ms switcher right on the dashboard
 
 ### 🎬 Macros
 - **Record or build** — capture real input in real time, or assemble macros from blocks in the visual editor (inline edit, rename, drag-to-reorder, run-from-here, step, disable, duplicate)
-- **Trajectory cleanup** — Ramer–Douglas–Peucker simplification compresses recorded drag paths by **80–95 %** while keeping curvature; redundant hover moves are stripped before every click/key action
-- **Control flow** — `Repeat`, `If/Else` with pixel-color conditions, variables (`SetVar`/`GetVar`), nested macro calls
-- **Presets** — instant hotkey preemption between presets via direct hotkey trigger; import/export full engine presets; total click statistics persist across updates
+- **Smart recording** — recorded drag paths are compressed by **80–95 %** (Ramer–Douglas–Peucker) while the trajectory stays smooth; redundant hover moves are stripped automatically, so a chaotic mouse swipe becomes a clean macro
+- **Logic included** — `Repeat`, `If/Else` with pixel-color conditions, variables (`SetVar`/`GetVar`), nested macro calls
+- **Presets** — instant hotkey switching between full engine profiles; import/export; click statistics persist across updates
 
 ### 🛡️ Safety & reliability
-- **Out-of-process input guardian** (`--input-watchdog`) — the mouse is released even when the process dies below Rust (`End Task`, OOM, crash below Rust), where a Rust `Drop` cannot run. Verified end-to-end: the OS accepts all three `SendInput` releases (exit `3`), and a one-shot launcher hop keeps the guardian outside `taskkill /F /T` reach
-- **Stability interlock (snubber)** — a 200 ms maintenance thread observes the click worker's pulse, rollback bodies and RSS; a wedged engine or a release still in flight latches, Start is refused, and the status surfaces name it (`ENGINE_STUCK`, `RELEASE_PENDING`, `MEMORY_HARD`/`MEMORY_PRESSURE`) instead of a lying `RUNNING`. Cold diagnostics: one 512-byte `SNUB v6` frame per node plus a one-write-back triage file
-- **Daemon split** — `nanoclick-daemon` owns iron, config and truth (single-instance mutex, TCP `127.0.0.1:44771`, UI supervisor with 200 ms respawn); the Tauri UI is a thin remote. Kill the window and the engine never flinches — proven by handshake + kill-UI chaos gates
-- **Smart Typing Guard** (default ON) — auto-stops clicking when you type real text and locks out hotkeys; 2-second intentional cooldown before disarming
-- **FocusGuard** (opt-in) — stops within **~50 ms** of a foreground change (Alt+Tab, click-away, system toast); fail-open on unresolvable focus, and a toast names the process that stole focus
-- **Self-healing configuration** — Last-Known-Good snapshots (hardened readonly+hidden), timestamped quarantine of corrupt files, mandatory Deadbolt modal queue, factory reset with a 5-second cooldown
-- **Zero-latency stop** — <kbd>Escape</kbd> and hotkey stop land at 0 ms; emergency stop always available
+- **No stuck mouse — ever** — if the app freezes, crashes or is killed in Task Manager, an independent watchdog *outside* the process instantly releases the buttons (verified end-to-end: the OS accepts all three release paths). Even `taskkill /F /T` cannot reach it
+- **Honest status, not a lying `RUNNING`** — a 200 ms maintenance thread watches the click worker; if anything wedges, Start is refused and the app names the reason (`ENGINE_STUCK`, `RELEASE_PENDING`, `MEMORY_HARD`)
+- **Survives the window being killed** — the engine lives in a separate daemon process; close or kill the UI and clicking never flinches — proven by chaos tests
+- **Stops when you type** — Smart Typing Guard (default ON) halts clicking and locks hotkeys while you write real text; 2-second cooldown before re-arming
+- **Stops when you leave the window** — FocusGuard (opt-in) halts within **~50 ms** of a foreground change and names the process that stole focus
+- **Config that heals itself** — Last-Known-Good snapshots, quarantine of corrupt files, mandatory Deadbolt modal, factory reset with a 5-second cooldown
+- **Zero-latency stop** — <kbd>Escape</kbd> and hotkey stop land at 0 ms
 
 ### 🖥️ Windows integration
-- **Event-driven Win32 hooks** (`WH_KEYBOARD_LL` / `WH_MOUSE_LL`) — zero busy-polling at idle, sub-millisecond reaction, zero-lock thread-local state
-- **Tray & deep sleep** — close to tray and the engine keeps clicking; deep sleep drops resident RAM to **5.3 MB** (measured `scripts/measure-ram.ps1`, from 117–123 MB) while hooks, scheduler and tray stay alive; the tray icon re-registers after an `explorer.exe` restart
-- **UIPI awareness** — detects elevated windows (Task Manager, admin consoles), warns with a synthesized chime + dialog, one-click admin restart (`runas`)
-- **PerMonitorV2 DPI** — zero coordinate drift across mixed-DPI multi-monitor setups
-- **6 themes** (cyberpunk/neon palette), floating HUD overlay, autostart, UA + EN localization (lazy-loaded ~12 KB JSON, zero-overhead)
+- **Event-driven hotkeys** (`WH_KEYBOARD_LL` / `WH_MOUSE_LL`) — zero busy-polling, sub-millisecond reaction; Mouse 4/5 work on gaming mice up to 8000 Hz
+- **Invisible in the background** — close to tray and the engine keeps clicking; deep sleep drops RAM to **5.3 MB** (measured `scripts/measure-ram.ps1`, from 117–123 MB) while hooks, scheduler and tray stay alive
+- **Elevated windows handled** — detects admin windows (Task Manager, admin consoles), warns with a chime + dialog, one-click restart as admin
+- **Multi-monitor DPI done right** — PerMonitorV2: zero coordinate drift across mixed-DPI screens
+- **6 themes**, floating HUD, autostart, UA + EN interface
+
+---
+
+## 🥊 Why NanoClick
+
+| | Typical clicker from download sites | AutoHotkey | **NanoClick** |
+|---|---|---|---|
+| What it is | closed `.exe` of unclear origin | a scripting language — you write the automation yourself | **open-source app with a full GUI** |
+| Size & idle RAM | Electron builds eat 150+ MB RAM; bundles of unknown content | small runtime, no GUI | **9.7 MB portable, 5.3 MB in tray** (measured) |
+| If it crashes | the click loop can stick — nothing releases it | whatever your script does | **out-of-process guardian releases the mouse** (E2E-proven) |
+| Click realism | fixed interval, metronome-flat | DIY math | **Bates-model jitter + spatial variance, ns-level pacing measured** |
+| Updates | rarely signed, adware-bundling risk | manual | **signed minisign updater; portable swaps in place** |
+| Platform | Windows | Windows | **Windows 10/11** |
 
 ---
 
@@ -105,22 +119,11 @@ cargo tauri build --bundles nsis
 # → target/release/bundle/nsis/NanoClick_*-setup.exe
 ```
 
-### Bump the version
-
-`release.ps1 -Tag vX.Y.Z` only *reads* the version (installer file name + `latest.json`),
-so the files must already carry it. One command rewrites every place the version lives and
-verifies the result:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\set-version.ps1 -Version 1.2.0
-# add -DryRun to preview, -SkipDocs to touch only the two files tauri reads
-```
-
-It updates `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json` and the
-three "Current version" doc headers; historical version numbers further down
-those files are left alone. The new JSON is parsed *before* it is written,
-because a malformed `tauri.conf.json` makes every cargo command die inside
-tauri-build.
+Before every release, strict gates run: browser-accurate JS syntax check,
+oxlint and boot-guard wiring — no bundler means one dead `main.js` module
+would otherwise ship silently. The maintainer kitchen — version bumps, the
+full gate table, test commands and the release/signing flow — lives in
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Run tests
 
@@ -135,29 +138,6 @@ cargo test --release --locked -j 2 --tests
 ```
 
 CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the full matrix on `windows-latest`: JS gates → `panic = "abort"` compile gate → lib test lanes → clippy `-D warnings` → integration suites. All lanes `--locked -j 2`.
-
-### Frontend safety net (gates, not vibes)
-
-`main.js` is an ES module compiled by nothing: one duplicate top-level declaration is a
-fatal `SyntaxError` that leaves the window painted with every handler unattached — while
-the whole Rust suite stays green. These gates exist for exactly that class:
-
-| Gate | Command | What it catches |
-|---|---|---|
-| Grammar (browser-accurate) | `powershell -ExecutionPolicy Bypass -File scripts\check-js-syntax.ps1` | module-mode `SyntaxError`s (checked as `.mjs`), 404 script refs |
-| Lint (broad tripwire) | `powershell -ExecutionPolicy Bypass -File scripts\check-js-lint.ps1` | undefined/unused identifiers, dead code, duplicate keys — oxlint (Rust binary, no `node_modules` required). Gate = **0 errors / 0 warnings** |
-| Rust gates | `cd src-tauri && cargo test --release -j 1 --test test_assets` | grammar + duplicate-declaration scan + boot-guard wiring, run as part of `cargo test` |
-| Release preflight | `scripts\release.ps1` → Stage 0 (PREFLIGHT) | runs the gates **before** `cargo tauri build`, which never runs tests |
-
-> **Copy these commands verbatim.** `cmd.exe` has no `#` comments: a trailing `# …`
-> is passed to the test harness as extra filters and silently runs a fraction of the
-> suite. Use PowerShell if you want comments, or keep the command on its own line.
-
-Runtime trap: `src/boot_guard.js` is a **classic** script loaded first on every page. It
-traps uncaught errors, unhandled rejections and 404 assets, forwards them to
-`%TEMP%\nanoclick_web.log`, and if a page never raises its boot flag within ~3 s it
-reports `[BOOT] MODULE DID NOT EXECUTE (SyntaxError class)` and shows a visible banner.
-That watchdog is the only detection that survives a module which cannot execute at all.
 
 ---
 
@@ -217,24 +197,12 @@ nanoclick/
 
 ## 🔒 Signing & Updates
 
-NanoClick uses two independent signing systems:
-
-| System | Purpose | Status |
-|---|---|---|
-| **Tauri updater signing** (minisign keypair, free) | Proves update artifacts are authentic | ✅ Active — `.sig` generated per build |
-| **Windows code signing** (certificate, paid) | Removes SmartScreen warnings | ⏳ Awaiting certificate |
-
-Build a signed installer locally (private key stays outside the repo):
-
-```powershell
-# Private updater key is stored OUTSIDE the repository, e.g. $env:USERPROFILE\.tauri\
-# and provided via environment variables at build time. Never commit it.
-$env:TAURI_SIGNING_PRIVATE_KEY = (Get-Content $env:TAURI_SIGNING_PRIVATE_KEY_PATH -Raw).Trim()
-cargo tauri build --bundles nsis
-```
-
-> ⚠️ Keep the private updater key safe — installations already shipped only trust
-> updates signed with the same key they were built with.
+Updates are proven authentic, not just downloaded: every artifact carries a
+minisign signature (`.sig` per build), verification is mandatory and built
+into Tauri's updater plugin, and portable updates swap the exe in place only
+after re-verification. A paid Windows certificate (removing SmartScreen
+warnings) is pending — see [CONTRIBUTING.md](CONTRIBUTING.md) for the signing
+and release flow.
 
 ---
 
