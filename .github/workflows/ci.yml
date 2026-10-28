@@ -56,7 +56,9 @@ jobs:
           repository: Ar3ss12/snubber
           # Full SHA required: actions/checkout treats a short ref as a
           # branch name and the git fetch dies (measured: first CI run).
-          ref: 3849cf6527d557070310fae1ab883745caf1d4d0
+          # This SHA is snubber 0.7.0 — it must match Cargo.lock, or every
+          # `--locked` step dies on a version mismatch before compiling.
+          ref: c1eef0dcd19d83c68857c81b58b93be87a417dc7
           path: snubber
 
       - name: Stage snubber where the path dependency resolves
