@@ -1,15 +1,26 @@
 # ⚡ NanoClick
 
-**The lightweight native auto clicker for Windows** — human-like clicks, macro
-recorder, visual editor. No Electron, no bloat: **~3.4 MB** installer
-(measured 2026-10-28).
+<p align="center">
+  <b>The lightweight native auto clicker & macro editor for Windows.</b><br>
+  Human-like clicks. Zero lag. No Electron. Pure Rust speed.
+</p>
 
-![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue)
-[![CI](https://github.com/Ar3ss12/nanoclick/actions/workflows/ci.yml/badge.svg)](https://github.com/Ar3ss12/nanoclick/actions/workflows/ci.yml)
+<p align="center">
+  <img src="https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011-0078D6?style=flat-square&logo=windows&logoColor=white" alt="Platform">
+  <img src="https://img.shields.io/badge/RAM_in_tray-5.3_MB-brightgreen?style=flat-square" alt="RAM">
+  <img src="https://img.shields.io/badge/Installer-%7E3.4_MB-orange?style=flat-square" alt="Size">
+  <a href="https://github.com/Ar3ss12/nanoclick/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Ar3ss12/nanoclick/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
+</p>
 
-**⬇️ [Download v1.3.0](https://github.com/Ar3ss12/nanoclick/releases/tag/v1.3.0)** —
-installer `NanoClick_1.3.0_x64-setup.exe` (~3.4 MB) or zero-install portable
-`NanoClick-portable.exe` (~9.7 MB)
+<p align="center">
+  <a href="https://github.com/Ar3ss12/nanoclick/releases/latest">
+    <img src="https://img.shields.io/github/v/release/Ar3ss12/nanoclick?style=for-the-badge&label=%E2%AC%87%EF%B8%8F_Download&color=2ea44f" height="38" alt="Download latest release">
+  </a>
+  &nbsp;
+  <a href="https://github.com/Ar3ss12/nanoclick/releases/latest">
+    <img src="https://img.shields.io/badge/PORTABLE_%7C_9.7_MB-gray?style=for-the-badge" height="38" alt="Portable build">
+  </a>
+</p>
 
 <p align="center">
   <img src=".github/assets/main_preview.png" alt="NanoClick Dashboard Preview" width="800">
@@ -17,99 +28,100 @@ installer `NanoClick_1.3.0_x64-setup.exe` (~3.4 MB) or zero-install portable
 
 ---
 
-## Why NanoClick
+## ⚡ Quick Start (10 Seconds)
 
-| A clicker from a random download site | NanoClick |
-|---|---|
-| Electron UI eating 150+ MB of RAM; an unsigned exe of unknown origin | **9.7 MB portable, 5.3 MB in tray** (measured) — open source, signed updates |
-| A crash can leave your mouse stuck in a click loop | **a watchdog *outside* the process releases the buttons — always, even after End Task** (proven end-to-end) |
-| Metronome-flat fixed-interval clicks a bot detector smells instantly | **human-like jitter and timing modeled on real hand biomechanics** — and the timing math costs nanoseconds per click, so your FPS never feels it (measured) |
+1. **[Download](https://github.com/Ar3ss12/nanoclick/releases/latest)** the installer (`.exe`) or grab the portable version (zero install).
+2. **Press <kbd>F6</kbd> or <kbd>R</kbd>** — clicking starts immediately.
+3. **Press <kbd>Escape</kbd>** — instant emergency stop anytime.
 
 ---
 
-## What it does
+## 🥊 Why NanoClick?
+
+| Typical clickers from the web | NanoClick |
+|---|---|
+| ❌ Bloated Electron apps eating **150+ MB RAM** | ✅ **Only 5.3 MB RAM in tray** — pure native Rust |
+| ❌ Crashes leave your mouse **stuck clicking** | ✅ **Watchdog outside the process** — the mouse always releases, even on crash |
+| ❌ Robotic metronome-flat timing | ✅ **Human-like jitter & biomechanics** — and the timing math costs nanoseconds, so your FPS never feels it |
+
+---
+
+## ✨ Features
 
 <table>
-<tr><th valign="top">🖱️ Clicker</th><th valign="top">🎬 Macros</th></tr>
+<tr><th width="50%" valign="top">🖱️ Click Engine</th><th width="50%" valign="top">🎬 Visual Macro Builder</th></tr>
 <tr><td valign="top">
 
-- Single / Double / Hold / Butterfly / Drag, 0.1–160 CPS
-- Hotkey speed adjustment on the fly, live telemetry
-- Human-like timing: Bates-model jitter (±0–35 %), spatial variance (±0–50 px), hold times and a fatigue tail — reads like a hand, not a metronome
-- Bind to a fixed point or follow the cursor
-- CPS/ms switcher right on the dashboard, floating HUD, 6 themes
+- **Modes** — Single, Double, Hold, Butterfly, Drag (0.1–160 CPS)
+- **Human-like timing** — natural jitter, hold times and spatial variance modeled on real hand biomechanics
+- **Zero lag** — the click math takes nanoseconds per click; your game never stutters
+- **Targeting** — click at the cursor position or lock to fixed screen coordinates
+- **Clean UI** — CPS/ms switcher, floating HUD, 6 themes
 
 </td><td valign="top">
 
-- Record real input in real time, or build macros from blocks
-- Visual editor: rename, drag-to-reorder, run-from-here, step, disable, duplicate
-- Recorded drag paths are compressed by **80–95 %** — a chaotic mouse swipe becomes a clean macro
-- Logic included: `Repeat`, `If/Else` with pixel-color conditions, variables, nested macro calls
-- Presets switch instantly on hotkeys; import/export; click stats persist across updates
+- **Record or create** — capture live input or build macros from blocks
+- **Smart compression** — recorded drag paths shrink by **80–95 %** for smooth playback
+- **Logic blocks** — `Repeat`, `If/Else` with pixel-color conditions, variables, nested macro calls
+- **Instant presets** — switch full engine profiles on the fly with hotkeys
+- **Stats** — live telemetry and persistent click history
 
 </td></tr>
 </table>
 
-### And it is hard to break
+### 🛡️ Built Like a Tank
 
-- **No stuck mouse — ever.** If the app freezes, crashes or gets killed in
-  Task Manager, an independent watchdog outside the process instantly
-  releases the buttons
-- **Honest status.** If anything wedges internally, the app refuses to start
-  and tells you why — it never shows a fake "Running"
-- **Kill the window, nothing happens.** The engine lives in a separate daemon
-  process; closing or killing the UI never interrupts clicking
-- **Stops when you type** (default on) and **when you leave the window**
-  (optional) — FocusGuard reacts within ~50 ms and names the app that stole
-  focus
-- **Config that heals itself.** Last-Known-Good snapshots, quarantine of
-  corrupt files, factory reset with a 5-second cooldown
-- **Zero-latency stop** — <kbd>Escape</kbd> and hotkey stop land at 0 ms
+* **Never gets stuck:** if the app freezes, crashes, or is killed in Task Manager — an independent watchdog outside the process instantly releases all mouse buttons.
+* **Typing Guard:** automatically pauses clicking while you type real text, so your chat never gets ruined.
+* **FocusGuard:** halts clicking within ~50 ms when you Alt+Tab or switch windows.
+* **Immortal daemon:** the click engine runs in a dedicated background process — closing or killing the UI window never stops your clicks.
 
 ---
 
 ## ⌨️ Default Hotkeys
 
-| Action | Keys |
+| Action | Hotkey |
 |---|---|
-| Start / Stop autoclicker | <kbd>R</kbd> / <kbd>K</kbd> / <kbd>F6</kbd> |
-| Toggle Autoclicker ↔ Work Mode | <kbd>Ctrl+Alt+M</kbd> |
-| Emergency stop | <kbd>Escape</kbd> |
-| Speed up (+1 CPS) | <kbd>Ctrl+=</kbd> |
-| Slow down (−1 CPS) | <kbd>Ctrl+−</kbd> |
-| Capture screen coordinates | <kbd>Ctrl+P</kbd> |
-| Start / Stop macro recording | <kbd>Ctrl+Shift+R</kbd> |
+| **Start / Stop Clicker** | <kbd>F6</kbd> / <kbd>R</kbd> / <kbd>K</kbd> |
+| **Emergency Stop** | <kbd>Escape</kbd> |
+| **Speed Up / Down (±1 CPS)** | <kbd>Ctrl</kbd>+<kbd>=</kbd> / <kbd>Ctrl</kbd>+<kbd>−</kbd> |
+| **Pick Screen Coordinates** | <kbd>Ctrl</kbd>+<kbd>P</kbd> |
+| **Record Macro (Start / Stop)** | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> |
+| **Toggle Work Mode** | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>M</kbd> |
 
-## 📦 System requirements
+---
 
-- Windows 10/11; installs per-user, no admin rights needed
-- WebView2 runtime (preinstalled on Windows 10/11; downloaded automatically if missing)
-- Updates are signed and verified before install
+<details>
+<summary><b>🛠️ Developer & Build Details (click to expand)</b></summary>
 
-## 🛠️ Build from Source
+### System requirements
+
+* Windows 10 / 11 (64-bit)
+* WebView2 runtime (preinstalled on Windows 10/11; downloaded automatically if missing)
+
+### Build from source
 
 ```bash
 git clone https://github.com/Ar3ss12/nanoclick.git
 cd nanoclick
-cargo tauri dev          # dev mode
-cargo tauri build --bundles nsis
-# → target/release/bundle/nsis/NanoClick_*-setup.exe
+cargo tauri dev                    # run in development
+cargo tauri build --bundles nsis   # build the release installer
 ```
 
-**Prerequisites:** [Rust](https://rustup.rs) (stable-msvc), Microsoft C++ Build Tools.
+*Prerequisites: [Rust](https://rustup.rs) (stable-msvc), Microsoft C++ Build Tools.*
 
-Developer docs — test commands, the JS gate table, version bumps, the release
-and signing flow, and the architecture diagram — live in
-[CONTRIBUTING.md](CONTRIBUTING.md). What's new: [CHANGELOG.md](CHANGELOG.md).
+Full architecture, test commands and the release/signing flow:
+[CONTRIBUTING.md](CONTRIBUTING.md) · What's new: [CHANGELOG.md](CHANGELOG.md)
 
-## 📄 License & good to know
+</details>
 
-- Free for personal use — PolyForm Noncommercial 1.0.0 plus the NanoClick
-  Additional Terms ([LICENSE.md](LICENSE.md) is the single source of truth)
-- Windows only — the engine is built on Win32 input APIs
-- Clicks into elevated windows are detected and warned about, never forced
+---
 
-© 2026 Ar3ss12 · All rights not expressly granted are reserved.
+## 📄 License
+
+Free for personal and educational use under the **PolyForm Noncommercial
+License 1.0.0** ([LICENSE.md](LICENSE.md)).
+*Commercial operations and selling binaries require a commercial license.*
 
 ---
 
@@ -125,6 +137,6 @@ and signing flow, and the architecture diagram — live in
   </a>
 </p>
 
----
-
-<p align="center">Built with ❤️ using <a href="https://tauri.app">Tauri</a></p>
+<p align="center">
+  <sub>© 2026 Ar3ss12 · Built with native Rust & <a href="https://tauri.app">Tauri</a></sub>
+</p>
