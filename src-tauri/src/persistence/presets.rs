@@ -66,9 +66,12 @@ pub fn presets_path() -> PathBuf {
             .map(|p| p.join("nanoclick_data").join(PRESETS_FILE))
             .unwrap_or_else(|| PathBuf::from("./nanoclick_data").join(PRESETS_FILE))
     } else {
-        let dirs = directories::ProjectDirs::from("com", "nanoclick", "NanoClick")
-            .expect("ProjectDirs resolve");
-        dirs.config_dir().join(PRESETS_FILE)
+        match directories::ProjectDirs::from("com", "nanoclick", "NanoClick") {
+            Some(dirs) => dirs.config_dir().join(PRESETS_FILE),
+            // Same last resort as `ConfigManager::with_portable` (see
+            // `macros_path`): never panic when %APPDATA% is unavailable.
+            None => PathBuf::from(".nanoclick").join(PRESETS_FILE),
+        }
     }
 }
 

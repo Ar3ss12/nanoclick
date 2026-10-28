@@ -396,7 +396,7 @@ pub fn ensure_satellite(app: &AppHandle, label: &str) -> Result<tauri::WebviewWi
     SATELLITE_BUSY.store(true, Ordering::Release);
     let _busy_guard = SatelliteBusyGuard;
     let mut result = build_satellite(app, label).or_else(|first_err| {
-        // Lost the race (or a zombie lingers in the window map): the
+        // Lost the race (or a stale entry lingers in the window map): the
         // survivor wins. Second get, no second build.
         app.get_webview_window(label).ok_or(first_err)
     });
@@ -512,6 +512,13 @@ pub fn toggle_overlay(app: AppHandle, show: bool) -> Result<SatelliteToggle, Str
             Err("satellite busy — toggle in progress".into())
         }
         Err(snubber::SnubberError::Work(e)) => Err(e),
+        // `SnubberError` is `#[non_exhaustive]`: a variant we do not know yet
+        // must still answer the page. Keep the checkbox locked (deferred) —
+        // the toggle definitely did not complete.
+        Err(other) => {
+            note_satellite_deferred();
+            Err(format!("satellite busy — toggle in progress ({other})"))
+        }
     }
 }
 

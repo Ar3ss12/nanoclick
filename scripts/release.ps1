@@ -294,11 +294,10 @@ if ($preflightRuns) {
     # 3. Rust gates (JS syntax + boot-guard wiring live in tests/test_assets.rs).
     Push-Location $repoRoot
     try {
-        # Job count: the release profile is built with LTO + codegen-units=1, which is
-        # memory-hungry — a 2-job run has already died with "rustc-LLVM ERROR: out of
-        # memory". Default to 1 (the repo's documented "after cargo clean" rule) and let
-        # a machine with headroom raise it: `set CARGO_BUILD_JOBS=4` before the script.
-        $jobs = if ($env:CARGO_BUILD_JOBS -and $env:CARGO_BUILD_JOBS -match '^\d+$') { $env:CARGO_BUILD_JOBS } else { "1" }
+        # Job count: 2 is the measured default on this host (faster than 1 and still
+        # inside memory). LTO makes the release rlib compile memory-hungry — on an OOM
+        # rerun once with `set CARGO_BUILD_JOBS=1`, never above 2.
+        $jobs = if ($env:CARGO_BUILD_JOBS -and $env:CARGO_BUILD_JOBS -match '^\d+$') { $env:CARGO_BUILD_JOBS } else { "2" }
         $env:CARGO_BUILD_JOBS = $jobs
         if ($FullTests) {
             Write-StepLog "Running the full test suite" "cargo test --release -j $jobs -- --skip physical_"
@@ -339,11 +338,11 @@ if ($Action -in @("all", "build")) {
         $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = $KeyPassword
     }
 
-    # Build concurrency: same memory rule as the preflight — the release profile is
-    # LTO + codegen-units=1, and a 2-job run has already died with "rustc-LLVM ERROR:
-    # out of memory". Default to 1; raise it on a machine with headroom via
-    # `set CARGO_BUILD_JOBS=4` before running this script.
-    $buildJobs = if ($env:CARGO_BUILD_JOBS -and $env:CARGO_BUILD_JOBS -match '^\d+$') { $env:CARGO_BUILD_JOBS } else { "1" }
+    # Build concurrency: 2 is the measured default on this host (faster than 1 and
+    # still inside memory). The LTO release link is the peak-memory step — if it dies
+    # with "memory allocation ... failed" / "os error 1453", rerun once with
+    # `set CARGO_BUILD_JOBS=1`; do not raise above 2.
+    $buildJobs = if ($env:CARGO_BUILD_JOBS -and $env:CARGO_BUILD_JOBS -match '^\d+$') { $env:CARGO_BUILD_JOBS } else { "2" }
     Write-StepLog "Configuring build concurrency" "CARGO_BUILD_JOBS=$buildJobs"
     $env:CARGO_BUILD_JOBS = $buildJobs
 

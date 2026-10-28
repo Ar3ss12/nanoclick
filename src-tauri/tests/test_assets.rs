@@ -534,9 +534,9 @@ fn test_overlay_assets_and_capabilities() {
         "overlay.js must invoke overlay_ready signal"
     );
 
-    // 4. ONE owner for the satellite windows: both checkboxes save, and the
-    // save path (save_app_config) toggles. No direct invoke may remain — the
-    // fast-path raced the save and flashed an empty WebView (DWM white flash).
+    // 4. ONE owner for the satellite windows: the toggle commands. The page
+    // asks them directly (checkbox handlers, applyPreset, backup import) and a
+    // config save is persistence only, so a save can never build a WebView.
     let main_js_key = tauri::utils::assets::AssetKey::from("main.js");
     let main_js_bytes = ctx
         .assets()
@@ -544,16 +544,20 @@ fn test_overlay_assets_and_capabilities() {
         .expect("main.js must be embedded");
     let main_js = String::from_utf8_lossy(&main_js_bytes);
     assert!(
-        !main_js.contains("invoke(\"toggle_overlay\", { show"),
-        "ONE owner: the ripple checkbox saves, save_app_config toggles"
+        main_js.contains("invoke(\"toggle_overlay\", { show"),
+        "the ripple preference must drive the window through toggle_overlay"
+    );
+    assert!(
+        main_js.contains("invoke(\"toggle_hud_window\", { show"),
+        "the HUD preference must drive the window through toggle_hud_window"
+    );
+    assert!(
+        main_js.contains("const SATELLITE_LOCK_MS = 800;"),
+        "both satellite checkboxes must lock for the 800 ms WebView2 build window"
     );
     assert!(
         !main_js.contains("document.addEventListener(\"mousemove\""),
         "main.js must not contain obsolete mousemove listener"
-    );
-    assert!(
-        !main_js.contains("invoke(\"toggle_hud_window\", { show"),
-        "ONE owner: the HUD checkbox saves, save_app_config toggles"
     );
     assert!(
         main_js.contains("listen(\"satellite-toggle-result\""),
@@ -3831,16 +3835,24 @@ fn test_secondary_windows_never_outlive_the_main_window() {
         "overlay_ready / toggle_overlay must consult the same gate"
     );
 
-    // The staggered boot thread must re-read BOTH inputs after its sleep: the
-    // setting may be off by then, and the app may already live in the tray.
+    // The staggered boot thread re-checks the main window AFTER its sleep and
+    // delegates the decision to `show_secondary_windows` (single owner). The
+    // persisted setting is re-read inside that owner — the sleep can outlive a
+    // user flip — so the thread must not carry a second copy of it.
     let boot_thread = section(
         lib_src,
-        "// Re-check both inputs after the sleep",
+        "// Let the main window finish loading first",
         "// ── Observer watcher",
     );
     assert!(
-        boot_thread.contains("visual_ripple") && boot_thread.contains("main_window_visible(&h)"),
-        "a sleepy thread must re-check the setting and the main window before creating a window"
+        boot_thread.contains("main_window_visible(&h)")
+            && boot_thread.contains("show_secondary_windows(&h)"),
+        "a sleepy thread must re-check the main window and delegate to the single owner"
+    );
+    assert!(
+        show_secondary.contains("config_manager.load()")
+            && show_secondary.contains("cfg.ui.visual_ripple"),
+        "the single owner must re-read the setting when the sleep ends"
     );
     // And the rebuild path owns no second copy of that decision.
     let rebuild = section(
@@ -6881,26 +6893,29 @@ fn test_save_app_config_is_non_blocking_and_offloads_satellite_build() {
 
     // Level 1 Timing & Non-blocking verification:
     // save_app_config must NEVER run WebviewWindowBuilder::build synchronously on the UI thread.
-    // It settles the config scope first (scoped commit), then toggles satellites
-    // synchronously: the toggles go through the satellite bulkhead (busy under
-    // contention) and the F6 visibility gate (deferred in tray) without blocking
-    // on a WebView build.
-    let save_app = section(lib_src, "fn save_app_config(", "fn get_app_config");
+    // It settles the config scope first (scoped commit) and owns persistence
+    // only: satellite windows belong to the toggle commands, so no toggle may
+    // appear in the save body at all.
+    let save_app = section(lib_src, "fn save_app_config(", "fn toggle_mode");
     assert!(
-        save_app.contains("node.scoped("),
+        save_app.contains("stability::config_node()"),
+        "save_app_config must take the config bulkhead"
+    );
+    assert!(
+        save_app.contains(".scoped("),
         "save_app_config must run the save inside node.scoped()"
     );
     assert!(
         save_app.contains("match outcome"),
-        "save_app_config must unpack the scoped outcome before side-effects"
+        "save_app_config must unpack the scoped outcome"
     );
     assert!(
-        save_app.contains("overlay::toggle_overlay(app.clone(), want_ripple)"),
-        "save_app_config handles the overlay toggle after the scope commits"
+        !save_app.contains("overlay::toggle_overlay("),
+        "save_app_config is persistence only: the toggle commands own the overlay"
     );
     assert!(
-        save_app.contains("toggle_hud_window(app.clone(), want_hud)"),
-        "save_app_config handles the hud toggle after the scope commits"
+        !save_app.contains("toggle_hud_window("),
+        "save_app_config is persistence only: the toggle commands own the hud"
     );
 
     // Also verify reset_config_to_defaults settles its scope before toggles.

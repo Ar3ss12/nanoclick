@@ -47,6 +47,16 @@ fn apply_webview_memory_policy() {
 }
 
 fn main() {
+    // Guardian host: `--input-watchdog <pid>`. Handled before anything else —
+    // this process must never boot Tauri, take the single-instance lock or
+    // touch the log/logging state of the dead parent.
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(code) = nanoclick::input_guardian::run_if_watchdog(&args) {
+        std::process::exit(code);
+    }
+    // Before any other work: a panic in satellite mode, the update handover
+    // wait, or Tauri setup must leave a trace in the shared log.
+    nanoclick::install_panic_logger();
     apply_webview_memory_policy();
     // Stage A — satellite quarantine: the same binary as a satellite host.
     // Checked FIRST so a satellite never touches the update handover,

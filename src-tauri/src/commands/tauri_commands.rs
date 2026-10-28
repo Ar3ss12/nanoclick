@@ -189,6 +189,8 @@ pub async fn portable_self_update(
         .arg(format!("{}{}", pu::UPDATED_FROM_ARG_PREFIX, my_pid))
         .spawn()
         .map_err(|e| pu::classify_portable_update_error("respawn", &e.to_string()))?;
+    // Deliberate handover, not a crash: the guardian must not inject.
+    crate::input_guardian::mark_clean_exit();
     std::process::exit(0);
 }
 
@@ -306,8 +308,8 @@ pub fn get_cursor_pos_now() -> (i32, i32) {
 }
 
 /// Fold one 66 ms telemetry tick into the Rust-owned session stats.
-/// Returns the persisted totals + whether the page should schedule a save.
-/// The page keeps only Canvas paint; counting lives here now.
+/// Returns the live totals + whether this tick persisted them. Counting
+/// lives here; the page keeps only the Canvas paint.
 #[tauri::command]
 pub fn stats_tick(
     state: State<'_, crate::AppState>,
@@ -317,20 +319,22 @@ pub fn stats_tick(
     now_ms: u64,
 ) -> serde_json::Value {
     use crate::stats_agg::StatsFlush;
-    let mut cfg = state.config_manager.load();
-    // Fold + snapshot under ONE lock: the page used to call `stats_tick`
-    // then `get_session_stats` (two IPC round-trips per telemetry frame).
-    // Returning the session mirror here halves the tick IPC rate.
-    let (flush, session) = match state.session_stats.lock() {
+    // HOT PATH: one call per 66 ms telemetry tick (~15/s while a run is
+    // alive). Totals live in `SessionStats` — no disk read on this path.
+    // Only a coalesced flush (run start/end, or every
+    // STATS_PERSIST_INTERVAL_MS mid-run) reloads and saves the config: the
+    // previous load()+save() per tick wrote config.json + stats.json + the
+    // LKG snapshot ~15x/s during a run, which is what lagged the interface.
+    let (flush, session, totals) = match state.session_stats.lock() {
         Ok(mut s) => {
-            let flush = s.tick(&mut cfg.stats, active, clicks_done, cps, now_ms);
+            let flush = s.tick(active, clicks_done, cps, now_ms);
             let session = serde_json::json!({
                 "session_clicks": s.session_clicks,
                 "run_clicks": s.run_clicks,
                 "session_active_ms": s.session_active_ms,
                 "active_now": s.active_now,
             });
-            (flush, session)
+            (flush, session, s.totals.clone())
         }
         Err(_) => (
             StatsFlush::None,
@@ -340,15 +344,18 @@ pub fn stats_tick(
                 "session_active_ms": 0,
                 "active_now": false,
             }),
+            crate::config_manager::StatsConfig::default(),
         ),
     };
     let should_save = flush == StatsFlush::Save;
     if should_save {
+        let mut cfg = state.config_manager.load();
+        cfg.stats = totals.clone();
         let _ = state.config_manager.save(&cfg);
     }
     serde_json::json!({
         "saved": should_save,
-        "totals": cfg.stats,
+        "totals": totals,
         "session": session,
     })
 }

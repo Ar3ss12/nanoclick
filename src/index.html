@@ -623,7 +623,7 @@
                     </div>
                   </div>
                 </div>
-                <label class="checkbox-row">
+                <label class="checkbox-row" id="startMinimizedRow">
                   <input type="checkbox" id="startMinimizedCheckbox" class="custom-checkbox">
                   <span class="checkbox-box"></span>
                   <span data-i18n="settings_start_minimized">Start Minimized to Tray</span>
@@ -712,14 +712,17 @@
                 <button class="swatch" data-accent="#f97316" style="background:#f97316;"></button>
                 <button class="swatch" data-accent="#eab308" style="background:#eab308;"></button>
               </div>
-              <div class="checkbox-list" style="padding-top:8px;border-top:1px solid rgba(255,255,255,0.06);">
+              <!-- STUB: Ripple/HUD controls are hidden until the feature returns.
+                   Elements and IDs stay so main.js hydrate/save keeps working;
+                   backend (overlay/hud windows, toggles) is untouched. -->
+              <div class="checkbox-list" style="display:none;padding-top:8px;border-top:1px solid rgba(255,255,255,0.06);">
                 <label class="checkbox-row">
-                  <input type="checkbox" id="rippleCheckbox" checked class="custom-checkbox">
+                  <input type="checkbox" id="rippleCheckbox" checked disabled class="custom-checkbox">
                   <span class="checkbox-box"></span>
                   <span class="settings-label" data-i18n="settings_ripple_label">Visual Click Ripple Effect</span>
                 </label>
                 <label class="checkbox-row">
-                  <input type="checkbox" id="hudCheckbox" class="custom-checkbox">
+                  <input type="checkbox" id="hudCheckbox" disabled class="custom-checkbox">
                   <span class="checkbox-box"></span>
                   <span class="settings-label" data-i18n="settings_hud_label">Floating Click Counter HUD</span>
                 </label>

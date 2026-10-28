@@ -226,8 +226,8 @@ const tI18n = (k, fb) => (window.I18nEngine ? window.I18nEngine.t(k, {}, fb) : f
     } catch (_) {}
   },
 
-  // Bring the window forward so the alert below is readable — but NEVER resurrect
-  // one that the app deliberately put in the tray. Closing to the tray is a
+  // Bring the window forward so the alert below is readable — but NEVER show
+  // one again that the app deliberately put in the tray. Closing to the tray is a
   // decision the user made, and a blocked click (the clicker running while the
   // window is hidden is the normal tray case) must not undo it: this used to call
   // show() unconditionally, which is why the window kept coming back on its own.

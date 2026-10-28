@@ -18,7 +18,7 @@
 //! # Fail-open
 //! Whenever the foreground process cannot be determined (lock screen, an
 //! elevated process we cannot query, our own window) the filter allows the
-//! click. A guard that silently kills clicking is worse than a guard that
+//! click. A guard that silently blocks clicking is worse than a guard that
 //! occasionally lets one through — the user always keeps the emergency stop.
 
 use super::now_ms;

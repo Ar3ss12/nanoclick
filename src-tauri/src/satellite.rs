@@ -181,6 +181,18 @@ pub fn run_satellite_supervisor(label: &'static str, app: tauri::AppHandle) {
                         );
                         return;
                     }
+                    // `RestartDecision` is `#[non_exhaustive]` (snubber
+                    // 0.6.13): an unknown verdict is never permission to
+                    // respawn — park the lineage instead of guessing.
+                    _ => {
+                        crate::debug_log_internal(
+                            "error",
+                            &format!(
+                                "[Satellite:{label}] unknown restart verdict — supervisor stops"
+                            ),
+                        );
+                        break;
+                    }
                 }
             }
         })

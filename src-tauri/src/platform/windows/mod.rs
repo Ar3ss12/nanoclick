@@ -410,19 +410,30 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
         w_param: WPARAM,
         l_param: LPARAM,
     ) -> LRESULT {
-        if n_code == 0 {
-            let kb = *(l_param.0 as *const KBDLLHOOKSTRUCT);
-            let message = w_param.0;
-            let is_down = message == 0x0100 || message == 0x0104;
-            let is_up = message == 0x0101 || message == 0x0105;
-            if (is_down || is_up) && kb.vkCode != 0 {
-                // Lock-free hand-over: no mutex locks, so the event cannot be
-                // dropped while this callback holds up the system input chain.
-                send_hook_event(GlobalKeyEvent {
-                    vk: kb.vkCode as u16,
-                    is_down,
-                });
+        // A panic must never unwind through the OS callback chain: in release
+        // (`panic = "unwind"`) an unwinding `extern "system"` frame aborts the
+        // process, which is the stuck-mouse scenario `input_guardian` exists to
+        // rescue. Contain it at the boundary instead.
+        let contained = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if n_code == 0 && l_param.0 != 0 {
+                let kb = *(l_param.0 as *const KBDLLHOOKSTRUCT);
+                let message = w_param.0;
+                let is_down = message == 0x0100 || message == 0x0104;
+                let is_up = message == 0x0101 || message == 0x0105;
+                if (is_down || is_up) && kb.vkCode != 0 {
+                    // Lock-free hand-over: no mutex locks, so the event cannot be
+                    // dropped while this callback holds up the system input chain.
+                    send_hook_event(GlobalKeyEvent {
+                        vk: kb.vkCode as u16,
+                        is_down,
+                    });
+                }
             }
+        }));
+        if contained.is_err() {
+            // Still inside the system input chain: no log, no allocation.
+            // The listener loop turns this counter into a diag line.
+            HOOK_PANICS.fetch_add(1, Ordering::Relaxed);
         }
         CallNextHookEx(None, n_code, w_param, l_param)
     }
@@ -448,28 +459,35 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
         w_param: WPARAM,
         l_param: LPARAM,
     ) -> LRESULT {
-        let msg = w_param.0;
-        // FAST-PATH: 1000-8000 Hz gaming mouse move bypass!
-        // If not XButton (0x020B, 0x020C) or MButton (0x0207, 0x0208) -> instant return!
-        if n_code != 0 || (msg != 0x020B && msg != 0x020C && msg != 0x0207 && msg != 0x0208) {
-            return CallNextHookEx(None, n_code, w_param, l_param);
-        }
-        let vk = if msg == 0x020B || msg == 0x020C {
-            let m = *(l_param.0 as *const MSLLHOOKSTRUCT);
-            let xbutton = (m.mouseData >> 16) as u16;
-            if xbutton == 1 {
-                0x05 // VK_XBUTTON1
-            } else if xbutton == 2 {
-                0x06 // VK_XBUTTON2
-            } else {
-                0
+        let contained = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let msg = w_param.0;
+            // FAST-PATH: 1000-8000 Hz gaming mouse move bypass!
+            // If not XButton (0x020B, 0x020C) or MButton (0x0207, 0x0208) -> skip.
+            if n_code == 0
+                && l_param.0 != 0
+                && (msg == 0x020B || msg == 0x020C || msg == 0x0207 || msg == 0x0208)
+            {
+                let vk = if msg == 0x020B || msg == 0x020C {
+                    let m = *(l_param.0 as *const MSLLHOOKSTRUCT);
+                    let xbutton = (m.mouseData >> 16) as u16;
+                    if xbutton == 1 {
+                        0x05 // VK_XBUTTON1
+                    } else if xbutton == 2 {
+                        0x06 // VK_XBUTTON2
+                    } else {
+                        0
+                    }
+                } else {
+                    0x04 // VK_MBUTTON
+                };
+                if vk != 0 {
+                    let is_down = msg == 0x020B || msg == 0x0207;
+                    send_hook_event(GlobalKeyEvent { vk, is_down });
+                }
             }
-        } else {
-            0x04 // VK_MBUTTON
-        };
-        if vk != 0 {
-            let is_down = msg == 0x020B || msg == 0x0207;
-            send_hook_event(GlobalKeyEvent { vk, is_down });
+        }));
+        if contained.is_err() {
+            HOOK_PANICS.fetch_add(1, Ordering::Relaxed);
         }
         CallNextHookEx(None, n_code, w_param, l_param)
     }
@@ -521,6 +539,8 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
     // Lifetime count of hook events this loop already reported as undeliverable;
     // a change means the diag ring should get a fresh line (see `HOTKEY_TX_FAILED`).
     let mut last_tx_failures: u64 = 0;
+    // Same idea for panics contained at the callback boundary.
+    let mut last_hook_panics: u64 = 0;
 
     while !GLOBAL_HOTKEY_STOP.load(Ordering::Acquire) {
         // ── v4.3 FIX: WINDOWS MESSAGE PUMP (REQUIRED for LL hooks) ──────
@@ -886,6 +906,11 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
             hotkey_diag_push(format!("dropped_events={tx_failures}"));
             last_tx_failures = tx_failures;
         }
+        let hook_panics = HOOK_PANICS.load(Ordering::Relaxed);
+        if hook_panics != last_hook_panics {
+            hotkey_diag_push(format!("hook_panics_contained={hook_panics}"));
+            last_hook_panics = hook_panics;
+        }
 
         // ── TRUE KERNEL SLEEP: MsgWaitForMultipleObjects ─────────────
         // Replaces the old `recv_timeout` as the loop's blocking wait.
@@ -962,6 +987,13 @@ thread_local! {
 /// and the loop (or `hotkey_diag_dump`) reports the value.
 static HOTKEY_TX_FAILED: AtomicU64 = AtomicU64::new(0);
 
+/// Panics contained at the hook-callback boundary. A caught panic must never
+/// unwind through the OS callback chain (that aborts the process under
+/// `extern "system"`), but the callback still may not log or allocate — it runs
+/// inside the system input chain. It bumps this counter; the listener loop and
+/// `hotkey_diag_dump` report the value.
+static HOOK_PANICS: AtomicU64 = AtomicU64::new(0);
+
 /// Hand one hook event to the listener without ever blocking the input chain.
 ///
 /// No lock is taken: the sender lives in a thread-local owned by the very thread
@@ -1011,6 +1043,10 @@ pub fn hotkey_diag_dump() -> Vec<String> {
     out.push(format!(
         "hook_events_undelivered_total={}",
         HOTKEY_TX_FAILED.load(Ordering::Relaxed)
+    ));
+    out.push(format!(
+        "hook_panics_contained_total={}",
+        HOOK_PANICS.load(Ordering::Relaxed)
     ));
     out
 }
@@ -1271,7 +1307,7 @@ fn combos_from_label(label: &str) -> (Vec<HotkeyCombo>, usize) {
                 invalid += 1;
                 // Ring buffer, NOT the log file: this runs on the hook thread
                 // during a re-parse, and file logging there is forbidden
-                // (AGENTS.md §2.17). It also kept unit tests (which parse
+                // (AGENTS.md I26). It also kept unit tests (which parse
                 // deliberately invalid labels) writing ~2000 lines into the
                 // user's real `%TEMP%\nanoclick_web.log`, drowning the real
                 // diagnostics. `hotkey_diag_dump` surfaces this on demand.
@@ -1286,7 +1322,7 @@ fn combos_from_label(label: &str) -> (Vec<HotkeyCombo>, usize) {
 fn log_bindings(bindings: &HotkeyBindings) {
     // Ring buffer, NOT the log file: both call sites live on the hook thread
     // (startup + every re-parse), where file logging is forbidden
-    // (AGENTS.md §2.17). The old file-writing version wrote 2-3 lines
+    // (AGENTS.md I26). The old file-writing version wrote 2-3 lines
     // per re-parse — thousands of lines per session — drowning the real hotkey
     // diagnostics in `%TEMP%\nanoclick_web.log`. `hotkey_diag_dump` (Dump to
     // log) surfaces these on demand instead.
@@ -1779,7 +1815,7 @@ mod physical_integration_tests {
             w_param: WPARAM,
             l_param: LPARAM,
         ) -> LRESULT {
-            if n_code == 0 {
+            if n_code == 0 && l_param.0 != 0 {
                 let kb = *(l_param.0 as *const KBDLLHOOKSTRUCT);
                 let msg = w_param.0;
                 let is_down = msg == 0x0100 || msg == 0x0104;
@@ -2113,6 +2149,21 @@ mod physical_integration_tests {
                 "{name} must take NO lock: a busy lock would drop the event (and now \
                  nothing re-detects it) while the system waits for this callback"
             );
+            // A panic must be contained (never unwind through `extern "system"`)
+            // AND counted without logging: I26 forbids file I/O in the callback.
+            assert!(
+                cb.contains("catch_unwind"),
+                "{name} must contain panics at the OS callback boundary"
+            );
+            assert!(
+                cb.contains("HOOK_PANICS.fetch_add"),
+                "{name} must count a contained panic for the diag ring"
+            );
+            assert!(
+                !cb.contains("debug_log_internal") && !cb.contains("hotkey_diag_push"),
+                "{name} must not log or push diagnostics: it runs inside the system \
+                 input chain (I26). Bump the atomic; the listener loop reports it"
+            );
         }
         assert!(
             src.contains("fn send_hook_event"),
@@ -2127,6 +2178,10 @@ mod physical_integration_tests {
         assert!(
             src.contains("hook_events_undelivered_total="),
             "hotkey_diag_dump must expose the lifetime total"
+        );
+        assert!(
+            src.contains("hook_panics_contained_total="),
+            "a contained hook panic must be visible in the diag dump"
         );
         // Reset so other tests / the app can start a fresh listener.
         GLOBAL_HOTKEY_STOP.store(false, Ordering::Release);

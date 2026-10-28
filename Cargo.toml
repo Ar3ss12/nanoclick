@@ -9,15 +9,28 @@ default-members = ["src-tauri"]
 opt-level = "z"     # Optimize for minimum binary size
 lto = true          # Link-Time Optimization across all crates
 codegen-units = 2   # Single code generation unit for maximum LLVM inlining
-panic = "abort"     # Strip panic unwinding tables & landing pads
+panic = "unwind"    # Keep Drop alive: RAII is the in-process release path
 strip = true        # Strip all debug and symbol tables from binary
 
-# NOTE: `panic = "abort"` above is what `cargo test --release` also uses — that
-# command selects the release profile, so a failing assertion aborts the whole
-# test process instead of being reported per test. The gate stays valid (a
-# failing run still exits non-zero), but the first failure ends the run. Do not
-# "fix" this by adding `[profile.test] panic = "unwind"`: that profile is only
-# used by `cargo test` WITHOUT `--release`, so the override never reaches the
-# gate. See the `common-controls-v6` note in `src-tauri/Cargo.toml` for the
-# failure that looked like a panic/unwind problem but was a Windows import.
+# WHY unwind (corrected 2026-10-28): `panic = "abort"` deleted the unwinding
+# tables, and with them every `Drop` on a panic — `MouseHoldGuard`, snubber's
+# erased-guard rollback and the executor's state reset never ran in the shipped
+# binary, so a panic mid-hold left the mouse button down in the OS. Abort also
+# cannot be contained by `catch_unwind`. Fatal, non-unwinding failures
+# (TerminateProcess/End Task, OOM, stack overflow) still skip `Drop` by
+# definition — those are covered out-of-process by
+# `src-tauri/src/input_guardian.rs`.
+#
+# MEASURED: `cargo test` forces unwinding for test targets regardless of this
+# profile, so the previous comment claiming `cargo test --release` exercised the
+# abort path was wrong — a green suite never proved abort behaviour, and the
+# guard rollback test in `core/executor.rs` was always running on unwind.
+#
+# MEASURED 2026-10-28, identical source, this profile (opt-level = "z", lto,
+# strip), two separate target dirs:
+#   panic = "abort"   nanoclick.exe  5,616,128 B   nanoclick-daemon.exe 1,830,912 B
+#   panic = "unwind"  nanoclick.exe 10,028,032 B   nanoclick-daemon.exe 2,965,504 B
+# Unwind costs +78.6% / +62.0% — the old "abort saves 15-30%" figure was wrong
+# by a factor of two or more. Kept anyway: a permanently held mouse button is
+# worse than 4.4 MB of installer (3,601,320 B with NSIS, measured same day).
 

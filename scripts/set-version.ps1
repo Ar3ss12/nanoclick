@@ -13,7 +13,7 @@
 #   powershell -ExecutionPolicy Bypass -File scripts\set-version.ps1 -Version 1.2.0 -SkipDocs
 #
 # After it runs:
-#   cargo test --release -j 1 -- --skip physical_    # also refreshes Cargo.lock
+#   cargo test --release -j 2 -- --skip physical_    # also refreshes Cargo.lock
 #   git diff --stat
 #   powershell -ExecutionPolicy Bypass -File scripts\release.ps1 -Tag vX.Y.Z
 
@@ -132,7 +132,7 @@ if ($changed.Count -eq 0) {
     Write-Host ("Done: {0} file(s) updated." -f $changed.Count) -ForegroundColor Green
     Write-Host ''
     Write-Host 'Next steps:' -ForegroundColor Cyan
-    Write-Host "  1) cargo test --release -j 1 -- --skip physical_    # also refreshes Cargo.lock"
+    Write-Host "  1) cargo test --release -j 2 -- --skip physical_    # also refreshes Cargo.lock"
     Write-Host "  2) git diff --stat                                    # review, then commit"
     Write-Host "  3) powershell -ExecutionPolicy Bypass -File scripts\release.ps1 -Tag v$Version"
     Write-Host ''

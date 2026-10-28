@@ -4,7 +4,7 @@
 //! works. Windows calls us exactly once per foreground switch; between two
 //! switches this module owns no timer, no sleep, no busy loop.
 //!
-//! The contract is the same as for `WH_KEYBOARD_LL` (AGENTS.md §2.17) — the
+//! The contract is the same as for `WH_KEYBOARD_LL` (AGENTS.md I26) — the
 //! callback runs inside the system event chain, so it may do NOTHING but a
 //! lock-free hand-over:
 //!
@@ -83,12 +83,19 @@ pub fn start_foreground_watch() {
     {
         stop_foreground_watch();
         STOP_FLAG.store(false, Ordering::Release);
-        let thread = std::thread::Builder::new()
+        match std::thread::Builder::new()
             .name("nanoclick-foreground-watch".into())
             .spawn(run_watch)
-            .expect("foreground watch thread must spawn");
-        if let Ok(mut slot) = WATCH_THREAD.get_or_init(|| Mutex::new(None)).lock() {
-            *slot = Some(thread);
+        {
+            Ok(thread) => {
+                if let Ok(mut slot) = WATCH_THREAD.get_or_init(|| Mutex::new(None)).lock() {
+                    *slot = Some(thread);
+                }
+            }
+            Err(e) => crate::debug_log_internal(
+                "error",
+                &format!("[ForegroundWatch] failed to spawn patrol thread: {e}"),
+            ),
         }
     }
 }

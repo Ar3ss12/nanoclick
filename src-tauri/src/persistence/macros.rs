@@ -111,9 +111,14 @@ pub fn macros_path() -> PathBuf {
             .map(|p| p.join("nanoclick_data").join(MACROS_FILE))
             .unwrap_or_else(|| PathBuf::from("./nanoclick_data").join(MACROS_FILE))
     } else {
-        let dirs = directories::ProjectDirs::from("com", "nanoclick", "NanoClick")
-            .expect("ProjectDirs resolve");
-        dirs.config_dir().join(MACROS_FILE)
+        match directories::ProjectDirs::from("com", "nanoclick", "NanoClick") {
+            Some(dirs) => dirs.config_dir().join(MACROS_FILE),
+            // Same last resort as `ConfigManager::with_portable`: when the OS
+            // cannot resolve a config dir, config.json lives in ".nanoclick"
+            // and macros must stay next to it — never panic on a stripped-down
+            // Windows without %APPDATA%.
+            None => PathBuf::from(".nanoclick").join(MACROS_FILE),
+        }
     }
 }
 

@@ -1,3 +1,14 @@
+// Audit-only restriction lints: OFF by default, not part of `clippy::all`.
+// Every unsafe block in this crate is a Win32 FFI call, so the raw output is
+// ~90 lines of "missing SAFETY comment" noise that hides real findings. The
+// audit is still available on demand: remove this attribute and run
+// `cargo clippy -j 2 --lib --bins -- -W clippy::undocumented_unsafe_blocks
+//  -W clippy::multiple_unsafe_ops_per_block` (last measured: 67 and 25).
+#![allow(
+    clippy::undocumented_unsafe_blocks,
+    clippy::multiple_unsafe_ops_per_block
+)]
+
 mod commands;
 mod config;
 mod config_manager;
@@ -9,6 +20,7 @@ pub mod daemon_supervise;
 pub mod daemon_transport;
 pub mod defaults;
 mod guard;
+pub mod input_guardian;
 pub mod ipc;
 pub mod notifications;
 mod overlay;
@@ -54,12 +66,12 @@ pub struct AppState {
     /// Session stats counters (Rust-owned since the stats migration):
     /// the 66 ms ticks fold into this, the page keeps only Canvas paint.
     pub session_stats: Mutex<crate::stats_agg::SessionStats>,
-    /// FIFO queue of mandatory-acknowledge boot notices (Deadbolt Modal).
-    /// Drained one-by-one by `get_startup_notices`; the UI stays bolted
+    /// FIFO queue of blocking boot notices that require acknowledgement.
+    /// Drained one-by-one by `get_startup_notices`; the UI stays blocked
     /// until every notice is dismissed with OK. Never blocks boot itself.
     pub startup_notices: Mutex<Vec<AppNotice>>,
     /// Non-blocking runtime toast queue fed by the observer watcher.
-    /// Drained by `poll_file_toasts` (auto-dismiss in UI, no OK bolt).
+    /// Drained by `poll_file_toasts` (auto-dismiss in UI, no acknowledgement).
     pub file_toasts: Mutex<Vec<AppNotice>>,
     pub notification_store: Arc<NotificationStore>,
 }
@@ -67,7 +79,7 @@ pub struct AppState {
 /// Shared observer handle so save-commands can mark their own writes.
 pub struct WatcherState(pub Arc<crate::watcher::Observer>);
 
-/// Granular notice level for the Deadbolt Modal.
+/// Granular notice level for the blocking boot-notice modal.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NoticeLevel {
@@ -78,7 +90,7 @@ pub enum NoticeLevel {
 
 /// Blocking-modal payload: level + title + message + optional path details.
 /// Frontend rules (vanilla JS, no libs): no [X], backdrop clicks are swallowed,
-/// Esc is killed, the ONLY exit is the OK button. Multiple notices are shown
+/// Esc has no effect, the ONLY exit is the OK button. Multiple notices are shown
 /// strictly in order until the queue is empty.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AppNotice {
@@ -126,7 +138,7 @@ fn healing_notice(action: &crate::defaults::SelfHealingAction) -> Option<AppNoti
     }
 }
 
-/// Macros-store healing mapped into the same Deadbolt queue shape.
+/// Macros-store healing mapped into the same blocking-notice queue shape.
 /// Titles/messages are i18n KEYS resolved by the frontend (see locales).
 fn macros_healing_notice(
     action: &crate::persistence::macros::MacrosHealAction,
@@ -183,8 +195,8 @@ fn get_startup_notices(state: State<'_, AppState>) -> Vec<AppNotice> {
         .unwrap_or_default()
 }
 
-/// Non-blocking runtime toast queue (watcher verdicts). Unlike the boot
-/// Deadbolt queue, these auto-dismiss: observer info, never file rewrites.
+/// Non-blocking runtime toast queue (watcher verdicts). Unlike the blocking
+/// boot-notice queue, these auto-dismiss: observer info, never file rewrites.
 #[tauri::command]
 fn poll_file_toasts(state: State<'_, AppState>) -> Vec<AppNotice> {
     state
@@ -284,16 +296,17 @@ fn save_app_config(
     // the persist call inside the closure.
     let node = crate::stability::config_node();
     // Scope boundary: everything touching the config file and the scheduler
-    // mirror runs inside. Satellite create/destroy runs after commit.
-    let outcome: Result<(AppConfig, bool, bool, bool, bool), snubber::SnubberError<String>> = node
+    // mirror runs inside. Satellite windows are NOT built here — the toggle
+    // commands are their only owner (SATELLITE_PLAN §1), so a save can never
+    // block the UI thread on WebView2 init.
+    let outcome: Result<AppConfig, snubber::SnubberError<String>> = node
         .scoped(
             || {},
-            || -> Result<(AppConfig, bool, bool, bool, bool), String> {
+            || -> Result<AppConfig, String> {
                 // Previous file is copied aside before this session's first
                 // write, so a wrong-but-valid write stays recoverable by hand.
                 ensure_session_config_backup(&app);
                 let _ = crate::platform::set_always_run_as_admin(config.ui.always_run_as_admin);
-                let prev = state.config_manager.load();
                 let mut config = config;
                 // Window geometry is stamped from the live window into the
                 // same atomic save (no extra file, no plugin). Best-effort:
@@ -334,29 +347,17 @@ fn save_app_config(
                 state
                     .scheduler
                     .set_config(config::Config::from(config.clone()));
-                let ripple_changed = config.ui.visual_ripple != prev.ui.visual_ripple;
-                let want_ripple = config.ui.visual_ripple;
-                let hud_changed = config.ui.show_hud != prev.ui.show_hud;
-                let want_hud = config.ui.show_hud;
-                Ok((config, ripple_changed, want_ripple, hud_changed, want_hud))
+                Ok(config)
             },
         );
-    let (config, ripple_changed, want_ripple, hud_changed, want_hud) = match outcome {
-        Ok(v) => v,
-        Err(snubber::SnubberError::Admission(_)) => {
-            return Err("config busy - retry".into());
-        }
-        Err(snubber::SnubberError::Work(e)) => return Err(e),
-    };
-    // Post-commit side-effects (bulkhead released): satellite toggles run
-    // through their own bulkhead and may block on WebView2 init.
-    if ripple_changed {
-        let _ = overlay::toggle_overlay(app.clone(), want_ripple);
+    match outcome {
+        Ok(config) => Ok(config),
+        Err(snubber::SnubberError::Admission(_)) => Err("config busy - retry".into()),
+        Err(snubber::SnubberError::Work(e)) => Err(e),
+        // `#[non_exhaustive]`: unknown variant — nothing was committed, so
+        // answer with the same retry refusal instead of panicking.
+        Err(other) => Err(format!("config busy - retry ({other})")),
     }
-    if hud_changed {
-        let _ = toggle_hud_window(app.clone(), want_hud);
-    }
-    Ok(config)
 }
 
 #[tauri::command]
@@ -405,6 +406,9 @@ fn reset_config_to_defaults(
             return Err("config busy - retry".into());
         }
         Err(snubber::SnubberError::Work(e)) => return Err(e),
+        // `#[non_exhaustive]`: nothing was committed; refuse like an
+        // admission rejection so the page retries rather than assumes success.
+        Err(other) => return Err(format!("config busy - retry ({other})")),
     };
     // Post-commit side-effects (bulkhead released): satellite toggles run
     // through their own bulkhead and may block on WebView2 init.
@@ -540,11 +544,70 @@ struct LogItem {
     message: String,
 }
 
+/// Path of the shared Rust/JS log. One definition so the panic hook and the
+/// regular logger can never drift to different files.
+fn log_file_path() -> std::path::PathBuf {
+    std::env::temp_dir().join("nanoclick_web.log")
+}
+
+/// Rewrite a panic into a log record. Pure on purpose: the hook itself is
+/// process-global and cannot be exercised in a parallel test run.
+fn format_panic_record(
+    thread_name: &str,
+    location: Option<(&str, u32, u32)>,
+    payload: &str,
+    backtrace: &str,
+) -> String {
+    let at = match location {
+        Some((file, line, column)) => format!("{file}:{line}:{column}"),
+        None => "<unknown location>".to_string(),
+    };
+    format!(
+        "[RUST PANIC] thread={thread_name} at {at}\n\
+         [RUST PANIC] message: {payload}\n\
+         [RUST PANIC] backtrace:\n{backtrace}\n\
+         [RUST PANIC] end\n"
+    )
+}
+
+/// Install a panic hook that appends location, message, thread name and a
+/// forced backtrace to the shared log, then runs the previous hook (stderr
+/// output and the process-abort policy stay unchanged).
+///
+/// `force_capture` ignores `RUST_BACKTRACE`: a panic in the field must leave
+/// a trace without asking the user to reproduce it with an env var. A native
+/// fault (0xC0000005, an OOM kill) never reaches a Rust hook — that remains
+/// WER / Event Viewer territory.
+pub fn install_panic_logger() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        let name = thread.name().unwrap_or("<unnamed>");
+        let location = info.location().map(|l| (l.file(), l.line(), l.column()));
+        let payload = info
+            .payload_as_str()
+            .unwrap_or("<non-string panic payload>");
+        let backtrace = std::backtrace::Backtrace::force_capture().to_string();
+        let record = format_panic_record(name, location, payload, &backtrace);
+        // Direct append, NOT `write_log_bytes_internal`: a panic raised while
+        // that function holds `DEBUG_LOG_FILE` would deadlock re-entering it.
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_file_path())
+        {
+            let _ = file.write_all(record.as_bytes());
+            let _ = file.flush();
+        }
+        previous(info);
+    }));
+}
+
 fn write_log_bytes_internal(bytes: &[u8]) {
     if bytes.is_empty() {
         return;
     }
-    let path = std::env::temp_dir().join("nanoclick_web.log");
+    let path = log_file_path();
     let should_rotate = DEBUG_LOG_BYTES.fetch_add(bytes.len() as u64, Ordering::Relaxed)
         + bytes.len() as u64
         > DEBUG_LOG_MAX_BYTES;
@@ -978,41 +1041,78 @@ pub(crate) fn toggle_hud_from_tray(app: &AppHandle) {
             debug_log_internal("warn", &format!("[Tray] HUD setting not persisted: {e}"));
             return;
         }
+        // `#[non_exhaustive]`: unknown variant — the write did not land, so
+        // report exactly like a refused admission.
+        Err(other) => {
+            report_tray_action(app, "Settings busy — try again in a second");
+            debug_log_internal(
+                "warn",
+                &format!("[Tray] HUD setting not persisted: {other}"),
+            );
+            return;
+        }
     };
     // The facade owns the visibility gate: it answers DeferredTray when the
     // main window is away. No second predicate here — it would desync from
     // the toggle's own answer.
     match toggle_hud_window(app.clone(), show) {
         Ok(overlay::SatelliteToggle::DeferredTray) => {
+            // No window was built: the stored preference is the whole result,
+            // and `restore_main_window` builds the HUD later.
             emit_satellite_toggle_result(app, "hud", false, "tray");
+            emit_tray_hud_changed(app, show);
+            report_tray_action(app, "HUD will appear with the window");
+            debug_log_internal("info", &format!("[Tray] HUD -> {show} (deferred)"));
+        }
+        Ok(_) => {
+            emit_tray_hud_changed(app, show);
+            report_tray_action(app, if show { "HUD shown" } else { "HUD hidden" });
+            debug_log_internal("info", &format!("[Tray] HUD -> {show}"));
         }
         Err(e) => {
-            // Satellite bulkhead busy: lock the page checkbox instead of
-            // painting a window that was never built.
+            // Satellite bulkhead busy: the preference was written above but no
+            // window exists. Roll it back so disk and screen agree, lock the
+            // page checkbox through the refusal event, and report once.
             debug_log_internal("warn", &format!("[Tray] HUD toggle refused: {e}"));
+            if let Err(e) = persist_hud_preference(&state, !show) {
+                debug_log_internal(
+                    "error",
+                    &format!("[Tray] HUD preference rollback failed: {e}"),
+                );
+            }
             emit_satellite_toggle_result(app, "hud", false, "busy");
+            report_tray_action(app, "HUD is busy — try again");
         }
-        _ => {}
     }
-    // The BEHAVIOR checkbox on the page mirrors this WITHOUT saving: the tray
-    // already persisted the value, and a page-side save would write its stale
-    // checkbox back to disk and silently undo the menu choice.
+}
+
+/// Persist `ui.show_hud` under the config bulkhead. Used to undo the tray's
+/// optimistic write when the satellite toggle was refused.
+fn persist_hud_preference(state: &AppState, show: bool) -> Result<(), String> {
+    let node = crate::stability::config_node();
+    let outcome: Result<(), snubber::SnubberError<String>> = node.scoped(
+        || {},
+        || -> Result<(), String> {
+            let mut cfg = state.config_manager.load();
+            cfg.ui.show_hud = show;
+            state.config_manager.save(&cfg)
+        },
+    );
+    match outcome {
+        Ok(()) => Ok(()),
+        Err(snubber::SnubberError::Admission(_)) => Err("settings busy — retry".into()),
+        Err(snubber::SnubberError::Work(e)) => Err(e),
+        // `#[non_exhaustive]`: unknown variant — nothing was committed.
+        Err(other) => Err(format!("settings busy — retry ({other})")),
+    }
+}
+
+/// The BEHAVIOR checkbox mirrors the tray write WITHOUT saving: a page-side save
+/// would write its stale checkbox back to disk and undo the menu choice.
+fn emit_tray_hud_changed(app: &AppHandle, show: bool) {
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.emit("tray-hud-changed", show);
     }
-    // Never claim "HUD shown" for a window that was deliberately not created:
-    // the app is in the tray, so the HUD will appear together with the window.
-    report_tray_action(
-        app,
-        if !main_window_visible(app) {
-            "HUD will appear with the window"
-        } else if show {
-            "HUD shown"
-        } else {
-            "HUD hidden"
-        },
-    );
-    debug_log_internal("info", &format!("[Tray] HUD -> {show}"));
 }
 
 /// Flip Work / Autoclicker mode, **persist it**, and report the new mode.
@@ -1052,6 +1152,16 @@ pub(crate) fn apply_mode_toggle(app: &AppHandle) -> String {
         }
         Err(snubber::SnubberError::Work(e)) => {
             debug_log_internal("warn", &format!("[Tray] mode not persisted: {e}"));
+            if state.scheduler.is_autoclicker_mode() {
+                "autoclicker".to_string()
+            } else {
+                "work".to_string()
+            }
+        }
+        // `#[non_exhaustive]`: unknown variant — the flip may or may not have
+        // happened, so report the live scheduler state, never a guess.
+        Err(other) => {
+            debug_log_internal("warn", &format!("[Tray] mode not persisted: {other}"));
             if state.scheduler.is_autoclicker_mode() {
                 "autoclicker".to_string()
             } else {
@@ -1324,6 +1434,15 @@ fn persist_window_visibility(app: &AppHandle, visible: bool) {
         Err(snubber::SnubberError::Admission(_)) => return,
         Err(snubber::SnubberError::Work(e)) => {
             debug_log_internal("warn", &format!("[Tray] window state not persisted: {e}"));
+            return;
+        }
+        // `#[non_exhaustive]`: the in-memory flag is already correct and the
+        // next transition re-stamps it — same skip-on-busy behaviour.
+        Err(other) => {
+            debug_log_internal(
+                "warn",
+                &format!("[Tray] window state not persisted: {other}"),
+            );
             return;
         }
     };
@@ -1730,7 +1849,7 @@ pub(crate) fn shutdown_application(app: &AppHandle) {
     //    clicker must no longer generate or catch events when the WebView that
     //    receives their status emissions starts tearing down its message loop and
     //    COM objects. A hook firing `emit` into a half-destroyed window is how a
-    //    process ends up as a zombie that never releases its resources.
+    //    process ends up holding resources it can no longer release.
     if let Some(state) = app.try_state::<AppState>() {
         state.scheduler.set_active(false, None);
     }
@@ -1772,11 +1891,17 @@ pub(crate) fn shutdown_application(app: &AppHandle) {
         let _ = win.destroy();
     }
 
-    // 4. Request Tauri runtime exit
+    // 3b. Hardware: release anything the workers left down (idempotent, and it
+    //     covers a macro that ended on `MouseDown`). In-process first — the
+    //     guardian is only the fallback for exits that never reach this code.
+    crate::stability::emergency_release_all_hardware();
+
+    // 4. This is a deliberate exit: tell the input guardian NOT to inject.
+    input_guardian::mark_clean_exit();
     app.exit(0);
 
     // 5. Watchdog: give 300ms for clean background file I/O flush, then trim working set
-    // memory and guarantee complete process termination so no zombie background processes remain.
+    // memory and guarantee complete process termination so no background process survives.
     std::thread::spawn(|| {
         std::thread::sleep(std::time::Duration::from_millis(300));
         #[cfg(target_os = "windows")]
@@ -1809,6 +1934,8 @@ fn toggle_hud_window(app: AppHandle, show: bool) -> Result<overlay::SatelliteTog
             Err("satellite busy — toggle in progress".into())
         }
         Err(snubber::SnubberError::Work(e)) => Err(e),
+        // `#[non_exhaustive]`: unknown variant — no window was built.
+        Err(other) => Err(format!("satellite busy — toggle in progress ({other})")),
     }
 }
 
@@ -2031,7 +2158,11 @@ pub fn run() {
     let app_state = AppState {
         scheduler,
         config_manager,
-        session_stats: Mutex::new(crate::stats_agg::SessionStats::new()),
+        // Totals are inherited from the boot config: the first `stats_tick`
+        // continues the all-time counters instead of resetting them.
+        session_stats: Mutex::new(crate::stats_agg::SessionStats::with_totals(
+            initial_app_cfg.stats.clone(),
+        )),
         startup_notices,
         file_toasts,
         notification_store,
@@ -2041,7 +2172,7 @@ pub fn run() {
     let macro_executor: Arc<crate::core::ExecutorHandle> = Arc::clone(&macro_state.executor);
     crate::core::set_global((*macro_executor).clone());
 
-    let app = tauri::Builder::default()
+    let app = match tauri::Builder::default()
         .on_page_load(|webview, payload| {
             debug_log_internal(
                 "info",
@@ -2257,7 +2388,7 @@ pub fn run() {
             //
             // `config.json` stays the single source of truth: the vector below is
             // a cache of what the last read said, never a second store
-            // (AGENTS.md §2.9). A rule that gets re-armed fires again, because the
+            // (AGENTS.md I5). A rule that gets re-armed fires again, because the
             // cache is dropped the moment the rule set changes.
             {
                 let cm = config_manager_arc.clone();
@@ -2330,31 +2461,28 @@ pub fn run() {
             // GitHub fallback). Own thread, own cadence, zero hot-path touch.
             crate::platform::update_ping::start_radar_ping();
             // LAZY secondary WebViews: cold boot = main window ONLY.
-            // Overlay is restored here (staggered, off the critical boot path)
-            // so persisted visual_ripple=true keeps working without any
-            // pre-created WebView in tauri.conf.json. HUD restores itself:
-            // main.js re-invokes toggle_hud_window ~150 ms after main load.
-            // overlay_ready/hud_ready show the window once transparent DOM renders.
-            if initial_app_cfg.ui.visual_ripple {
+            // Satellites are restored here (staggered, off the critical boot
+            // path) so persisted visual_ripple / show_hud keep working without
+            // any pre-created WebView in tauri.conf.json.
+            // `show_secondary_windows` is the SINGLE owner for that decision
+            // (same as tray restore and post-deep-sleep `frontend_ready`): it
+            // re-reads the config after the sleep, so a flag turned off meanwhile
+            // cannot leak a hidden WebView, and it creates nothing while the main
+            // window is not on screen. overlay_ready/hud_ready show each window
+            // once its transparent DOM has rendered.
+            if initial_app_cfg.ui.visual_ripple || initial_app_cfg.ui.show_hud {
                 let h = handle.clone();
                 std::thread::spawn(move || {
-                    // Let the main window finish loading first: creating two
-                    // WebViews at the exact same instant doubles the startup
+                    // Let the main window finish loading first: creating another
+                    // WebView at the exact same instant doubles the startup
                     // memory spike we are trying to avoid.
                     std::thread::sleep(std::time::Duration::from_millis(2500));
-                    // Re-check both inputs after the sleep. The setting may have
-                    // been turned off meanwhile (creating the overlay anyway would
-                    // leak a hidden fullscreen WebView), and the app may already
-                    // live in the tray: its main window hidden or destroyed, which
-                    // is exactly when a satellite must not appear.
-                    // `restore_main_window` creates it instead, the moment the main
-                    // window is back on screen.
-                    let wanted = h
-                        .try_state::<AppState>()
-                        .map(|s| s.config_manager.load().ui.visual_ripple)
-                        .unwrap_or(false);
-                    if wanted && main_window_visible(&h) {
-                        let _ = overlay::ensure_satellite(&h, "overlay");
+                    // The app may already live in the tray by now: its main
+                    // window hidden or destroyed, which is exactly when a
+                    // satellite must not appear. `restore_main_window` creates it
+                    // instead, the moment the main window is back on screen.
+                    if main_window_visible(&h) {
+                        show_secondary_windows(&h);
                     }
                 });
             }
@@ -2492,7 +2620,24 @@ pub fn run() {
             uipi_blocked_in_tray,
         ])
         .build(tauri::generate_context!())
-        .expect("error while building tauri application");
+    {
+        Ok(app) => app,
+        Err(e) => {
+            // Build failure means no window, no tray, no hotkeys — there is
+            // nothing to degrade to. Log it (a panic message is invisible on a
+            // GUI launch) and exit with the same non-zero code.
+            debug_log_internal(
+                "error",
+                &format!("[Boot] failed to build tauri application: {e}"),
+            );
+            std::process::exit(1);
+        }
+    };
+
+    // Last gate before the engine goes live: arm the out-of-process rescue.
+    // Placed after the Tauri build (a forwarded second instance exits there),
+    // so only the process that actually owns input gets a guardian.
+    input_guardian::spawn_guardian();
 
     app.run(|app_handle, event| {
         match event {
@@ -2632,6 +2777,39 @@ mod tests {
         ];
         debug_log_batch(batch);
         assert!(get_debug_mode());
+    }
+}
+
+/// Panic-log formatting. The hook itself is not installed here: it is
+/// process-global, and a stray test panic would write into the real log.
+#[cfg(test)]
+mod panic_logger_tests {
+    use super::*;
+
+    #[test]
+    fn panic_record_carries_thread_location_message_and_backtrace() {
+        let record = format_panic_record(
+            "nanoclick-test",
+            Some(("src/lib.rs", 123, 45)),
+            "boom",
+            "   0: fake_frame\n",
+        );
+        assert!(record.starts_with("[RUST PANIC] thread=nanoclick-test at src/lib.rs:123:45"));
+        assert!(record.contains("[RUST PANIC] message: boom"));
+        assert!(record.contains("   0: fake_frame"));
+        assert!(record.ends_with("[RUST PANIC] end\n"));
+    }
+
+    #[test]
+    fn panic_record_without_location_stays_readable() {
+        let record = format_panic_record("nanoclick-test", None, "boom", "");
+        assert!(record.contains("<unknown location>"));
+        assert!(record.contains("[RUST PANIC] message: boom"));
+    }
+
+    #[test]
+    fn panic_log_uses_the_shared_log_file() {
+        assert!(log_file_path().ends_with("nanoclick_web.log"));
     }
 }
 

@@ -547,7 +547,7 @@ const SmartGuard = {
   },
 
   _hideSuggest() {
-    // Cancel a pending debounced show: hiding then typing must not resurrect
+    // Cancel a pending debounced show: hiding then typing must not re-show
     // a stale box from the old timer.
     if (this._suggestTimer) {
       clearTimeout(this._suggestTimer);

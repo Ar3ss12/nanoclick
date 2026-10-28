@@ -28,8 +28,8 @@ pub enum SelfHealingAction {
 
 /// File name of the golden snapshot next to `config.json`.
 /// Written ONLY on clean parse; restored on unrecoverable corruption.
-/// Protected on Windows with READONLY+HIDDEN ("black box": invisible in
-/// Explorer by default, Ctrl+S in Notepad bounces off).
+/// Protected on Windows with READONLY+HIDDEN (not visible in Explorer by
+/// default, Ctrl+S in Notepad has no effect).
 pub const LAST_GOOD_FILE_NAME: &str = "config.last_good.json";
 
 /// Best-effort hardening of the golden snapshot on Windows:
@@ -742,6 +742,26 @@ pub fn repair_and_patch_value(user_val: &Value) -> Result<(AppConfig, Vec<String
     let repaired_config: AppConfig = serde_json::from_value(default_val)
         .map_err(|e| format!("Repaired config deserialization error: {e}"))?;
 
+    // Tripwire: a repair that found a VALID bool on disk must keep it. The
+    // repair path rebuilds the config from the embedded default template, so a
+    // dropped field here would silently switch a satellite preference without
+    // any "corruption" the user would notice.
+    let user_ui = user_obj.get("ui").and_then(Value::as_object);
+    for (key, actual) in [
+        (
+            "visual_ripple",
+            repaired_config.ui.visual_ripple,
+        ),
+        ("show_hud", repaired_config.ui.show_hud),
+    ] {
+        if let Some(expected) = user_ui.and_then(|u| u.get(key)).and_then(Value::as_bool) {
+            debug_assert_eq!(
+                actual, expected,
+                "repair_and_patch_value dropped a valid ui.{key}"
+            );
+        }
+    }
+
     Ok((repaired_config, details))
 }
 
@@ -821,6 +841,31 @@ pub fn ensure_config_file(config_path: &Path) -> (AppConfig, SelfHealingAction) 
                 details.len(),
                 backup_path
             );
+            // A repair rebuilt the file from the default template. If a satellite
+            // flag differs from what the on-disk JSON carried, that is exactly the
+            // silent-pref-loss class — surface it with values, always.
+            for (key, disk_val, now_val) in [
+                (
+                    "visual_ripple",
+                    json_val.get("ui").and_then(|u| u.get("visual_ripple")).and_then(Value::as_bool),
+                    Some(repaired_cfg.ui.visual_ripple),
+                ),
+                (
+                    "show_hud",
+                    json_val.get("ui").and_then(|u| u.get("show_hud")).and_then(Value::as_bool),
+                    Some(repaired_cfg.ui.show_hud),
+                ),
+            ] {
+                if disk_val.is_some() && disk_val != now_val {
+                    crate::debug_log_internal(
+                        "warn",
+                        &format!(
+                            "[Config] repair changed ui.{key}: {:?} -> {:?}",
+                            disk_val, now_val
+                        ),
+                    );
+                }
+            }
             (
                 repaired_cfg,
                 SelfHealingAction::RepairedAndPatched {
@@ -860,6 +905,15 @@ fn recover_corrupted_file(config_path: &Path) -> (AppConfig, SelfHealingAction) 
             "[defaults] Config unrecoverable; restored last-known-good snapshot. Quarantine: {:?}",
             quarantine
         );
+        crate::debug_log_internal(
+            "warn",
+            &format!(
+                "[Config] corruption recovery restored last-known-good: visual_ripple={} show_hud={} quarantine={}",
+                good.ui.visual_ripple,
+                good.ui.show_hud,
+                quarantine.display()
+            ),
+        );
         return (
             good,
             SelfHealingAction::CorruptedAndRecovered {
@@ -872,6 +926,16 @@ fn recover_corrupted_file(config_path: &Path) -> (AppConfig, SelfHealingAction) 
     let default_cfg = get_embedded_default_config();
     let _ = write_config_atomic(config_path, &default_cfg);
     let _ = backup_path; // legacy .bak kept alongside the timestamped quarantine
+
+    crate::debug_log_internal(
+        "warn",
+        &format!(
+            "[Config] corruption recovery fell back to FACTORY defaults: visual_ripple={} show_hud={} quarantine={}",
+            default_cfg.ui.visual_ripple,
+            default_cfg.ui.show_hud,
+            quarantine.display()
+        ),
+    );
 
     (
         default_cfg,

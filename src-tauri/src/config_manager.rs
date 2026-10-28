@@ -940,6 +940,18 @@ impl Default for AppConfig {
 static SESSION_SNAPSHOT_DONE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// Satellite prefs as last written by `save()`: 0 = nothing written yet this
+/// process, 1 = false, 2 = true. Lets `save()` warn whenever a write FLIPS a
+/// satellite preference — a stale page copy or a preset scope rewriting the
+/// flags behind the user's back used to be invisible (windows silently stopped
+/// appearing). The warning lands in `%TEMP%\nanoclick_web.log`.
+static LAST_SAVED_RIPPLE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+static LAST_SAVED_HUD: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// `load()` logged its first result for this process.
+static FIRST_LOAD_LOGGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 pub struct ConfigManager {
     config_path: PathBuf,
     /// Set once at boot so `save()` can mark its OWN write before it lands.
@@ -1022,6 +1034,19 @@ impl ConfigManager {
     pub fn load_with_action(&self) -> (AppConfig, crate::defaults::SelfHealingAction) {
         let (mut app_config, action) = crate::defaults::ensure_config_file(&self.config_path);
 
+        if !FIRST_LOAD_LOGGED.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            crate::debug_log_internal(
+                "info",
+                &format!(
+                    "[Config] load: visual_ripple={} show_hud={} deep_sleep={} action={:?}",
+                    app_config.ui.visual_ripple,
+                    app_config.ui.show_hud,
+                    app_config.ui.deep_sleep_to_tray,
+                    action
+                ),
+            );
+        }
+
         // Fallback recovery: if total_clicks is 0, check if a dedicated stats.json
         // backup exists (e.g. fresh install/reinstall or config reset), and restore it.
         // NEVER touches stats.json quarantine: stats is append-only telemetry,
@@ -1088,6 +1113,20 @@ impl ConfigManager {
     }
 
     pub fn save(&self, config: &AppConfig) -> Result<(), String> {
+        if config.schema_version != CONFIG_SCHEMA_VERSION {
+            crate::debug_log_internal(
+                "warn",
+                &format!(
+                    "[Config] save carried schema_version={} (expected {CONFIG_SCHEMA_VERSION}) — next load will force a migration",
+                    config.schema_version
+                ),
+            );
+            debug_assert_eq!(
+                config.schema_version, CONFIG_SCHEMA_VERSION,
+                "save() received a config with a stale schema_version"
+            );
+        }
+
         if let Some(parent) = self.config_path.parent() {
             if !parent.exists() {
                 let _ = fs::create_dir_all(parent);
@@ -1134,6 +1173,36 @@ impl ConfigManager {
         // corruption restores THIS state. The observer's grace window
         // (mark below happens in save callers) swallows the echo.
         crate::defaults::refresh_last_good_snapshot(&self.config_path, config);
+
+        // Satellite-flip tripwire: any save that changes visual_ripple/show_hud
+        // versus the previous successful save is logged at warn (release-visible).
+        // "info" diagnostics from the page never see this — the flip happens
+        // in whatever caller composed this AppConfig.
+        use std::sync::atomic::Ordering;
+        let ripple_now = config.ui.visual_ripple as u8 + 1;
+        let hud_now = config.ui.show_hud as u8 + 1;
+        let ripple_prev = LAST_SAVED_RIPPLE.swap(ripple_now, Ordering::AcqRel);
+        let hud_prev = LAST_SAVED_HUD.swap(hud_now, Ordering::AcqRel);
+        if ripple_prev != 0 && ripple_prev != ripple_now {
+            crate::debug_log_internal(
+                "warn",
+                &format!(
+                    "[Config] save flipped ui.visual_ripple: {} -> {}",
+                    ripple_prev == 2,
+                    config.ui.visual_ripple
+                ),
+            );
+        }
+        if hud_prev != 0 && hud_prev != hud_now {
+            crate::debug_log_internal(
+                "warn",
+                &format!(
+                    "[Config] save flipped ui.show_hud: {} -> {}",
+                    hud_prev == 2,
+                    config.ui.show_hud
+                ),
+            );
+        }
 
         Ok(())
     }

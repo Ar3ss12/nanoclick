@@ -32,6 +32,76 @@ struct ExecutorShared {
     next_step_idx: AtomicUsize,
 }
 
+// ── Hardware hold tracking (macro playback) ────────────────────────────────
+//
+// A macro can press a button and never release it — `MouseDown`/`HoldStart`
+// without a matching `MouseUp`, or a panic/early exit between the two. The
+// mask is a thread-local because the v4.0 runner dispatches primitives through
+// a throwaway handle on the *playing* thread; the guard below runs there too.
+
+const HELD_LEFT: u8 = 1 << 0;
+const HELD_RIGHT: u8 = 1 << 1;
+const HELD_MIDDLE: u8 = 1 << 2;
+const HELD_X1: u8 = 1 << 3;
+const HELD_X2: u8 = 1 << 4;
+
+fn button_bit(button: MouseButton) -> u8 {
+    match button {
+        MouseButton::Left => HELD_LEFT,
+        MouseButton::Right => HELD_RIGHT,
+        MouseButton::Middle => HELD_MIDDLE,
+        MouseButton::X1 => HELD_X1,
+        MouseButton::X2 => HELD_X2,
+    }
+}
+
+thread_local! {
+    static HELD_MASK: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+fn note_pressed(button: MouseButton) {
+    HELD_MASK.with(|m| m.set(m.get() | button_bit(button)));
+}
+
+fn note_released(button: MouseButton) {
+    HELD_MASK.with(|m| m.set(m.get() & !button_bit(button)));
+}
+
+/// Release every button this thread still holds and clear the mask.
+fn release_held_buttons(backend: &dyn InputBackend) {
+    let mask = HELD_MASK.with(|m| m.replace(0));
+    for (bit, button) in [
+        (HELD_LEFT, MouseButton::Left),
+        (HELD_RIGHT, MouseButton::Right),
+        (HELD_MIDDLE, MouseButton::Middle),
+        (HELD_X1, MouseButton::X1),
+        (HELD_X2, MouseButton::X2),
+    ] {
+        if mask & bit != 0 {
+            backend.mouse_up(button);
+        }
+    }
+}
+
+/// Run-scoped guard: releases a button left held when the stack unwinds or the
+/// run exits early, and always clears `is_running` (a panic must not leave the
+/// executor permanently "busy"). On the normal path `completed` is set before
+/// the drop, so a macro that deliberately ends with a button down keeps it
+/// down — today's semantics, unchanged.
+struct MacroExitGuard {
+    shared: Arc<ExecutorShared>,
+    completed: bool,
+}
+
+impl Drop for MacroExitGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            release_held_buttons(&*crate::platform::default_input_backend());
+        }
+        self.shared.is_running.store(false, Ordering::Release);
+    }
+}
+
 impl ExecutorHandle {
     /// Create a handle bound to a specific input backend.
     #[allow(dead_code)] // contract API — used by mock-backend contract tests
@@ -114,6 +184,19 @@ impl ExecutorHandle {
         };
 
         self.shared.cancel.store(false, Ordering::Release);
+        // Rescue seam: the token is inert without a snubber Supervisor
+        // (`stability::arm_hardware_token`), but the shipped out-of-process
+        // rescue (`input_guardian`) covers the abort/kill cases regardless.
+        let task_id = crate::stability::next_task_id();
+        crate::stability::arm_hardware_token(
+            task_id,
+            crate::stability::OP_RELEASE_ALL_INPUTS,
+            1,
+        );
+        let mut exit_guard = MacroExitGuard {
+            shared: Arc::clone(&self.shared),
+            completed: false,
+        };
         let start = self
             .shared
             .next_step_idx
@@ -143,7 +226,8 @@ impl ExecutorHandle {
         }
 
         guard.commit();
-        self.shared.is_running.store(false, Ordering::Release);
+        crate::stability::commit_hardware_token(task_id);
+        exit_guard.completed = true;
     }
 
     /// Run a single action (debug Step mode). Returns true if a step
@@ -226,9 +310,11 @@ impl ExecutorHandle {
             }
             Action::MouseDown { button } => {
                 self.backend.mouse_down(*button);
+                note_pressed(*button);
             }
             Action::MouseUp { button } => {
                 self.backend.mouse_up(*button);
+                note_released(*button);
             }
             Action::KeyPress { key, mods } | Action::KeyDown { key, mods } => {
                 if !cancel.load(Ordering::Acquire) {
@@ -246,6 +332,7 @@ impl ExecutorHandle {
             Action::HoldStart => {
                 // Equivalent to MouseDown(Left).
                 self.backend.mouse_down(MouseButton::Left);
+                note_pressed(MouseButton::Left);
             }
             // ── v4.0 control flow variants: handled at the *list* level.
             // Here they are atomic ticks (debug Step mode UI response).
@@ -459,6 +546,67 @@ mod tests {
         assert_eq!(backend.clicks.load(Ordering::Relaxed), 2); // count=2
         assert_eq!(backend.keys.load(Ordering::Relaxed), 1);
         assert_eq!(backend.scrolls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn exit_guard_releases_each_held_button_once() {
+        struct CountingBackend {
+            ups: AtomicUsize,
+        }
+        impl InputBackend for CountingBackend {
+            fn mouse_click(&self, _: MouseButton) {}
+            fn mouse_down(&self, _: MouseButton) {}
+            fn mouse_up(&self, _: MouseButton) {
+                self.ups.fetch_add(1, Ordering::Relaxed);
+            }
+            fn scroll_wheel(&self, _: i32, _: i32) {}
+            fn set_cursor_pos(&self, _: i32, _: i32) {}
+            fn send_key(&self, _: KeyCode, _: Modifiers, _: bool) {}
+            fn cursor_position(&self) -> (i32, i32) {
+                (0, 0)
+            }
+            fn click_mouse(&self, _: &crate::platform::backend::ClickSpec) -> bool {
+                true
+            }
+            fn release_mouse_hold(&self, _: MouseButton) {}
+        }
+
+        let backend = CountingBackend {
+            ups: AtomicUsize::new(0),
+        };
+        // Left is pressed and released (nothing owed); X1 stays held.
+        HELD_MASK.with(|m| m.set(0));
+        note_pressed(MouseButton::Left);
+        note_pressed(MouseButton::X1);
+        note_released(MouseButton::Left);
+        release_held_buttons(&backend);
+        assert_eq!(
+            backend.ups.load(Ordering::Relaxed),
+            1,
+            "only the button still held may be released"
+        );
+        release_held_buttons(&backend);
+        assert_eq!(
+            backend.ups.load(Ordering::Relaxed),
+            1,
+            "a cleared mask must not release twice"
+        );
+    }
+
+    #[test]
+    fn exit_guard_clears_is_running_after_early_exit() {
+        let h = ExecutorHandle::new();
+        HELD_MASK.with(|m| m.set(0));
+        h.shared.is_running.store(true, Ordering::Release);
+        let guard = MacroExitGuard {
+            shared: Arc::clone(&h.shared),
+            completed: false,
+        };
+        drop(guard);
+        assert!(
+            !h.is_running(),
+            "a dropped run must not leave the executor permanently busy"
+        );
     }
 
     /// Stop-then-play must not resurrect the cancelled run.

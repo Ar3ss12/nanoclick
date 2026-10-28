@@ -1,6 +1,6 @@
 //! Key classification policy — which keys count as "typing".
 //!
-//! # The bug this type exists to kill
+//! # Problem this type solves
 //!
 //! Bind the toggle hotkey to `J` and the clicker never starts. One keypress
 //! produces two contradicting decisions, in this order:
@@ -12,7 +12,7 @@
 //! typing  hotkeys_locked() == true            ->  veto  <- start also refused
 //! ```
 //!
-//! The kill-switch runs **before** the toggle gate, so the same press both stops
+//! The emergency stop runs **before** the toggle gate, so the same press both stops
 //! the clicker and is refused for starting it. The net result is a hotkey that is
 //! guaranteed never to start the clicker — on exactly the key the user pressed.
 //!
@@ -38,7 +38,7 @@
 //! edit can un-exempt a bound hotkey. `docs/KEY_POLICY.md` §3 states it, and
 //! `a_user_cannot_unexempt_a_bound_hotkey` pins it.
 //!
-//! # Zero-Jitter contract (`AGENTS.md` §2.17)
+//! # Zero-Jitter contract (`AGENTS.md` I26)
 //!
 //! This type is read from the `WH_KEYBOARD_LL` path, so:
 //!

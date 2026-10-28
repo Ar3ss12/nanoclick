@@ -122,7 +122,7 @@ pub fn toggle_diag_dump() -> Vec<String> {
 /// This is only for VETO and STOP events: they happen once per user action, never
 /// per click and never per keystroke, so a file line here costs nothing on the hot
 /// path. Per-key diagnostics stay ring-only (`toggle_diag_push`) — see
-/// `AGENTS.md` §2.17.
+/// `AGENTS.md` I26.
 fn toggle_diag_report(line: impl Into<String>) {
     let line = line.into();
     crate::debug_log_internal("warn", &format!("[Hotkeys] {line}"));
@@ -229,6 +229,11 @@ impl FocusGuard {
 pub struct ClickScheduler {
     active: Arc<AtomicBool>,
     state: Arc<Mutex<ClickerState>>,
+    /// Bumped by every `spawn_worker`. A worker that unwinds compares its own
+    /// generation against this one before moving the state machine to Idle:
+    /// preset preemption spawns the next worker while the old one is still
+    /// finishing, and the old worker must not report Idle over the new run.
+    run_gen: Arc<AtomicU64>,
     gateway_tx: snubber::GatewaySender<ClickerCmd>,
     gateway_rx: Arc<Mutex<Option<snubber::GatewayHost<ClickerCmd>>>>,
     mode_autoclicker: Arc<AtomicBool>,
@@ -363,6 +368,42 @@ pub fn decide_toggle(
     ToggleOutcome::Start
 }
 
+/// Run-end state fixer for one click worker.
+///
+/// The worker owns its own exit conditions (focus-loss pause, click limit,
+/// repeat count, image trigger, snubber rejection), and each of them used to
+/// end the run while `ClickerState` stayed `Running`. Everything that reads the
+/// state machine — `get_status`, `emit_status_now`, the UI toggle — then kept
+/// repainting RUNNING over a dead run, and the 1 s page resync re-asserted it
+/// right after the worker's own IDLE frame.
+///
+/// Generation check: a preempting preset spawns the next worker while this one
+/// unwinds; only the worker whose generation is still current may write Idle.
+/// An explicit stop has already moved the state, so it is skipped.
+struct WorkerRunGuard {
+    state: Arc<Mutex<ClickerState>>,
+    run_gen: Arc<AtomicU64>,
+    gen: u64,
+    preset: Arc<Mutex<Option<String>>>,
+}
+
+impl Drop for WorkerRunGuard {
+    fn drop(&mut self) {
+        if self.run_gen.load(Ordering::Acquire) != self.gen {
+            return;
+        }
+        let node = crate::stability::click_state_node();
+        let mut state = self.state.safe_lock();
+        if *state != ClickerState::Running {
+            return;
+        }
+        let _ = node.transition(&mut *state, ClickerState::Idle, || {}, |_s| {
+            *self.preset.safe_lock() = None;
+            Ok::<(), &'static str>(())
+        });
+    }
+}
+
 impl ClickScheduler {
     pub fn new() -> Self {
         let (gateway_tx, gateway_rx) = snubber::gateway::<ClickerCmd>(16);
@@ -370,6 +411,7 @@ impl ClickScheduler {
         ClickScheduler {
             active: Arc::new(AtomicBool::new(false)),
             state: Arc::new(Mutex::new(ClickerState::Idle)),
+            run_gen: Arc::new(AtomicU64::new(0)),
             gateway_tx,
             gateway_rx: Arc::new(Mutex::new(Some(gateway_rx))),
             mode_autoclicker: Arc::new(AtomicBool::new(initial_cfg.active_mode == "autoclicker")),
@@ -513,7 +555,7 @@ impl ClickScheduler {
         // re-applies the active preset on every `preset-activated`
         // (`applyPreset` → `save_app_config` → `set_config`) WHILE the run
         // that preset just started is live. The worker snapshot `stop_duration
-        // _ms` at spawn (AGENTS.md §13 — the loop reads the snapshot, not the
+        // _ms` at spawn (AGENTS.md I8 — the loop reads the snapshot, not the
         // DOM and not this atomic), so a mid-run write of the *same* values is
         // harmless, but a zero would disarm the auto-stop underneath the run.
         // Only arm them on a genuine change (idle apply, real user edit).
@@ -931,11 +973,10 @@ impl ClickScheduler {
         }
 
         if active {
-            // Customs membrane (USER_GUIDE Level 2 — invariant gate): validate
-            // CPS/coords BEFORE arming hardware or spawning the worker. A
-            // breach is reported as PoisonedPayload (flight recorder, metric,
-            // no guard armed, `total_started` untouched) and the run never
-            // starts.
+            // Invariant gate (USER_GUIDE Level 2): validate CPS/coords BEFORE
+            // arming hardware or spawning the worker. A violation is reported
+            // as PoisonedPayload (diagnostic ring buffer, metric, no guard
+            // armed, `total_started` untouched) and the run never starts.
             let cps = f64::from_bits(self.cps_raw.load(Ordering::Acquire));
             let fx = self.fixed_x.load(Ordering::Acquire) as i32;
             let fy = self.fixed_y.load(Ordering::Acquire) as i32;
@@ -1571,8 +1612,21 @@ impl ClickScheduler {
         let focus_guard_arc = Arc::clone(&self.focus_guard);
         let technique_arc = Arc::clone(&self.technique);
         let gateway_tx = self.gateway_tx.clone();
+        let run_state = Arc::clone(&self.state);
+        let run_gen = Arc::clone(&self.run_gen);
+        let run_preset = Arc::clone(&self.current_running_preset);
+        let my_gen = self.run_gen.fetch_add(1, Ordering::AcqRel) + 1;
 
         thread::spawn(move || {
+            // Every exit from this thread — normal run end, focus-loss pause,
+            // click/repeat limit, image trigger, snubber rejection, panic —
+            // must leave the state machine honest. See `WorkerRunGuard`.
+            let _run_guard = WorkerRunGuard {
+                state: run_state,
+                run_gen,
+                gen: my_gen,
+                preset: run_preset,
+            };
             let node = crate::stability::click_node();
             let task_id = crate::stability::next_task_id();
             let (conduit, _steering_handle) = crate::stability::create_worker_steering();
@@ -1582,9 +1636,13 @@ impl ClickScheduler {
             }) {
                 Ok(g) => g,
                 Err(e) => {
+                    // Erased admission is a probe: the slot is released at
+                    // entry, so `BulkheadFull` here cannot mean "another
+                    // click worker runs" — that is `ClickerState`'s job. The
+                    // only honest rejections are a tripped breaker and an
+                    // internal bookkeeping failure.
                     let err_desc = match e {
                         snubber::EnterError::BreakerOpen => "BREAKER OPEN (COOLING DOWN)",
-                        snubber::EnterError::BulkheadFull => "SYSTEM BUSY",
                         _ => "SAFETY TRIP",
                     };
                     crate::debug_log_internal(
@@ -1638,10 +1696,28 @@ impl ClickScheduler {
             // reset → spawn_worker); the preemption path swaps it only after the
             // old worker's stop event has been signalled. One clone here is safe
             // and correct for the full lifetime of this worker.
-            let stop_handle: crate::platform::NativeEventHandle = stop_event_lock
-                .safe_lock()
-                .clone()
-                .expect("stop_event must be initialized before spawn_worker");
+            let Some(stop_handle) = stop_event_lock.safe_lock().clone() else {
+                crate::debug_log_internal(
+                    "error",
+                    "[Scheduler] click_worker: stop_event is not initialized; aborting run",
+                );
+                active.store(false, Ordering::Release);
+                if let Some(ref app) = app_handle {
+                    Self::status_and_hud_emit(
+                        app,
+                        clicks_done.load(Ordering::Relaxed),
+                        if mode_autoclicker.load(Ordering::Relaxed) {
+                            "autoclicker"
+                        } else {
+                            "work"
+                        },
+                        f64::from_bits(cps_raw.load(Ordering::Relaxed)),
+                        "SYSTEM ERROR",
+                        false,
+                    );
+                }
+                return;
+            };
             // Focus Guard: arm the session baseline + shared watcher state.
             // The watcher thread is spawned ONLY while the guard is enabled
             // (guard OFF = zero threads, zero syscalls). It polls the
@@ -1929,6 +2005,14 @@ impl ClickScheduler {
                     | snubber::Directive::Preempted(_reason) => {
                         active.store(false, Ordering::Release);
                         report_stop("steering_cancel");
+                        break;
+                    }
+                    // `Directive` is `#[non_exhaustive]` (snubber 0.6.13): an
+                    // unknown steering verdict is never permission to keep
+                    // clicking — fail closed exactly like Cancel.
+                    _ => {
+                        active.store(false, Ordering::Release);
+                        report_stop("unknown_directive");
                         break;
                     }
                 }
@@ -2397,7 +2481,9 @@ pub(crate) fn bates_jitter_factor(rng: &mut impl rand::Rng, pct_frac: f64) -> f6
     (r1 + r2 + r3) / 3.0
 }
 
-/// RAII guard ensuring mouse button release on any exit, break or panic.
+/// RAII guard ensuring mouse button release on every unwind path (normal exit,
+/// break, `?`, unwinding panic). It cannot run on `abort`, `TerminateProcess`
+/// or a crash below Rust — those are covered by `crate::input_guardian`.
 pub(crate) struct MouseHoldGuard<'a, B: crate::platform::backend::InputBackend + ?Sized> {
     backend: &'a B,
     button: MouseButton,
@@ -2752,7 +2838,7 @@ mod single_mode_active_precheck_tests {
     /// release); per-key diagnostics stay ring-only (`toggle_diag_push`).
     /// NOTE: the decision calls (`hotkey_toggle`, `activate_preset_hotkey`)
     /// run on the hook LISTENER thread — not inside the OS hook callback —
-    /// so an occasional veto/stop line is legal there (AGENTS.md §2.17 bans
+    /// so an occasional veto/stop line is legal there (AGENTS.md I26 bans
     /// file I/O inside the *callback*, enforced by
     /// `hook_loop_contains_no_file_logging`). What the contract forbids is a
     /// decision that is silent everywhere.
@@ -3150,6 +3236,63 @@ mod focus_guard_tests {
             arm_off < loop_off,
             "arm() must happen before the click loop starts"
         );
+    }
+}
+
+/// ── Worker run-end state suite ──────────────────────────────────────
+/// A click worker that stops on its own (focus loss, click limit, repeat
+/// count, image trigger, snubber rejection) must leave `ClickerState` Idle.
+/// The suite drops [`WorkerRunGuard`] directly — no run, no injected clicks.
+#[cfg(test)]
+mod worker_run_guard_tests {
+    use super::*;
+
+    fn guard(
+        state: &Arc<Mutex<ClickerState>>,
+        run_gen: &Arc<AtomicU64>,
+        gen: u64,
+        preset: &Arc<Mutex<Option<String>>>,
+    ) -> WorkerRunGuard {
+        WorkerRunGuard {
+            state: Arc::clone(state),
+            run_gen: Arc::clone(run_gen),
+            gen,
+            preset: Arc::clone(preset),
+        }
+    }
+
+    #[test]
+    fn self_stop_moves_running_to_idle_and_clears_the_preset() {
+        let state = Arc::new(Mutex::new(ClickerState::Running));
+        let run_gen = Arc::new(AtomicU64::new(1));
+        let preset = Arc::new(Mutex::new(Some("preset_1".into())));
+        drop(guard(&state, &run_gen, 1, &preset));
+        assert_eq!(*state.lock().unwrap(), ClickerState::Idle);
+        assert!(preset.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn an_explicit_stop_keeps_its_answer() {
+        let state = Arc::new(Mutex::new(ClickerState::Paused));
+        let run_gen = Arc::new(AtomicU64::new(1));
+        let preset = Arc::new(Mutex::new(Some("preset_2".into())));
+        drop(guard(&state, &run_gen, 1, &preset));
+        assert_eq!(
+            *state.lock().unwrap(),
+            ClickerState::Paused,
+            "Pause owns the state; the worker must not overwrite it"
+        );
+        assert!(preset.lock().unwrap().is_some());
+    }
+
+    #[test]
+    fn a_preempted_worker_never_reports_idle_over_the_new_run() {
+        let state = Arc::new(Mutex::new(ClickerState::Running));
+        let run_gen = Arc::new(AtomicU64::new(2)); // the next worker already owns the run
+        let preset = Arc::new(Mutex::new(Some("preset_2".into())));
+        drop(guard(&state, &run_gen, 1, &preset));
+        assert_eq!(*state.lock().unwrap(), ClickerState::Running);
+        assert!(preset.lock().unwrap().is_some());
     }
 }
 

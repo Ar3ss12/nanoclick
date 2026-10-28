@@ -644,6 +644,11 @@ const jitter3dCheck      = document.getElementById("jitter3dCheck");
 const jitter3dRow        = document.getElementById("jitter3dRow");
 const rippleCheckbox     = document.getElementById("rippleCheckbox");
 const hudCheckbox        = document.getElementById("hudCheckbox");
+// UI stub: the satellite controls are hidden in the settings card until the
+// feature returns. The windows/pages/backend stay intact; only the UI entry
+// points are fenced off so nothing (clicks, presets, imports, tray events)
+// can re-enable or resurrect them from the frontend.
+const SATELLITES_UI_STUBBED = true;
 const footerModeShortcut = document.getElementById("footerModeShortcut");
 
 // Modal — the START button inside it is re-queried on demand by the onboarding
@@ -678,6 +683,11 @@ const trayLifeCheckbox        = document.getElementById("trayLifeCheckbox");
 // must never rewrite them — that is how a factory config silently lost
 // `minimize_to_tray` on an unrelated save.
 let trayLifeHydrated = null;
+// Last persisted/handled value of the two tray-dependent toggles. The master
+// gate ("Live in the Tray") uses them to revert an OFF→ON click while it is
+// disabled: turning the dependents OFF stays allowed, turning them ON does not.
+let _startMinimizedPrev = false;
+let _rememberStatePrev = true;
 const notificationsCheckbox   = document.getElementById("notificationsCheckbox");
 const pauseFocusLossCheckbox  = document.getElementById("pauseFocusLossCheckbox");
 const rememberPosCheckbox     = document.getElementById("rememberPosCheckbox");
@@ -1593,8 +1603,9 @@ function updateUiFromConfig(config) {
   if (hudCheckbox) {
     hudCheckbox.checked = !!config.ui.show_hud;
     // No invoke here: the window is already in the state the config describes
-    // (boot path / show_secondary_windows built it, save_app_config syncs it
-    // on change). A hydrate-time toggle re-created what the owner already owns.
+    // (boot path / show_secondary_windows built it, and every preference flip
+    // asks the toggle command). A hydrate-time toggle re-created what the
+    // owner already owns.
   }
 
   if (alwaysOnTopCheckbox) {
@@ -1603,7 +1614,10 @@ function updateUiFromConfig(config) {
   }
   if (startMinimizedCheckbox) startMinimizedCheckbox.checked = !!config.ui.start_minimized;
   if (rememberStateCheckbox) rememberStateCheckbox.checked = config.ui.remember_last_window_state !== false;
+  _startMinimizedPrev = !!startMinimizedCheckbox?.checked;
+  _rememberStatePrev = !!rememberStateCheckbox?.checked;
   paintRememberStateLock();
+  paintTrayDependentsLock();
   if (autostartCheckbox) autostartCheckbox.checked = !!config.ui.autostart;
   // The switch promises BOTH halves of the tray lifestyle ("close → tray + deep
   // sleep"), so it must not show ON for a config where deep sleep is off: a
@@ -1924,8 +1938,8 @@ async function loadConfig() {
     const path = await invoke("get_config_path");
     _configPath = path || "";
     updateConfigFolderTooltip();
-    // Deadbolt Modal queue: every boot notice needs its own OK click.
-    // No backdrop/Esc/[X] dismiss — the app stays bolted until drained.
+    // Blocking boot-notice queue: every boot notice needs its own OK click.
+    // No backdrop/Esc/[X] dismiss — the app stays blocked until drained.
     // i18n dict may load a beat later: retry resolve is inside the modal,
     // and toasts start polling in parallel (non-blocking).
     try {
@@ -1969,25 +1983,25 @@ async function loadConfig() {
 // Rules: no [X] in markup, backdrop clicks swallowed via stopPropagation,
 // Esc killed at window level while bolted, ONLY exit is the OK button.
 // Multiple notices chain strictly in order until the queue is empty.
-let _deadboltEscGuard = null;
+let _noticeEscGuard = null;
 function showDeadboltQueue(notices) {
   const queue = Array.isArray(notices) ? notices.slice() : [];
   if (!queue.length) return;
-  // Kill Esc while any deadbolt is on screen.
-  if (!_deadboltEscGuard) {
-    _deadboltEscGuard = (e) => {
+  // Suppress Esc while a boot notice is on screen.
+  if (!_noticeEscGuard) {
+    _noticeEscGuard = (e) => {
       if ((e.key === "Escape" || e.key === "Esc") && document.getElementById("deadboltModal")) {
         e.preventDefault();
         e.stopPropagation();
       }
     };
-    window.addEventListener("keydown", _deadboltEscGuard, true);
+    window.addEventListener("keydown", _noticeEscGuard, true);
   }
   const showNext = () => {
     const notice = queue.shift();
     if (!notice) {
-      const guard = _deadboltEscGuard;
-      _deadboltEscGuard = null;
+      const guard = _noticeEscGuard;
+      _noticeEscGuard = null;
       if (guard) window.removeEventListener("keydown", guard, true);
       return;
     }
@@ -2326,7 +2340,7 @@ async function saveConfigInner(retried) {
       currentConfig.engine.stop_duration_ms = readStopDurationMs();
       currentConfig.engine.stop_duration_unit = normalizeStopUnit(currentStopUnit);
       // The legacy whole-minutes field is retired — zero it on every save, or a
-      // stale value would be resurrected by the migration fallback.
+      // stale value would be restored by the migration fallback.
       currentConfig.engine.stop_duration_min = 0;
       if (stopTimeInput) currentConfig.engine.stop_time_str = stopTimeInput.value || "";
       // WHICH trigger is armed. Both values above are persisted ON PURPOSE (so
@@ -2386,9 +2400,9 @@ async function saveConfigInner(retried) {
       if (rememberPosCheckbox) currentConfig.ui.remember_window_position = rememberPosCheckbox.checked;
       if (window.SmartGuard) window.SmartGuard.collect(currentConfig);
       // Theme lives in the custom dropdown now (chooseTheme already wrote
-      // currentConfig via applyTheme); collect must not resurrect the select.
+      // currentConfig via applyTheme); collect must not overwrite the select.
       // Language lives in the segment + I18nEngine now (switchLanguage already
-      // wrote currentConfig.ui.language); collect must not resurrect the select.
+      // wrote currentConfig.ui.language); collect must not overwrite the select.
       const alwaysAdminCb = document.getElementById("alwaysRunAsAdminCheckbox");
       if (alwaysAdminCb) currentConfig.ui.always_run_as_admin = alwaysAdminCb.checked;
 
@@ -2612,26 +2626,98 @@ document.querySelectorAll('input[name="posMode"]').forEach((r) => {
     saveConfig();
   });
 });
-if (rippleCheckbox) rippleCheckbox.addEventListener("change", () => {
+// ── SATELLITE WINDOW OWNERSHIP ─────────────────────────────────────────
+// The toggle commands (`overlay::toggle_overlay` / `toggle_hud_window`) are
+// the ONLY owners of the ripple/HUD windows (SATELLITE_PLAN §1). A config
+// save is persistence only — it must never build a WebView. Every path that
+// flips a preference therefore asks the window to follow: the checkboxes
+// below, `applyPreset()`, and a backup import.
+const SATELLITE_LOCK_MS = 800;
+
+function setSatellitesLocked(locked) {
+  if (SATELLITES_UI_STUBBED) locked = true;
+  if (rippleCheckbox) rippleCheckbox.disabled = locked;
+  if (hudCheckbox) hudCheckbox.disabled = locked;
+}
+
+function applySatelliteWindow(which, want) {
+  const show = !!want;
+  if (which === "ripple") return invoke("toggle_overlay", { show });
+  return invoke("toggle_hud_window", { show });
+}
+
+// Persisted preference → live window. `before` is the UI state the caller
+// observed BEFORE it rewrote `currentConfig.ui`; `DeferredTray` is legal
+// (the app is in the tray) and answers with the same toast as the tray path.
+async function syncSatelliteWindows(before) {
+  // Stub: presets and backup imports must not resurrect the hidden windows.
+  if (SATELLITES_UI_STUBBED) return true;
+  if (!before || !currentConfig?.ui) return true;
+  const tasks = [];
+  if (!!before.visual_ripple !== !!currentConfig.ui.visual_ripple) {
+    tasks.push(["ripple", !!currentConfig.ui.visual_ripple]);
+  }
+  if (!!before.show_hud !== !!currentConfig.ui.show_hud) {
+    tasks.push(["hud", !!currentConfig.ui.show_hud]);
+  }
+  if (!tasks.length) return true;
+  setSatellitesLocked(true);
+  let ok = true;
+  for (const [which, want] of tasks) {
+    const deferredKey = which === "ripple" ? "satellite_deferred_ripple" : "satellite_deferred_hud";
+    const busyKey = which === "ripple" ? "satellite_busy_ripple" : "satellite_busy_hud";
+    try {
+      const result = await applySatelliteWindow(which, want);
+      if (result === "DeferredTray") {
+        showToast("⏳ " + getI18nText(deferredKey, {}, "Will appear together with the window (the app is in the tray)."), "warn");
+      }
+    } catch (err) {
+      ok = false;
+      dbg(`satellite sync (${which}) failed:`, err?.message || String(err));
+      showToast("⚠ " + getI18nText(busyKey, {}, "Toggle in progress — try again in a second."), "warn");
+    }
+  }
+  lockSatelliteCheckboxes(SATELLITE_LOCK_MS);
+  return ok;
+}
+
+if (rippleCheckbox) rippleCheckbox.addEventListener("change", async () => {
   if (rippleCheckbox.disabled) return;
-  currentConfig.ui.visual_ripple = rippleCheckbox.checked;
-  // ONE owner: save_app_config (Rust) syncs the lazy overlay WebView when
-  // visual_ripple flips. The old direct fast-path invoke raced the save path:
-  // it created a hidden WebView, then save_app_config's own toggle saw
-  // "already exists" and showed it BEFORE the DOM rendered (the DWM white
-  // flash Zero-Flash was built to prevent).
-  // Lock IMMEDIATELY on first click (not only on backend "busy" reply):
-  // WebView2 builds take 500ms–1s, so rapid clicks must be gated NOW.
-  // satellite-toggle-result unlocks early on "applied"/"already".
-  lockSatelliteCheckboxes(1000);
-  saveConfigThrottled();
+  const want = rippleCheckbox.checked;
+  const before = !!currentConfig.ui.visual_ripple;
+  currentConfig.ui.visual_ripple = want;
+  // Both boxes are locked BEFORE the await: a WebView2 build takes 500 ms–1 s,
+  // so a second flip must be gated now, not when the backend answers "busy".
+  setSatellitesLocked(true);
+  try {
+    await applySatelliteWindow("ripple", want);
+    saveConfigThrottled();
+  } catch (err) {
+    currentConfig.ui.visual_ripple = before;
+    rippleCheckbox.checked = before;
+    dbg("ripple toggle failed:", err?.message || String(err));
+    showToast("⚠ " + getI18nText("satellite_busy_ripple", {}, "Ripple toggle in progress — try again in a second."), "warn");
+  } finally {
+    lockSatelliteCheckboxes(SATELLITE_LOCK_MS);
+  }
 });
-if (hudCheckbox) hudCheckbox.addEventListener("change", () => {
+if (hudCheckbox) hudCheckbox.addEventListener("change", async () => {
   if (hudCheckbox.disabled) return;
-  currentConfig.ui.show_hud = hudCheckbox.checked;
-  // Same as above: save_app_config syncs the lazy HUD WebView as the single owner.
-  lockSatelliteCheckboxes(1000);
-  saveConfigThrottled();
+  const want = hudCheckbox.checked;
+  const before = !!currentConfig.ui.show_hud;
+  currentConfig.ui.show_hud = want;
+  setSatellitesLocked(true);
+  try {
+    await applySatelliteWindow("hud", want);
+    saveConfigThrottled();
+  } catch (err) {
+    currentConfig.ui.show_hud = before;
+    hudCheckbox.checked = before;
+    dbg("hud toggle failed:", err?.message || String(err));
+    showToast("⚠ " + getI18nText("satellite_busy_hud", {}, "HUD toggle in progress — try again in a second."), "warn");
+  } finally {
+    lockSatelliteCheckboxes(SATELLITE_LOCK_MS);
+  }
 });
 
 // Busy-lock for the satellite checkboxes: while a create is in flight
@@ -2641,7 +2727,7 @@ if (hudCheckbox) hudCheckbox.addEventListener("change", () => {
 // before each new one so an extend never re-disables after an early unlock.
 let _satelliteBusyUntil = 0;
 let _satelliteLockTimer = null;
-function lockSatelliteCheckboxes(ms = 1000) {
+function lockSatelliteCheckboxes(ms = SATELLITE_LOCK_MS) {
   _satelliteBusyUntil = Date.now() + ms;
   for (const cb of [rippleCheckbox, hudCheckbox]) {
     if (cb) cb.disabled = true;
@@ -2651,7 +2737,7 @@ function lockSatelliteCheckboxes(ms = 1000) {
     _satelliteLockTimer = null;
     if (Date.now() >= _satelliteBusyUntil) {
       for (const cb of [rippleCheckbox, hudCheckbox]) {
-        if (cb) cb.disabled = false;
+        if (cb) cb.disabled = SATELLITES_UI_STUBBED;
       }
     }
   }, ms);
@@ -3235,7 +3321,7 @@ if (alwaysOnTopCheckbox) {
 // The two startup switches are a pair: an explicit "always start hidden" wins over
 // "reopen the way I closed it". The overridden row is painted — dimmed with a
 // localized hint — never `disabled` and never `pointer-events: none`, so it keeps
-// its value and clicking it still works (AGENTS.md §2.13, same rule as the
+// its value and clicking it still works (AGENTS.md I8, same rule as the
 // auto-stop pair). Enforcement lives in the backend: `start_hidden_at_boot()`.
 function paintRememberStateLock() {
   const row = document.getElementById("rememberStateRow");
@@ -3247,10 +3333,40 @@ function paintRememberStateLock() {
 }
 
 if (startMinimizedCheckbox) startMinimizedCheckbox.addEventListener("change", () => {
-  paintRememberStateLock();
+  if (guardTrayDependent(startMinimizedCheckbox, () => _startMinimizedPrev, (v) => { _startMinimizedPrev = v; })) return;
+  paintTrayDependentsLock();
   saveConfig();
 });
-if (rememberStateCheckbox) rememberStateCheckbox.addEventListener("change", saveConfig);
+if (rememberStateCheckbox) rememberStateCheckbox.addEventListener("change", () => {
+  if (guardTrayDependent(rememberStateCheckbox, () => _rememberStatePrev, (v) => { _rememberStatePrev = v; })) return;
+  paintTrayDependentsLock();
+  saveConfig();
+});
+// Master gate for the tray-dependent toggles: without "Live in the Tray" they
+// can be switched OFF but never back ON — close→tray owns the tray features.
+// The lock is painted (`timer-option--locked`), the ON click is reverted.
+function paintTrayDependentsLock() {
+  const rows = [
+    document.getElementById("startMinimizedRow"),
+    document.getElementById("rememberStateRow"),
+  ];
+  const locked = !!trayLifeCheckbox && !trayLifeCheckbox.checked;
+  for (const row of rows) {
+    if (!row) continue;
+    row.classList.toggle("timer-option--locked", locked);
+    if (locked) row.title = getI18nText("settings_tray_life_required", {}, "Enable Live in the Tray first — these options depend on it.");
+    else row.removeAttribute("title");
+  }
+  if (!locked) paintRememberStateLock();
+}
+// Returns true when the change was reverted (master OFF + user tried to enable).
+function guardTrayDependent(cb, getPrev, setPrev) {
+  if (!cb || !cb.checked) { if (cb) setPrev(false); return false; }
+  if (!trayLifeCheckbox || trayLifeCheckbox.checked) { setPrev(true); return false; }
+  cb.checked = getPrev();
+  showToast("🔒 " + getI18nText("settings_tray_life_required", {}, "Enable Live in the Tray first — these options depend on it."), "warn");
+  return true;
+}
 // The master switch is the ONLY owner of both tray flags — its label promises both
 // halves. A config that predates the merge (minimize=true, deep_sleep=false) is
 // therefore shown as OFF with this hint, so "it looks enabled but closing frees
@@ -3280,6 +3396,7 @@ function paintTrayLifeHint(minimizeWanted, deepSleepWanted) {
 if (trayLifeCheckbox) trayLifeCheckbox.addEventListener("change", () => {
   // Touching the master is the explicit "set both flags together" intent.
   paintTrayLifeHint(trayLifeCheckbox.checked, trayLifeCheckbox.checked);
+  paintTrayDependentsLock();
   saveConfig();
 });
 if (notificationsCheckbox) notificationsCheckbox.addEventListener("change", saveConfig);
@@ -3384,7 +3501,10 @@ if (modeToggleBtn) {
       const newMode = await invoke("toggle_mode");
       dbg("modeToggleBtn toggled successfully — newMode:", newMode);
       setModeDisplay(newMode, true);
-      saveConfig();
+      // No saveConfig() here: the backend emits `status-update` with the new
+      // mode BEFORE the invoke resolves, so applyStatusUpdate's modeChanged
+      // branch already persists it — one save per toggle, not two (the
+      // duplicate save showed up as paired [SaveConfig] triples in the log).
     } catch (err) {
       console.error("Failed to toggle mode:", err);
       dbg("modeToggleBtn ERROR:", err);
@@ -3897,6 +4017,14 @@ async function applyPreset(presetId) {
     const p = currentConfig.presets.find(x => x.id === presetId);
     if (!p) { op.fail("apply-aborted"); return false; }
 
+    // A preset may carry the Appearance group (ripple/HUD). A config save no
+    // longer builds windows, so remember the pre-apply state and let the
+    // toggle commands follow it after a successful write.
+    const beforeSatelliteUi = {
+      visual_ripple: !!currentConfig.ui?.visual_ripple,
+      show_hud: !!currentConfig.ui?.show_hud,
+    };
+
     await op.run("copy-fields", () => {
       const st = ensureStatsConfig();
       st.presets_applied = Number(st.presets_applied || 0) + 1;
@@ -3996,7 +4124,8 @@ async function applyPreset(presetId) {
           && window.I18nEngine && window.I18nEngine.currentLang !== currentConfig.ui.language) {
         await window.I18nEngine.setLanguage(currentConfig.ui.language);
       }
-      await saveConfig();
+      const saved = await saveConfig();
+      if (saved !== false) await syncSatelliteWindows(beforeSatelliteUi);
       return "UI + config saved";
     });
 
@@ -5611,13 +5740,6 @@ listenSilent("full-state-sync", (event) => applyFullStateSync(event?.payload));
 async function resyncStatusOnFocus() {
   if (!configHydrated || typeof invoke !== "function") return;
   try {
-    const s = await invoke("get_full_state");
-    if (s && typeof s === "object") {
-      applyFullStateSync(s);
-      return;
-    }
-  } catch (_) {}
-  try {
     const s = await invoke("get_status");
     if (s && typeof s === "object") {
       applyStatusUpdate(s);
@@ -5768,10 +5890,11 @@ listen("tray-action-result", (event) => {
   }
 });
 
-// (2b) A SATELLITE toggle answered honestly. `save_app_config` is the single
-// owner of the ripple/HUD windows; when the main window is away it stores the
-// preference and answers DeferredTray — the toast below is what keeps the
-// checkbox from looking broken ("clicked — silence").
+// (2b) A SATELLITE toggle answered honestly. The tray path drives the toggle
+// commands directly; when the main window is away they store the preference
+// and answer DeferredTray — the toast below is what keeps the checkbox from
+// looking broken ("clicked — silence"). The page's own toggles show the same
+// toast from `syncSatelliteWindows`/the change handlers.
 listen("satellite-toggle-result", (event) => {
   try {
     const p = event?.payload || {};
@@ -5789,7 +5912,7 @@ listen("satellite-toggle-result", (event) => {
       // Reset the busy-until timestamp so the next setTimeout in
       // lockSatelliteCheckboxes re-enables immediately.
       _satelliteBusyUntil = 0;
-      for (const c of [rippleCheckbox, hudCheckbox]) { if (c) c.disabled = false; }
+      for (const c of [rippleCheckbox, hudCheckbox]) { if (c) c.disabled = SATELLITES_UI_STUBBED; }
       return;
     }
     // "tray": window waits for the main window; "busy": a toggle is already
@@ -5810,7 +5933,7 @@ listen("satellite-toggle-result", (event) => {
     // Busy: extend the lock so the retry storm cannot stack more saves.
     // Tray: the lock was already set at change-time and expires naturally;
     //       the window will unlock when the main window returns.
-    if (isBusy && typeof lockSatelliteCheckboxes === "function") lockSatelliteCheckboxes(1200);
+    if (isBusy && typeof lockSatelliteCheckboxes === "function") lockSatelliteCheckboxes(SATELLITE_LOCK_MS);
   } catch (err) {
     dbg("satellite-toggle-result handler error:", err?.message || String(err));
   }
@@ -7092,6 +7215,25 @@ function openBackupImportModal(fileName, backupJson) {
       setBtnBusy(confirmBtn, true, getI18nText("settings_btn_backup_working", {}, "Working…"));
       try {
         const msg = await invoke("import_full_backup", { backupJson: json, restoreConfig, restoreMacros });
+        if (restoreConfig) {
+          // The import rewrote config.json directly and a save no longer owns
+          // satellite windows. Read the fresh preference and let the toggle
+          // commands follow it now — not on the next restart.
+          try {
+            const fresh = await invoke("get_app_config");
+            const before = {
+              visual_ripple: !!currentConfig.ui?.visual_ripple,
+              show_hud: !!currentConfig.ui?.show_hud,
+            };
+            if (fresh?.ui && currentConfig.ui) {
+              currentConfig.ui.visual_ripple = fresh.ui.visual_ripple !== false;
+              currentConfig.ui.show_hud = !!fresh.ui.show_hud;
+            }
+            await syncSatelliteWindows(before);
+          } catch (err) {
+            dbg("backup import satellite sync failed:", err?.message || String(err));
+          }
+        }
         close();
         flashBtnSuccess(document.getElementById("importBackupBtn"));
         const okText = getI18nText("dialog_alert_restore_backup_success", { msg }, `Backup restored successfully (${msg}). Restart the app to see all changes.`);

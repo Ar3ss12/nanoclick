@@ -304,7 +304,7 @@ fn clear_recorder_context() {
 }
 
 unsafe extern "system" fn keyboard_proc(n_code: i32, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
-    if n_code == 0 && !STOP_FLAG.load(Ordering::Acquire) {
+    if n_code == 0 && l_param.0 != 0 && !STOP_FLAG.load(Ordering::Acquire) {
         let kb = *(l_param.0 as *const KBDLLHOOKSTRUCT);
         let vk = kb.vkCode as u16;
         // Filter out modifier-only keys themselves (we already capture their state).
@@ -349,7 +349,7 @@ unsafe extern "system" fn keyboard_proc(n_code: i32, w_param: WPARAM, l_param: L
 }
 
 unsafe extern "system" fn mouse_proc(n_code: i32, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
-    if n_code == 0 && !STOP_FLAG.load(Ordering::Acquire) {
+    if n_code == 0 && l_param.0 != 0 && !STOP_FLAG.load(Ordering::Acquire) {
         let m_struct = &*(l_param.0 as *const MSLLHOOKSTRUCT);
         let msg = w_param.0;
         let pt = POINT {

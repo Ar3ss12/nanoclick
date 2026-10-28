@@ -26,7 +26,8 @@ pub use key_policy::{IgnoreKeyReport, KeyPolicy, KeyPolicyReport};
 pub use typing::TypingGuard;
 // The static classifiers stay reachable for tests and for pure-function call
 // sites ONLY. Production hook code must use `KeyPolicy` — it cannot see the
-// user's bindings, which is what caused the "J kills my own clicker" bug.
+// user's bindings, which is what caused the toggle hotkey to stop its own
+// clicker.
 #[allow(unused_imports)]
 pub use typing::{is_text_keypress_vk, is_typable_vk, TYPING_FREEZE_MS};
 

@@ -27,7 +27,13 @@ pub fn next_task_id() -> u64 {
     NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Emit hardware arming token to external supervisor if running under supervision.
+/// Arm the hardware token for an out-of-process supervisor.
+///
+/// Inert in the shipped topology: snubber only emits the token when it is the
+/// parent (`SNUBBER_SUPERVISED`) and drains its own pipe. NanoClick's rescue
+/// path is [`crate::input_guardian`]; these calls stay because they are the
+/// seam for adopting `snubber::Supervisor` later, and they cost two writes per
+/// run (never per click).
 pub fn arm_hardware_token(task_id: u64, opcode: u32, tag: u8) {
     let token = ProcessToken::simple(task_id, opcode, tag);
     token.emit_if_supervised();
@@ -68,8 +74,14 @@ pub fn click_state_node() -> &'static SnubberNode {
 }
 
 /// Click Worker Node:
-/// - Max 1 in flight (bulkhead prevents racing worker threads)
-/// - Trip breaker after 5 repeated failures in a 10s window
+/// - Trip breaker after 5 repeated failures in a 10s window.
+///
+/// `max_in_flight(1)` is an *admission* probe, not a lifetime lease: snubber's
+/// erased guards release the slot at entry (`settle_admission_only`), so this
+/// number never serialises live workers. Actual click-run serialisation is
+/// owned by `ClickerState` + `run_gen` in `scheduler.rs`; the typed lifetime
+/// guard is deliberately avoided here (see the `emergency_stop` preemption
+/// note there).
 pub fn click_node() -> &'static SnubberNode {
     CLICK_NODE.get_or_init(|| {
         SnubberNode::builder("click_worker")
@@ -148,6 +160,21 @@ pub fn profile_switch_node() -> &'static SnubberNode {
     })
 }
 
+/// Planned admission refusals (`BulkheadFull`) are a normal bulkhead outcome,
+/// not a failure: keep them at `warn` so a healthy burst does not read as an
+/// error in the release log. Every other fault stays at `error`.
+fn log_bulkhead_fault(node: &str, kind: FaultKind, implicit_drops: u64) {
+    let level = if matches!(kind, FaultKind::BulkheadFull) {
+        "warn"
+    } else {
+        "error"
+    };
+    crate::debug_log_internal(
+        level,
+        &format!("[Stability:{node}] Fault: kind={kind:?} drops={implicit_drops}"),
+    );
+}
+
 /// Satellite Node (Ripple overlay + floating HUD WebViews):
 /// - Max 1 in flight: serializes WebView2 create/show/destroy so a fast
 ///   settings-toggle / tray / boot race can never double-spawn a satellite
@@ -162,13 +189,7 @@ pub fn satellite_node() -> &'static SnubberNode {
         SnubberNode::builder("satellite_window")
             .max_in_flight(1)
             .on_fault(|record, stats, _| {
-                crate::debug_log_internal(
-                    "error",
-                    &format!(
-                        "[Stability:satellite_window] Fault: kind={:?} drops={}",
-                        record.kind, stats.implicit_drops
-                    ),
-                );
+                log_bulkhead_fault("satellite_window", record.kind, stats.implicit_drops);
             })
             .build()
     })
@@ -189,13 +210,7 @@ pub fn config_node() -> &'static SnubberNode {
         SnubberNode::builder("config_save")
             .max_in_flight(1)
             .on_fault(|record, stats, _| {
-                crate::debug_log_internal(
-                    "error",
-                    &format!(
-                        "[Stability:config_save] Fault: kind={:?} drops={}",
-                        record.kind, stats.implicit_drops
-                    ),
-                );
+                log_bulkhead_fault("config_save", record.kind, stats.implicit_drops);
             })
             .build()
     })
@@ -417,14 +432,14 @@ pub fn all_nodes() -> &'static snubber::NodeSet<'static> {
 
 /// Catastrophic fault sum across worker nodes (panic/timeout/process-died/
 /// implicit-drop). Non-zero means a code defect — inspect the fault ledger.
-/// Name kept (`total_nuclear_breaches`) for the status-bar/test call sites.
+/// Public name retained for the status bar and test call sites.
 pub fn total_nuclear_breaches() -> u64 {
     all_nodes().total_catastrophic_faults()
 }
 
 /// Shedding sum across worker nodes: `(bulkhead, rate, stale)` stay separate
 /// columns (saturated worker vs. input spam vs. stale epoch) — never merged.
-/// Name kept (`total_hydraulic_shed`) for the status-bar/test call sites.
+/// Public name retained for the status bar and test call sites.
 pub fn total_hydraulic_shed() -> (u64, u64, u64) {
     all_nodes().total_hydraulic_shed()
 }
