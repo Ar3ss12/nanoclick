@@ -234,4 +234,31 @@ mod tests {
             serde_json::json!({}),
         ));
     }
+
+    /// The poll surface must carry the reaction latches: a remote UI asks
+    /// `get_full_state` exactly once at boot and would otherwise never learn
+    /// that Start is refused or an engine is wedged.
+    #[test]
+    fn get_full_state_carries_stability_verdicts() {
+        let state = DaemonState::new();
+        let resp = handle_request(
+            &state,
+            &IpcRequest::new(4, "get_full_state", serde_json::json!({})),
+        );
+        assert!(resp.ok);
+        let st = &resp.payload["stability"];
+        assert!(
+            st.is_object(),
+            "get_full_state must embed the StabilityStatus object"
+        );
+        assert!(st["release_pending"].is_boolean());
+        assert!(st["engine_stuck"].is_boolean());
+        assert!(
+            st["memory"] == "ok" || st["memory"] == "soft" || st["memory"] == "hard",
+            "memory must be one of the MemoryVerdict codes, got {}",
+            st["memory"]
+        );
+        assert!(st["catastrophic_faults"].is_u64());
+        assert!(resp.payload["rollback_active"].is_boolean());
+    }
 }

@@ -35,3 +35,27 @@ strip = true        # Strip all debug and symbol tables from binary
 # Later guardian work (counted SendInput + launcher hop) moved unwind to
 # 10,030,592 B / 2,967,552 B; the abort column was not rebuilt.
 
+# CI-only lane: the abort-shaped COMPILE gate. `cargo build --profile
+# ci-abort` compiles lib + both bins with panic=abort on stable — proving the
+# codebase has no unwinding-table dependency at build time. Running TESTS
+# under panic=abort is impossible with today's tooling (measured 2026-10-28,
+# four probes):
+#   1. stable cargo silently forces unwind for test targets — profile
+#      panic="abort" is ignored, a panicking harness keeps running;
+#   2. forcing it via RUSTFLAGS=-Cpanic=abort makes rustc refuse:
+#      "building tests with panic=abort is not supported without
+#      -Zpanic_abort_tests";
+#   3. nightly `cargo -Zpanic-abort-tests` is inert (full report printed);
+#   4. nightly rustc -Zpanic_abort_tests + -Cpanic=abort builds, but the
+#      harness still survives a panicking test (exit 101 + full report).
+# rust-lang/rust#67650 tracks the gap. The shipped unwind profile above
+# (Drop = the in-process release path) remains the test-execution lane.
+# opt-level 1 + no LTO: this is a compile gate, not the shipped shape —
+# keeps LLVM memory sane on 8 GB hosts and CI wall time short.
+[profile.ci-abort]
+inherits = "release"
+panic = "abort"
+opt-level = 1
+lto = "off"
+codegen-units = 16
+

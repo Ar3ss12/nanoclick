@@ -2136,6 +2136,7 @@ version = "1.3.0"
 dependencies = [
  "directories",
  "minisign-verify",
+ "parking_lot",
  "rand",
  "raw-window-handle",
  "serde",

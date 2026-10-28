@@ -854,6 +854,14 @@ pub fn clear_engine_stuck() {
     }
 }
 
+/// Test-only latch control: the scheduler interlock tests arm and clear
+/// `ENGINE_STUCK` without a real wedged worker. Never compiled into the
+/// shipped binary.
+#[cfg(test)]
+pub(crate) fn test_latch_engine_stuck(v: bool) {
+    ENGINE_STUCK.store(v, Ordering::Release);
+}
+
 /// CPU-time delta (ms) of this process since the previous call.
 ///
 /// The crate's `classify_stall` wants an on-CPU sample; in-process we have
@@ -1416,6 +1424,15 @@ mod tests {
         assert_eq!(std::fs::read(&prev).unwrap(), b"newer");
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&prev);
+    }
+
+    #[test]
+    fn test_status_aggregates_match_the_board() {
+        let st = status();
+        assert_eq!(st.catastrophic_faults, total_nuclear_breaches());
+        let (bulkhead, rate, stale) = total_hydraulic_shed();
+        assert_eq!((st.shed_bulkhead, st.shed_rate, st.shed_stale), (bulkhead, rate, stale));
+        assert!(matches!(st.memory, "ok" | "soft" | "hard"));
     }
 
     #[test]

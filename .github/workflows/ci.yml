@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  gate:
+    name: gate (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # The snubber dependency is a path dep (../../../snubber relative to
+      # src-tauri), so the workspace layout must be:
+      #   $GITHUB_WORKSPACE/nanoclick  <- this repo
+      #   $GITHUB_WORKSPACE/snubber    <- path dep, pinned to the released ref
+      - name: Checkout nanoclick
+        uses: actions/checkout@v4
+        with:
+          path: nanoclick
+
+      - name: Checkout snubber (path dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: Ar3ss12/snubber
+          ref: 3849cf6
+          path: snubber
+
+      - name: Install Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: nanoclick/src-tauri
+
+      # ── 0. JS gates (format + lint + type check) ────────────────────────
+      - name: JS gates
+        working-directory: nanoclick
+        run: powershell -ExecutionPolicy Bypass -File scripts/check-js.ps1
+
+      # ── 1. Abort-shaped compile gate ─────────────────────────────────────
+      # Lib + both bins compiled with panic=abort on stable. Running TESTS
+      # under panic=abort is impossible with today's tooling (measured
+      # 2026-10-28: stable cargo silently forces unwind for test targets,
+      # RUSTFLAGS=-Cpanic=abort makes rustc refuse without -Zpanic_abort_tests,
+      # and even nightly -Zpanic_abort_tests leaves the harness surviving a
+      # panicking test — see [profile.ci-abort] in Cargo.toml, and
+      # rust-lang/rust#67650). The compile gate still proves the codebase
+      # builds with no unwinding tables; test EXECUTION runs in the lanes
+      # below on the shipped unwind profile, which is what the binary ships.
+      - name: Compile with panic=abort (lib + bins)
+        working-directory: nanoclick/src-tauri
+        run: cargo build --profile ci-abort --locked -j 2
+
+      # ── 2. Test lane, shipped profile (panic = unwind) ──────────────────
+      - name: Lib tests (release, non-physical)
+        working-directory: nanoclick/src-tauri
+        run: cargo test --release --locked -j 2 --lib -- --skip physical_
+
+      - name: Lib tests (release, physical)
+        working-directory: nanoclick/src-tauri
+        run: cargo test --release --locked -j 2 --lib -- physical
+
+      # ── 3. Lints — lib only, deny all warnings ──────────────────────────
+      # Test targets are intentionally excluded: the local gate keeps include_str
+      # tripwire strings byte-exact, and clippy --fix on tests risks rewriting
+      # them. CI must never be weaker than the local gate.
+      - name: Clippy (lib, -D warnings)
+        working-directory: nanoclick/src-tauri
+        run: cargo clippy --release --locked -j 2 --lib -- -D warnings
+
+      # ── 4. Integration suites ───────────────────────────────────────────
+      - name: Asset tripwires
+        working-directory: nanoclick/src-tauri
+        run: cargo test --release --locked -j 2 --test test_assets
+
+      - name: Daemon handshake
+        working-directory: nanoclick/src-tauri
+        run: cargo test --release --locked -j 2 --test daemon_handshake
+
+      - name: Daemon handshake (ignored chaos lane)
+        working-directory: nanoclick/src-tauri
+        run: cargo test --release --locked -j 2 --test daemon_handshake -- --ignored
+
+      - name: Guardian e2e
+        working-directory: nanoclick/src-tauri
+        run: cargo test --release --locked -j 2 --test input_guardian_e2e

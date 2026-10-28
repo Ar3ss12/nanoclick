@@ -959,6 +959,15 @@ impl ClickScheduler {
     // worker epilogue that owns the AppHandle. No handle rotation: nobody
     // signalled us, the handle is ours and the next start mints its own.
     pub fn set_active(&self, active: bool, app_handle: Option<&AppHandle>) -> ToggleOutcome {
+        // Test-only serialization: the stability gate reads process-global
+        // latch state (ENGINE_STUCK / MEMORY_LEVEL / rollback phase). Tests
+        // that hold those latches would otherwise refuse `Start` in parallel
+        // tests that expect it (measured 2026-10-28: 3 spurious failures in
+        // one run). Reentrant so one test can hold the gate across several
+        // toggle calls while others serialize per call. Production builds
+        // compile none of this.
+        #[cfg(test)]
+        let _toggle_serial = test_toggle_gate().lock();
         // Typing interlock + Work Mode: starting the clicker while the user
         // is typing (the `r` in `go rush B`) or while Work Mode is engaged is
         // forbidden — central choke point so every activation path (hotkey,
@@ -1001,6 +1010,11 @@ impl ClickScheduler {
             return if active {
                 ToggleOutcome::Start
             } else {
+                // An explicit stop on an already-idle scheduler is still the
+                // user's acknowledgement of a wedged engine: clear the
+                // engine_stuck latch even though no run is unwinding here
+                // (finish_stop only runs on a real stop transition below).
+                crate::stability::clear_engine_stuck();
                 ToggleOutcome::Stop
             };
         }
@@ -1364,6 +1378,8 @@ impl ClickScheduler {
         preset_id: &str,
         app_handle: Option<&AppHandle>,
     ) -> ToggleOutcome {
+        #[cfg(test)]
+        let _toggle_serial = test_toggle_gate().lock();
         // DEBOUNCE FIRST. This path is a TOGGLE — pressing the same preset hotkey
         // again stops the run — and unlike `hotkey_toggle` it carried no debounce
         // at all. A mouse-button preset hotkey that fires twice (a double click,
@@ -2856,6 +2872,15 @@ impl DragClickEngine {
     }
 }
 
+/// Test-only toggle serialization gate (see the comment in `set_active`).
+/// Reentrant: the latch-holding test wraps its whole body, while every other
+/// toggle call in the suite serializes per call on the same lock.
+#[cfg(test)]
+pub(crate) fn test_toggle_gate() -> &'static parking_lot::ReentrantMutex<()> {
+    static GATE: parking_lot::ReentrantMutex<()> = parking_lot::const_reentrant_mutex(());
+    &GATE
+}
+
 #[cfg(test)]
 mod hotkey_debounce_tests {
     use super::*;
@@ -3930,6 +3955,63 @@ mod hotkey_stop_path_tests {
             !scheduler.is_active(),
             "final stop must leave the scheduler idle"
         );
+    }
+
+    /// Stability interlock, both entry points in ONE test: a latched
+    /// `engine_stuck` refuses Start (hotkey AND preset), Stop is never
+    /// refused and ACKNOWLEDGES the wedged run by clearing the latch, so the
+    /// next Start works on a fresh worker. Both paths share the single global
+    /// latch, so they must run inside one test — as two tests they race on
+    /// ENGINE_STUCK across parallel test threads (measured 2026-10-28: a
+    /// preset test's latch window collided with the stop-assert of the
+    /// hotkey test).
+    #[test]
+    fn start_is_refused_while_engine_stuck_and_stop_clears_the_latch() {
+        // Hold the toggle gate for the whole body: the latch is process-global
+        // and parallel `set_active(true)` tests must not observe it mid-test.
+        let _gate = test_toggle_gate().lock();
+        let scheduler = ClickScheduler::new();
+        scheduler.hotkey_debounce_ms.store(0, Ordering::Relaxed);
+        // ── 1. Hotkey start refused ────────────────────────────────────────
+        crate::stability::test_latch_engine_stuck(true);
+        assert_eq!(
+            scheduler.set_active(true, None),
+            ToggleOutcome::BlockedByStability
+        );
+        assert!(
+            !scheduler.is_active(),
+            "a refused start must not arm the flag"
+        );
+        // ── 2. Preset start refused, scheduler untouched ───────────────────
+        scheduler.update_presets(vec![crate::config_manager::PresetItem {
+            id: "preset_refused".to_string(),
+            name: "Refused".to_string(),
+            target_cps: 77.0,
+            button: "middle".to_string(),
+            start_delay_ms: 0,
+            ..Default::default()
+        }]);
+        let cps_before = scheduler.get_config().cps;
+        assert_eq!(
+            scheduler.activate_preset_hotkey("preset_refused", None),
+            ToggleOutcome::BlockedByStability
+        );
+        assert_eq!(
+            scheduler.current_running_preset_id(),
+            None,
+            "a refused start must not latch the preset"
+        );
+        assert!((scheduler.get_config().cps - cps_before).abs() < f64::EPSILON);
+        // ── 3. STOP is absolute — and it is the acknowledgement ────────────
+        assert_eq!(scheduler.set_active(false, None), ToggleOutcome::Stop);
+        assert_eq!(
+            crate::stability::start_refusal(),
+            None,
+            "an explicit stop must clear the engine_stuck latch"
+        );
+        // ── 4. Fresh worker: start works again ─────────────────────────────
+        assert_eq!(scheduler.set_active(true, None), ToggleOutcome::Start);
+        assert_eq!(scheduler.set_active(false, None), ToggleOutcome::Stop);
     }
 
     /// Customs membrane blocks a poisoned start: CPS out of range admits no

@@ -61,6 +61,13 @@ rand = "0.8"
 directories = "5.0"
 snubber = { path = "../../../snubber" }
 
+# Test-only: parking_lot::ReentrantMutex powers the cfg(test) toggle gate in
+# scheduler.rs (serializes toggle calls against the process-global stability
+# latches). Already in the dependency tree transitively — no new build weight
+# in release.
+[dev-dependencies]
+parking_lot = "0.12"
+
 [target.'cfg(target_os = "windows")'.dependencies]
 winreg = "0.52"
 raw-window-handle = "0.6.2"
