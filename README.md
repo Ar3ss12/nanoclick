@@ -75,6 +75,9 @@ What's new: [CHANGELOG.md](CHANGELOG.md).
 | [TinyTask](https://tinytask.net/) | macro **recorder** — record & replay, no editing | **36 KB** | playback can wedge mid-run | replays exactly what you did — jitter included, randomness not | closed-source freeware |
 | [AutoHotkey](https://www.autohotkey.com/) | scripting language — you write the automation yourself | small runtime, no GUI | whatever your script does | DIY math | open source |
 | [AlphaClicker](https://thetinytask.com/best-auto-clicker-windows/) | open-source clicker | lightweight | nothing releases a stuck loop | fixed interval | MIT open source |
+| [BlurAutoClicker](https://github.com/Blur009/Blur-AutoClicker) | advanced open-source clicker: hotkeys, presets, sequence clicking | lightweight | — | fixed interval with extra tuning | open source (Python, Windows) |
+| [Rusty AutoClicker](https://github.com/MrTanoshii/rusty-autoclicker) | portable Rust clicker | lightweight | — | "Humanlike Mode" + tweened cursor movement | open source, cross-platform |
+| [Universal Autoclicker](https://clicker.rs/) | Rust clicker with a modern GUI | lightweight | — | CPS mode + jitter mode | open source, cross-platform |
 | **NanoClick** | **open-source app with a full GUI: clicker + recorder + visual editor** | **9.7 MB portable, 5.3 MB in tray** (measured) | **out-of-process guardian releases the mouse** (E2E-proven) | **Bates-model jitter + spatial variance; ns-level pacing measured** | **open source (PolyForm), signed updater** |
 
 ---
