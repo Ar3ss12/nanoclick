@@ -1,9 +1,25 @@
 name: CI
 
+# Windows runners bill at 2x the minutes multiplier, so doc-only pushes
+# never start a run: paths-ignore skips the trigger when EVERY changed
+# file matches one of the globs. workflow_dispatch stays as the manual
+# escape hatch for "CI please anyway".
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.github/assets/**'
+      - 'LICENSE*'
+      - '.gitignore'
   pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.github/assets/**'
+      - 'LICENSE*'
+      - '.gitignore'
   workflow_dispatch:
 
 concurrency:
@@ -66,7 +82,18 @@ jobs:
         working-directory: nanoclick
         run: powershell -ExecutionPolicy Bypass -File scripts/check-js.ps1
 
-      # ── 1. Abort-shaped compile gate ─────────────────────────────────────
+      # ── 1. Lints — lib only, deny all warnings ──────────────────────────
+      # Fast-fail beats deep-fail: clippy costs ~1m on a warm cache, while the
+      # abort compile + test lanes below cost ~10m together. A lint error is
+      # cheaper to discover before either of them has run.
+      # Test targets are intentionally excluded: the local gate keeps include_str
+      # tripwire strings byte-exact, and clippy --fix on tests risks rewriting
+      # them. CI must never be weaker than the local gate.
+      - name: Clippy (lib, -D warnings)
+        working-directory: nanoclick/src-tauri
+        run: cargo clippy --release --locked -j 2 --lib -- -D warnings
+
+      # ── 2. Abort-shaped compile gate ─────────────────────────────────────
       # Lib + both bins compiled with panic=abort on stable. Running TESTS
       # under panic=abort is impossible with today's tooling (measured
       # 2026-10-28: stable cargo silently forces unwind for test targets,
@@ -80,7 +107,7 @@ jobs:
         working-directory: nanoclick/src-tauri
         run: cargo build --profile ci-abort --locked -j 2
 
-      # ── 2. Test lane, shipped profile (panic = unwind) ──────────────────
+      # ── 3. Test lane, shipped profile (panic = unwind) ──────────────────
       - name: Lib tests (release, non-physical)
         working-directory: nanoclick/src-tauri
         run: cargo test --release --locked -j 2 --lib -- --skip physical_
@@ -88,14 +115,6 @@ jobs:
       - name: Lib tests (release, physical)
         working-directory: nanoclick/src-tauri
         run: cargo test --release --locked -j 2 --lib -- physical
-
-      # ── 3. Lints — lib only, deny all warnings ──────────────────────────
-      # Test targets are intentionally excluded: the local gate keeps include_str
-      # tripwire strings byte-exact, and clippy --fix on tests risks rewriting
-      # them. CI must never be weaker than the local gate.
-      - name: Clippy (lib, -D warnings)
-        working-directory: nanoclick/src-tauri
-        run: cargo clippy --release --locked -j 2 --lib -- -D warnings
 
       # ── 4. Integration suites ───────────────────────────────────────────
       - name: Asset tripwires
