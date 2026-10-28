@@ -36,7 +36,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Ar3ss12/snubber
-          ref: 3849cf6
+          # Full SHA required: actions/checkout treats a short ref as a
+          # branch name and the git fetch dies (measured: first CI run).
+          ref: 3849cf6527d557070310fae1ab883745caf1d4d0
           path: snubber
 
       - name: Install Node 20
