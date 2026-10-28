@@ -392,15 +392,21 @@ impl Drop for WorkerRunGuard {
         if self.run_gen.load(Ordering::Acquire) != self.gen {
             return;
         }
-        let node = crate::stability::click_state_node();
+        // This run owns the pulse: a preempting run has already armed it for
+        // itself, and its generation is the current one, so this drop cannot
+        // disarm the newcomer.
+        crate::stability::arm_click_pulse(false);
         let mut state = self.state.safe_lock();
         if *state != ClickerState::Running {
             return;
         }
-        let _ = node.transition(&mut *state, ClickerState::Idle, || {}, |_s| {
+        let moved = crate::stability::click_to_idle(ClickerState::Running, || {}, || {
             *self.preset.safe_lock() = None;
             Ok::<(), &'static str>(())
         });
+        if moved.is_ok() {
+            *state = ClickerState::Idle;
+        }
     }
 }
 
@@ -988,14 +994,13 @@ impl ClickScheduler {
                 return ToggleOutcome::BlockedByTyping;
             }
 
-            let state_node = crate::stability::click_state_node();
-            let transition_res = state_node.transition(
-                &mut *state_guard,
-                ClickerState::Running,
+            let from = *state_guard;
+            let transition_res = crate::stability::click_to_running(
+                from,
                 || {
                     crate::stability::emergency_release_all_hardware();
                 },
-                |_s| {
+                || {
                     *self.stop_event.safe_lock() = platform::create_stop_event();
                     self.clicks_done.store(0, Ordering::Release);
                     self.active.store(true, Ordering::Release);
@@ -1006,7 +1011,8 @@ impl ClickScheduler {
 
             match transition_res {
                 Ok(()) => {
-                    toggle_diag_push("[Transition] Idle -> Running committed");
+                    *state_guard = ClickerState::Running;
+                    toggle_diag_push("[Transition] -> Running committed");
                     ToggleOutcome::Start
                 }
                 Err(e) => {
@@ -1016,19 +1022,28 @@ impl ClickScheduler {
                 }
             }
         } else {
-            let state_node = crate::stability::click_state_node();
-            let _ = state_node.transition(
-                &mut *state_guard,
-                ClickerState::Idle,
-                || {},
-                |_s| {
+            let from = *state_guard;
+            let moved = crate::stability::click_to_idle(from, || {}, || {
+                self.active.store(false, Ordering::Release);
+                *self.current_running_preset.safe_lock() = None;
+                self.finish_stop("ui_or_hotkey", app_handle);
+                Ok::<(), &'static str>(())
+            });
+            match moved {
+                Ok(()) => {
+                    *state_guard = ClickerState::Idle;
+                    toggle_diag_push("[Transition] -> Idle committed");
+                }
+                Err(e) => {
+                    // STOP is absolute: a ledger refusal must never leave the
+                    // clicker running. Force the move and say it was forced.
+                    *state_guard = ClickerState::Idle;
                     self.active.store(false, Ordering::Release);
                     *self.current_running_preset.safe_lock() = None;
                     self.finish_stop("ui_or_hotkey", app_handle);
-                    Ok::<(), &'static str>(())
-                },
-            );
-            toggle_diag_push("[Transition] Running -> Idle committed");
+                    toggle_diag_push(format!("[Transition] Stop forced past ledger: {e:?}"));
+                }
+            }
             ToggleOutcome::Stop
         }
     }
@@ -1076,22 +1091,20 @@ impl ClickScheduler {
             exec.stop();
         }
 
-        // Transition ClickerState to Idle via node.transition
+        // Transition ClickerState to Idle through the typed automaton: only
+        // Running→Idle and Paused→Idle exist as ribs.
         let mut state_guard = self.state.safe_lock();
         if *state_guard != ClickerState::Idle {
-            let state_node = crate::stability::click_state_node();
-            let res = state_node.transition(
-                &mut *state_guard,
-                ClickerState::Idle,
-                || {},
-                |_s| {
-                    self.active.store(false, Ordering::Release);
-                    *self.current_running_preset.safe_lock() = None;
-                    self.finish_stop("emergency_stop", app_handle);
-                    Ok::<(), &'static str>(())
-                },
-            );
-            if res.is_err() {
+            let from = *state_guard;
+            let res = crate::stability::click_to_idle(from, || {}, || {
+                self.active.store(false, Ordering::Release);
+                *self.current_running_preset.safe_lock() = None;
+                self.finish_stop("emergency_stop", app_handle);
+                Ok::<(), &'static str>(())
+            });
+            if res.is_ok() {
+                *state_guard = ClickerState::Idle;
+            } else {
                 // Dying worker still holds slot — force state to Idle immediately (emergency override)
                 *state_guard = ClickerState::Idle;
                 self.active.store(false, Ordering::Release);
@@ -1157,18 +1170,25 @@ impl ClickScheduler {
                     "info",
                     &format!("[Gateway] Pause from {source} reason={reason}"),
                 );
-                let state_node = crate::stability::click_state_node();
                 let mut state_guard = self.state.safe_lock();
-                let _ = state_node.transition(
-                    &mut *state_guard,
-                    ClickerState::Paused,
-                    || {},
-                    |_s| {
-                        self.active.store(false, Ordering::Release);
-                        self.finish_stop(reason, app_handle);
-                        Ok::<(), &'static str>(())
-                    },
-                );
+                let from = *state_guard;
+                let moved = crate::stability::click_to_paused(from, || {}, || {
+                    self.active.store(false, Ordering::Release);
+                    self.finish_stop(reason, app_handle);
+                    Ok::<(), &'static str>(())
+                });
+                match moved {
+                    Ok(()) => {
+                        *state_guard = ClickerState::Paused;
+                        crate::debug_log_internal("info", "[Gateway] Paused");
+                    }
+                    // `Idle -> Paused` is not an edge: pausing an idle clicker
+                    // used to write Paused over Idle with nothing running.
+                    Err(e) => crate::debug_log_internal(
+                        "warn",
+                        &format!("[Gateway] Pause refused: {e:?}"),
+                    ),
+                }
             }
             ClickerCmd::Resume { source } => {
                 crate::debug_log_internal("info", &format!("[Gateway] Resume from {source}"));
@@ -1673,6 +1693,17 @@ impl ClickScheduler {
                 1,
             );
 
+            // ── Run envelope (telemetry, never an admission gate) ─────────
+            // A run that settles with 0 clicks injected did nothing; the
+            // envelope's 1-byte payload floor names that class. Admission
+            // refusal here must not stop the run: this node is an observer.
+            let run_guard = crate::stability::click_run_node()
+                .enter_auto_profiled(|| {})
+                .ok();
+            // The maintenance tick observes this pulse; `WorkerRunGuard`'s
+            // drop disarms it for the run that owns it.
+            crate::stability::arm_click_pulse(true);
+
             #[cfg(target_os = "windows")]
             unsafe {
                 use windows::Win32::System::Threading::{
@@ -1933,7 +1964,7 @@ impl ClickScheduler {
             let cur_start_delay = start_delay_arc.load(Ordering::Relaxed);
             if cur_start_delay > 0 {
                 let target_start = Instant::now() + Duration::from_millis(cur_start_delay);
-                let wait_ok = timer.wait_until(target_start, stop_handle.clone());
+                let wait_ok = wait_kicking(&timer, target_start, stop_handle.clone());
                 if !wait_ok || !active.load(Ordering::Acquire) {
                     // Self-exit: same bundle as `worker_self_stop` but inline —
                     // the worker thread owns no `ClickScheduler` handle, only
@@ -1989,10 +2020,26 @@ impl ClickScheduler {
             // would observe Relaxed too, but a stop flag has no business
             // being Relaxed).
             while active.load(Ordering::Acquire) && mode_autoclicker.load(Ordering::Relaxed) {
+                // Heartbeat: one Release store per iteration; `wait_kicking`
+                // carries it through every long wait below.
+                crate::stability::click_pulse().kick();
                 // Task steering: Pause parks the worker on the conduit
                 // Condvar (kernel sleep, 0% CPU); Cancel/Preempted stop the
                 // run. wait_while_paused returns the releasing directive.
-                match conduit.wait_while_paused() {
+                //
+                // The heartbeat is suspended across the gate: a parked thread
+                // is kernel sleep, not a frozen one, so leaving the pulse
+                // armed would raise a false stall on every pause longer than
+                // the lease. Two atomic stores per iteration; on the fast path
+                // the disarm/arm pair spans a few hundred nanoseconds.
+                // Honest limit: a thread frozen in that nanosecond window
+                // stays disarmed until it resumes (the maintenance tick sees
+                // "not armed" and stays silent) — narrower than the false
+                // positive it removes.
+                crate::stability::arm_click_pulse(false);
+                let directive = conduit.wait_while_paused();
+                crate::stability::arm_click_pulse(true);
+                match directive {
                     snubber::Directive::Proceed | snubber::Directive::SkipStage => {}
                     snubber::Directive::Pause => {
                         // Re-armed before wake: re-park without busy-polling.
@@ -2072,7 +2119,7 @@ impl ClickScheduler {
                     // Sleep for repeat_interval before next batch
                     if cur_repeat_interval > 0 {
                         let target = Instant::now() + Duration::from_millis(cur_repeat_interval);
-                        let success = timer.wait_until(target, stop_handle.clone());
+                        let success = wait_kicking(&timer, target, stop_handle.clone());
                         if !success || !active.load(Ordering::Acquire) {
                             break;
                         }
@@ -2171,7 +2218,7 @@ impl ClickScheduler {
                             dispatched += 1;
                             if dispatched < 2 {
                                 let target = Instant::now() + Duration::from_millis(50);
-                                if !timer.wait_until(target, stop_handle.clone())
+                                if !wait_kicking(&timer, target, stop_handle.clone())
                                     || !active.load(Ordering::Acquire)
                                 {
                                     break;
@@ -2186,7 +2233,7 @@ impl ClickScheduler {
 
                     // Hold for hold_duration_ms
                     let target_down = Instant::now() + Duration::from_millis(cur_hold_duration);
-                    if !timer.wait_until(target_down, stop_handle.clone())
+                    if !wait_kicking(&timer, target_down, stop_handle.clone())
                         || !active.load(Ordering::Acquire)
                     {
                         platform_backend.release_mouse_hold(cur_click_spec.button);
@@ -2199,7 +2246,7 @@ impl ClickScheduler {
                     // Pause for hold_interval_ms if > 0
                     if cur_hold_interval > 0 {
                         let target_up = Instant::now() + Duration::from_millis(cur_hold_interval);
-                        if !timer.wait_until(target_up, stop_handle.clone())
+                        if !wait_kicking(&timer, target_up, stop_handle.clone())
                             || !active.load(Ordering::Acquire)
                         {
                             break;
@@ -2257,7 +2304,7 @@ impl ClickScheduler {
                     emit_ripple_if_enabled(&seq_spec, Some((p.x, p.y)));
 
                     let target_down = Instant::now() + Duration::from_secs_f64(hold_ms / 1000.0);
-                    if !timer.wait_until(target_down, stop_handle.clone())
+                    if !wait_kicking(&timer, target_down, stop_handle.clone())
                         || !active.load(Ordering::Acquire)
                     {
                         mouse_guard.release_up();
@@ -2271,7 +2318,7 @@ impl ClickScheduler {
                         release_ms
                     };
                     let target_up = Instant::now() + Duration::from_secs_f64(seq_delay / 1000.0);
-                    if !timer.wait_until(target_up, stop_handle.clone())
+                    if !wait_kicking(&timer, target_up, stop_handle.clone())
                         || !active.load(Ordering::Acquire)
                     {
                         break;
@@ -2323,7 +2370,7 @@ impl ClickScheduler {
 
                 // Hold phase (safe against early break)
                 let target_down = Instant::now() + Duration::from_secs_f64(hold_ms / 1000.0);
-                if !timer.wait_until(target_down, stop_handle.clone())
+                if !wait_kicking(&timer, target_down, stop_handle.clone())
                     || !active.load(Ordering::Acquire)
                 {
                     mouse_guard.release_up();
@@ -2345,7 +2392,7 @@ impl ClickScheduler {
                 // Double click support
                 if cur_click_spec.click_type == crate::platform::backend::ClickType::Double {
                     let gap_target = Instant::now() + Duration::from_millis(50);
-                    if !timer.wait_until(gap_target, stop_handle.clone())
+                    if !wait_kicking(&timer, gap_target, stop_handle.clone())
                         || !active.load(Ordering::Acquire)
                     {
                         break;
@@ -2356,7 +2403,7 @@ impl ClickScheduler {
                     // Second tap of the double: same point as the first one.
                     emit_ripple_if_enabled(&cur_click_spec, Some((orig_x, orig_y)));
                     let target_down2 = Instant::now() + Duration::from_secs_f64(hold_ms / 1000.0);
-                    if !timer.wait_until(target_down2, stop_handle.clone())
+                    if !wait_kicking(&timer, target_down2, stop_handle.clone())
                         || !active.load(Ordering::Acquire)
                     {
                         mouse_guard.release_up();
@@ -2367,7 +2414,7 @@ impl ClickScheduler {
 
                 // Release duration between clicks
                 let target_up = Instant::now() + Duration::from_secs_f64(release_ms / 1000.0);
-                if !timer.wait_until(target_up, stop_handle.clone())
+                if !wait_kicking(&timer, target_up, stop_handle.clone())
                     || !active.load(Ordering::Acquire)
                 {
                     break;
@@ -2436,10 +2483,56 @@ impl ClickScheduler {
             // disarms on save; this is the authoritative run-end cleanup.)
             focus_guard_arc.disarm();
 
+            // Settle the run envelope: the payload is the click count, so a
+            // run that committed without injecting anything lands in the
+            // underflow column (telemetry — this node has no breaker).
+            //
+            // Log gated on an AUTO stop: stopping manually before the first
+            // click is a legitimate 0-click run (the user's e-stop semantics),
+            // while a duration/wall-clock stop that injected nothing is the
+            // fake-success shape this floor exists for. The counter records
+            // every underflow either way.
+            if let Some(run_guard) = run_guard {
+                let clicks = u64::from(clicks_done.load(Ordering::Relaxed));
+                let (_, profile, verdict) = run_guard.commit_enveloped(clicks);
+                if !verdict.is_inside() && auto_stop_reason.is_some() {
+                    crate::debug_log_internal(
+                        "warn",
+                        &format!(
+                            "[Stability] click_run envelope: clicks={clicks} work_us={} verdict={verdict:?}",
+                            profile.work_wall_us
+                        ),
+                    );
+                }
+            }
+
             // Commit snubber transaction and clear supervisor token
             guard.commit();
             crate::stability::commit_hardware_token(task_id);
         });
+    }
+}
+
+/// `PlatformTimer::wait_until` with a heartbeat, for the click worker.
+///
+/// The worker's pulse must stay live through a legitimate multi-second sleep
+/// (1 CPS, a hold, a repeat gap): each ≤100 ms slice kicks the pulse, so a
+/// frozen pulse names a thread that stopped executing, not a slow cadence.
+fn wait_kicking(
+    timer: &PlatformTimer,
+    target: Instant,
+    stop_handle: NativeEventHandle,
+) -> bool {
+    loop {
+        crate::stability::click_pulse().kick();
+        let now = Instant::now();
+        if now >= target {
+            return true;
+        }
+        let slice = (target - now).min(Duration::from_millis(100));
+        if !timer.wait_until(Instant::now() + slice, stop_handle.clone()) {
+            return false;
+        }
     }
 }
 

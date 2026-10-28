@@ -499,11 +499,30 @@ pub fn toggle_overlay(app: AppHandle, show: bool) -> Result<SatelliteToggle, Str
     }
     // Scoped toggle: commit on success, explicit abort on error. A refused
     // create is a planned abort, never a breaker trip.
+    //
+    // **Documented exception to the guide's "short action (<= 50 ms) -> scoped"
+    // rule.** The work here is a WebView2 create/show/destroy, which measures
+    // in the hundreds of ms and can reach seconds on a cold start — far past
+    // the short-action threshold. `scoped` stays the right shape because the
+    // WAIT is the point: `max_in_flight(1)` must hold the slot for the whole
+    // build so a second toggle cannot enter and double-`build()` one label.
+    // `enter_auto` + `commit()` would span exactly the same live window and
+    // erasing the admission would drop the serialisation. The span is logged
+    // (not assumed) so the exception stays visible in the field log.
     let node = crate::stability::satellite_node();
     let app_rb = app.clone();
+    let scope_started = std::time::Instant::now();
     let outcome: Result<SatelliteToggle, snubber::SnubberError<String>> = node.scoped(
         move || rollback_satellite(&app_rb, "overlay"),
         || toggle_overlay_inner(app, show),
+    );
+    crate::debug_log_internal(
+        "info",
+        &format!(
+            "[Overlay] toggle scope: show={show} ok={} elapsed_ms={}",
+            outcome.is_ok(),
+            scope_started.elapsed().as_millis()
+        ),
     );
     match outcome {
         Ok(v) => Ok(v),
@@ -966,15 +985,14 @@ mod tests {
             acquired > 0,
             "bulkhead must accept requests during toggle storm"
         );
+        // One crate-owned scan instead of hand-picked snapshot fields: it
+        // covers catastrophic faults (the old manual check), stale sheds,
+        // pulse stalls, memory pressure and saturation in one policy.
+        snubber::assert_no_anomalies!(node);
         assert_eq!(
             node.stats().breaker_trips,
             0,
             "satellite node must never trip under planned flapping"
-        );
-        assert_eq!(
-            node.stats().catastrophic_faults(),
-            0,
-            "explicit aborts must never cause catastrophic faults"
         );
     }
 

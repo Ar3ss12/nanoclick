@@ -286,6 +286,13 @@ impl crate::platform::backend::HotkeyBackend for WindowsBackend {
     }
 }
 
+/// Is the LL-hook listener thread alive? The maintenance tick observes the
+/// hook pulse only while this is true: a stopped listener has no thread to
+/// observe, and its frozen counter is not a stall.
+pub(crate) fn hotkey_listener_running() -> bool {
+    GLOBAL_HOTKEY_RUNNING.load(Ordering::Acquire)
+}
+
 /// Stateful hotkey backend holding the scheduler/app wiring captured at
 /// setup time, so callers can `start()`/`stop()` through the trait
 /// without knowing about the free functions.
@@ -543,6 +550,9 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
     let mut last_hook_panics: u64 = 0;
 
     while !GLOBAL_HOTKEY_STOP.load(Ordering::Acquire) {
+        // Heartbeat (one Release store, no lock, no I/O): the maintenance tick
+        // reports a hook thread that stopped coming back to this line.
+        crate::stability::hook_pulse().kick();
         // ── v4.3 FIX: WINDOWS MESSAGE PUMP (REQUIRED for LL hooks) ──────
         // WH_KEYBOARD_LL delivers its callback through the message queue of
         // the thread that installed the hook — and ONLY when that thread

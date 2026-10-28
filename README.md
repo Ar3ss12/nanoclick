@@ -2,9 +2,9 @@
 
 **A fast, modern Windows desktop automation tool** — autoclicker, macro recorder, and visual macro editor in one lightweight app.
 
-Built with **Tauri 2 + Rust + vanilla JS**. No Electron, no bundler, no bloat: the production installer is **~3.4 MB**, the portable binary **~9.6 MB** (measured 2026-10-28).
+Built with **Tauri 2 + Rust + vanilla JS**. No Electron, no bundler, no bloat: the production installer is **~3.4 MB**, the portable binary **~9.7 MB** (measured 2026-10-28).
 
-![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue) ![Version](https://img.shields.io/badge/version-1.3.0-brightgreen) ![Tests](https://img.shields.io/badge/tests-484%2F484-brightgreen) ![i18n](https://img.shields.io/badge/i18n-UA%20%7C%20RU%20%7C%20EN-blue) ![Tauri](https://img.shields.io/badge/Tauri-2.x-FFC131) ![Rust](https://img.shields.io/badge/rust-stable--msvc-DEA584)
+![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-blue) ![Version](https://img.shields.io/badge/version-1.3.0-brightgreen) ![Tests](https://img.shields.io/badge/tests-486%2F486-brightgreen) ![i18n](https://img.shields.io/badge/i18n-UA%20%7C%20RU%20%7C%20EN-blue) ![Tauri](https://img.shields.io/badge/Tauri-2.x-FFC131) ![Rust](https://img.shields.io/badge/rust-stable--msvc-DEA584)
 
 ---
 
@@ -98,7 +98,7 @@ Download the `v1.3.0` installer from [Releases](https://github.com/Ar3ss12/nanoc
 
 ```
 NanoClick_1.3.0_x64-setup.exe   (~3.4 MB)
-NanoClick-portable.exe          (~9.6 MB, zero-install)
+NanoClick-portable.exe          (~9.7 MB, zero-install)
 ```
 
 - Installs per-user (no admin rights needed)

@@ -1896,6 +1896,12 @@ pub(crate) fn shutdown_application(app: &AppHandle) {
     //     guardian is only the fallback for exits that never reach this code.
     crate::stability::emergency_release_all_hardware();
 
+    // 3c. Cold evidence for the NEXT boot: final `.snub` frames plus
+    //     `%TEMP%/nanoclick_triage.txt` (per-node triage cards and the diff
+    //     against this run's boot baseline). A `taskkill` skips this by
+    //     definition; the ≤30 s periodic frame then stands as the evidence.
+    crate::stability::shutdown_snapshot_cycle();
+
     // 4. This is a deliberate exit: tell the input guardian NOT to inject.
     input_guardian::mark_clean_exit();
     app.exit(0);
@@ -1918,8 +1924,16 @@ fn toggle_hud_window(app: AppHandle, show: bool) -> Result<overlay::SatelliteTog
     use overlay::SatelliteToggle;
     // Scoped admission through the satellite bulkhead: a refused create is a
     // planned abort, never a breaker trip.
+    //
+    // **Documented exception to the guide's "short action (<= 50 ms) -> scoped"
+    // rule**: the guarded work is a WebView2 create/show/destroy, measured in
+    // hundreds of ms (seconds on a cold start). `scoped` is correct anyway —
+    // the slot must be HELD for the whole build so a parallel ripple toggle
+    // cannot double-`build()`; `enter_auto` + `commit()` spans the same window.
+    // The span is logged, not assumed (see the `[HUD] toggle scope` line).
     let node = crate::stability::satellite_node();
     let app_rb = app.clone();
+    let scope_started = std::time::Instant::now();
     let outcome: Result<SatelliteToggle, snubber::SnubberError<String>> = node.scoped(
         move || {
             if let Some(win) = app_rb.get_webview_window("hud") {
@@ -1927,6 +1941,14 @@ fn toggle_hud_window(app: AppHandle, show: bool) -> Result<overlay::SatelliteTog
             }
         },
         || toggle_hud_window_inner(app, show),
+    );
+    debug_log_internal(
+        "info",
+        &format!(
+            "[HUD] toggle scope: show={show} ok={} elapsed_ms={}",
+            outcome.is_ok(),
+            scope_started.elapsed().as_millis()
+        ),
     );
     match outcome {
         Ok(v) => Ok(v),
@@ -2202,6 +2224,13 @@ pub fn run() {
         .setup(move |app| {
             let handle = app.handle().clone();
             crate::platform::set_global_app_handle(handle.clone());
+            // Stability lifecycle, one owner per process: diagnose the PREVIOUS
+            // run's `.snub` frames, stamp this run's baseline, then start the
+            // single maintenance thread (200 ms pulses, 1 Hz rollback/memory,
+            // 30 s snapshots). Both calls are idempotent — the daemon binary
+            // starts the same maintenance for its own engine.
+            crate::stability::boot_snapshot_cycle();
+            crate::stability::start_maintenance();
             // Ripple drain worker: one 40 ms thread per process. Drains the
             // lock-free ripple ring pushed by the click loop and emits one
             // coalesced `spawn-ripple` batch per tick (see overlay.rs).
@@ -2393,60 +2422,79 @@ pub fn run() {
             {
                 let cm = config_manager_arc.clone();
                 let h = handle.clone();
-                std::thread::spawn(move || {
-                    let config_path = cm.config_path();
-                    // (title_contains, preset_id) of the rules we act on.
-                    let mut profiles: Vec<(String, String)> = Vec::new();
-                    let mut last_seen_mtime: Option<std::time::SystemTime> = None;
-                    let mut last_preset: Option<String> = None;
-                    loop {
-                        std::thread::sleep(std::time::Duration::from_millis(1500));
-                        // The shutdown flush owns the last write; do not race it.
-                        if SHUTTING_DOWN.load(Ordering::Acquire) {
-                            return;
-                        }
-                        // Gate 1 + 2: only when `config.json` actually moved do we
-                        // parse it — and only a changed RULE SET invalidates the
-                        // cached list (a changed CPS/theme must not cost anything).
-                        // The gate removes the config work, NOT the window match:
-                        // matching the foreground title every tick is the feature.
-                        let mtime = std::fs::metadata(&config_path)
-                            .and_then(|m| m.modified())
-                            .ok();
-                        if !(mtime.is_some() && mtime == last_seen_mtime) {
-                            last_seen_mtime = mtime;
-                            let cfg = cm.load();
-                            let current: Vec<(String, String)> = cfg
-                                .app_profiles
-                                .into_iter()
-                                .filter(|p| p.enabled && !p.title_contains.is_empty())
-                                .map(|p| (p.title_contains, p.preset_id))
-                                .collect();
-                            if current != profiles {
-                                profiles = current;
-                                // A newly (re-)armed rule must be able to fire again.
-                                last_preset = None;
+                // `spawn_guarded` binds admission + rollback + leash in one
+                // call: a panic in this loop is a recorded implicit drop, not a
+                // silently dead thread. The loop is infinite, so the join is
+                // watched by a tail thread that only speaks on refusal.
+                let (join, _steer) = crate::stability::profile_switch_node().spawn_guarded(
+                    || {},
+                    (),
+                    move |_conduit: snubber::TaskConduit<(), ()>| {
+                        let config_path = cm.config_path();
+                        // (title_contains, preset_id) of the rules we act on.
+                        let mut profiles: Vec<(String, String)> = Vec::new();
+                        let mut last_seen_mtime: Option<std::time::SystemTime> = None;
+                        let mut last_preset: Option<String> = None;
+                        loop {
+                            std::thread::sleep(std::time::Duration::from_millis(1500));
+                            // The shutdown flush owns the last write; do not race it.
+                            if SHUTTING_DOWN.load(Ordering::Acquire) {
+                                return;
                             }
-                        }
-                        if profiles.is_empty() {
-                            continue;
-                        }
-                        // Gate 3: the foreground lookup, once per tick, no I/O.
-                        let Some(title) = platform::get_foreground_window_title() else {
-                            continue;
-                        };
-                        let lower = title.to_lowercase();
-                        for (needle, preset_id) in &profiles {
-                            if lower.contains(&needle.to_lowercase()) {
-                                if last_preset.as_deref() != Some(preset_id.as_str()) {
-                                    last_preset = Some(preset_id.clone());
-                                    let _ = h.emit("app-profile-activate", preset_id.clone());
+                            // Gate 1 + 2: only when `config.json` actually moved do we
+                            // parse it — and only a changed RULE SET invalidates the
+                            // cached list (a changed CPS/theme must not cost anything).
+                            // The gate removes the config work, NOT the window match:
+                            // matching the foreground title every tick is the feature.
+                            let mtime = std::fs::metadata(&config_path)
+                                .and_then(|m| m.modified())
+                                .ok();
+                            if !(mtime.is_some() && mtime == last_seen_mtime) {
+                                last_seen_mtime = mtime;
+                                let cfg = cm.load();
+                                let current: Vec<(String, String)> = cfg
+                                    .app_profiles
+                                    .into_iter()
+                                    .filter(|p| p.enabled && !p.title_contains.is_empty())
+                                    .map(|p| (p.title_contains, p.preset_id))
+                                    .collect();
+                                if current != profiles {
+                                    profiles = current;
+                                    // A newly (re-)armed rule must be able to fire again.
+                                    last_preset = None;
                                 }
-                                break;
+                            }
+                            if profiles.is_empty() {
+                                continue;
+                            }
+                            // Gate 3: the foreground lookup, once per tick, no I/O.
+                            let Some(title) = platform::get_foreground_window_title() else {
+                                continue;
+                            };
+                            let lower = title.to_lowercase();
+                            for (needle, preset_id) in &profiles {
+                                if lower.contains(&needle.to_lowercase()) {
+                                    if last_preset.as_deref() != Some(preset_id.as_str()) {
+                                        last_preset = Some(preset_id.clone());
+                                        let _ = h.emit("app-profile-activate", preset_id.clone());
+                                    }
+                                    break;
+                                }
                             }
                         }
-                    }
-                });
+                    },
+                );
+                std::thread::Builder::new()
+                    .name("nanoclick-profile-guard".into())
+                    .spawn(move || {
+                        if let Ok(Err(e)) = join.join() {
+                            crate::debug_log_internal(
+                                "error",
+                                &format!("[Stability] profile_switch admission refused: {e:?}"),
+                            );
+                        }
+                    })
+                    .ok();
             }
             // v4.2 — start hotkeys through the HotkeyBackend contract.
             let hk = platform::default_hotkey_backend(scheduler_for_setup, handle.clone());
@@ -2494,33 +2542,51 @@ pub fn run() {
             {
                 let w = watcher_for_setup.clone();
                 let h = handle.clone();
-                std::thread::spawn(move || {
-                    // Skip the boot storm (lazy overlay/HUD + first saves).
-                    std::thread::sleep(std::time::Duration::from_millis(5000));
-                    loop {
-                        std::thread::sleep(std::time::Duration::from_millis(
-                            crate::watcher::POLL_INTERVAL_MS,
-                        ));
-                        for (key, health) in w.poll_all() {
-                            if let Some(n) = crate::file_health_notice(&key, &health) {
-                                let push_ok = h.try_state::<crate::AppState>().map(|s| {
-                                    if let Ok(mut q) = s.file_toasts.lock() {
-                                        // Cap: drop oldest, keep the queue bounded.
-                                        if q.len() >= 8 {
-                                            q.remove(0);
+                // Same contract as the profile loop: admission + rollback +
+                // leash bound by `spawn_guarded`; a panic becomes a recorded
+                // implicit drop on `file_watcher` instead of a dead thread.
+                let (join, _steer) = crate::stability::watcher_node().spawn_guarded(
+                    || {},
+                    (),
+                    move |_conduit: snubber::TaskConduit<(), ()>| {
+                        // Skip the boot storm (lazy overlay/HUD + first saves).
+                        std::thread::sleep(std::time::Duration::from_millis(5000));
+                        loop {
+                            std::thread::sleep(std::time::Duration::from_millis(
+                                crate::watcher::POLL_INTERVAL_MS,
+                            ));
+                            for (key, health) in w.poll_all() {
+                                if let Some(n) = crate::file_health_notice(&key, &health) {
+                                    let push_ok = h.try_state::<crate::AppState>().map(|s| {
+                                        if let Ok(mut q) = s.file_toasts.lock() {
+                                            // Cap: drop oldest, keep the queue bounded.
+                                            if q.len() >= 8 {
+                                                q.remove(0);
+                                            }
+                                            q.push(n);
                                         }
-                                        q.push(n);
-                                    }
-                                });
-                                let _ = push_ok;
-                                crate::debug_log_internal(
-                                    "info",
-                                    &format!("[Watcher] {key} -> {health:?} (toast queued)"),
-                                );
+                                    });
+                                    let _ = push_ok;
+                                    crate::debug_log_internal(
+                                        "info",
+                                        &format!("[Watcher] {key} -> {health:?} (toast queued)"),
+                                    );
+                                }
                             }
                         }
-                    }
-                });
+                    },
+                );
+                std::thread::Builder::new()
+                    .name("nanoclick-watcher-guard".into())
+                    .spawn(move || {
+                        if let Ok(Err(e)) = join.join() {
+                            crate::debug_log_internal(
+                                "error",
+                                &format!("[Stability] file_watcher admission refused: {e:?}"),
+                            );
+                        }
+                    })
+                    .ok();
             }
             // ── App-picker catalogue warm-up (Smart Guard suggest) ──────
             // EnumProcesses + uninstall-registry walk (~150-300 ms) once in the

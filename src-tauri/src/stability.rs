@@ -11,8 +11,44 @@
 
 use snubber::supervisor::ProcessToken;
 use snubber::*;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
+
+// ── 0. Published P1 budgets (one number per decision, never a literal) ─────
+
+/// Rollback-body budget. A body past this is named by the 1 Hz maintenance
+/// tick — `emergency_release_all_hardware` calls `SendInput`, which can block
+/// on UIPI, so "rollback is running" is a state that must be observable.
+pub const ROLLBACK_BUDGET_MS: u64 = 250;
+
+/// Click-worker pulse lease. The worker kicks once per loop iteration and
+/// once per ≤100 ms slice inside a long wait, so 1000 ms of silence is a
+/// wedged thread, not a slow cadence.
+pub const CLICK_PULSE_LEASE_MS: u64 = 1000;
+/// Click-worker CPU lease: a blown wall lease with ≥200 ms of CPU in the same
+/// window is a spin (`loop {}`), not a blocked syscall.
+pub const CLICK_CPU_BUDGET_MS: u64 = 200;
+/// Click-worker silence ceiling: 2 s of wall silence with no CPU growth is a
+/// deadlock, not an OS/EDR pause.
+pub const CLICK_STALL_CEILING_MS: u64 = 2000;
+
+/// Hook-loop pulse lease. `MsgWaitForMultipleObjects` wakes the loop every
+/// 20 ms, so 2000 ms is 100 consecutive missed waits.
+pub const HOOK_PULSE_LEASE_MS: u64 = 2000;
+pub const HOOK_CPU_BUDGET_MS: u64 = 500;
+pub const HOOK_STALL_CEILING_MS: u64 = 4000;
+
+/// Admission cadence of the maintenance thread: pulses are observed at 200 ms,
+/// rollback + memory at 1 Hz (every fifth tick), snapshots every 30 s.
+pub const MAINTENANCE_TICK_MS: u64 = 200;
+
+/// RSS limits for the engine node, KiB. Soft refuses new admissions while a
+/// run drains; hard is the supervisor's "terminate without draining" mark.
+/// A long tray session that leaks past 1 GiB is a bug, not normal load (the
+/// measured idle working set is ~120 MB).
+pub const MEMORY_SOFT_KB: u64 = 1_048_576;
+pub const MEMORY_HARD_KB: u64 = 2_097_152;
 
 // ── 1. Supervisor opcodes for cross-process input release ──────────────────
 pub const OP_RELEASE_MOUSE_LEFT: u32 = 10;
@@ -65,12 +101,147 @@ static WATCHER_NODE: OnceLock<SnubberNode> = OnceLock::new();
 static PROFILE_SWITCH_NODE: OnceLock<SnubberNode> = OnceLock::new();
 static SATELLITE_NODE: OnceLock<SnubberNode> = OnceLock::new();
 static CONFIG_NODE: OnceLock<SnubberNode> = OnceLock::new();
+static CLICK_RUN_NODE: OnceLock<SnubberNode> = OnceLock::new();
 
 /// Clicker State Transition Node (Phase 7):
 /// - Guards ClickerState transitions (Idle <-> Running <-> Paused)
 /// - Short stack-local transactions (5 us), never blocks on long-running workers.
 pub fn click_state_node() -> &'static SnubberNode {
-    CLICK_STATE_NODE.get_or_init(|| SnubberNode::builder("click_state").max_in_flight(8).build())
+    // Compile-time capacities (`StaticNode` const-asserts IN_FLIGHT > 0 and
+    // QUEUE >= IN_FLIGHT); runtime per-transaction state lives in scheduler.rs.
+    CLICK_STATE_NODE.get_or_init(|| snubber::StaticNode::<8, 8>::build("click_state"))
+}
+
+// ── 2a. Typed clicker automaton (`LegalMove` ribs) ──────────────────────────
+
+/// Marker for `ClickerState::Idle`; the ribs below are the ONLY legal edges:
+/// Idle→Running, Running→Paused, Paused→Running, Running→Idle, Paused→Idle.
+/// A call site that names an illegal source state sends a pair with no
+/// `impl LegalMove` and does not compile (E0277) — the graph stops being a
+/// comment and becomes a type.
+pub struct ClickIdle;
+pub struct ClickRunning;
+pub struct ClickPaused;
+
+impl snubber::LegalMove<ClickRunning> for ClickIdle {
+    fn convert(_from: Self) -> ClickRunning {
+        ClickRunning
+    }
+}
+impl snubber::LegalMove<ClickPaused> for ClickRunning {
+    fn convert(_from: Self) -> ClickPaused {
+        ClickPaused
+    }
+}
+impl snubber::LegalMove<ClickRunning> for ClickPaused {
+    fn convert(_from: Self) -> ClickRunning {
+        ClickRunning
+    }
+}
+impl snubber::LegalMove<ClickIdle> for ClickRunning {
+    fn convert(_from: Self) -> ClickIdle {
+        ClickIdle
+    }
+}
+impl snubber::LegalMove<ClickIdle> for ClickPaused {
+    fn convert(_from: Self) -> ClickIdle {
+        ClickIdle
+    }
+}
+
+/// Why a clicker-state move did not happen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClickMoveError<E> {
+    /// `click_state` node refused admission (breaker/bulkhead).
+    Admission(snubber::EnterError),
+    /// The guarded work returned an error.
+    Work(E),
+    /// The requested edge does not exist (`Idle -> Paused`, `Paused -> Paused`…).
+    IllegalMove(crate::scheduler::ClickerState),
+    /// A future `SnubberError` variant this build does not know.
+    Unknown,
+}
+
+impl<E: std::fmt::Debug> From<snubber::SnubberError<E>> for ClickMoveError<E> {
+    fn from(err: snubber::SnubberError<E>) -> Self {
+        match err {
+            snubber::SnubberError::Admission(e) => ClickMoveError::Admission(e),
+            snubber::SnubberError::Work(e) => ClickMoveError::Work(e),
+            // `SnubberError` is `#[non_exhaustive]`: fail closed, never guess.
+            _ => ClickMoveError::Unknown,
+        }
+    }
+}
+
+/// Idle→Running or Paused→Running. `IllegalMove` for a Running/unknown source.
+pub fn click_to_running<T, E, R, W>(
+    from: crate::scheduler::ClickerState,
+    rollback: R,
+    work: W,
+) -> Result<T, ClickMoveError<E>>
+where
+    R: FnOnce(),
+    W: FnOnce() -> Result<T, E>,
+    E: std::fmt::Debug,
+{
+    let node = click_state_node();
+    match from {
+        crate::scheduler::ClickerState::Idle => node
+            .transition_checked(ClickIdle, rollback, move |_s| work())
+            .map(|(_, out): (ClickRunning, T)| out)
+            .map_err(ClickMoveError::from),
+        crate::scheduler::ClickerState::Paused => node
+            .transition_checked(ClickPaused, rollback, move |_s| work())
+            .map(|(_, out): (ClickRunning, T)| out)
+            .map_err(ClickMoveError::from),
+        crate::scheduler::ClickerState::Running => Err(ClickMoveError::IllegalMove(from)),
+    }
+}
+
+/// Running→Idle or Paused→Idle. `IllegalMove` for an Idle source.
+pub fn click_to_idle<T, E, R, W>(
+    from: crate::scheduler::ClickerState,
+    rollback: R,
+    work: W,
+) -> Result<T, ClickMoveError<E>>
+where
+    R: FnOnce(),
+    W: FnOnce() -> Result<T, E>,
+    E: std::fmt::Debug,
+{
+    let node = click_state_node();
+    match from {
+        crate::scheduler::ClickerState::Running => node
+            .transition_checked(ClickRunning, rollback, move |_s| work())
+            .map(|(_, out): (ClickIdle, T)| out)
+            .map_err(ClickMoveError::from),
+        crate::scheduler::ClickerState::Paused => node
+            .transition_checked(ClickPaused, rollback, move |_s| work())
+            .map(|(_, out): (ClickIdle, T)| out)
+            .map_err(ClickMoveError::from),
+        crate::scheduler::ClickerState::Idle => Err(ClickMoveError::IllegalMove(from)),
+    }
+}
+
+/// Running→Paused only. `IllegalMove` for an Idle or already-Paused source —
+/// "pause the idle clicker" used to write `Paused` over `Idle` silently.
+pub fn click_to_paused<T, E, R, W>(
+    from: crate::scheduler::ClickerState,
+    rollback: R,
+    work: W,
+) -> Result<T, ClickMoveError<E>>
+where
+    R: FnOnce(),
+    W: FnOnce() -> Result<T, E>,
+    E: std::fmt::Debug,
+{
+    match from {
+        crate::scheduler::ClickerState::Running => click_state_node()
+            .transition_checked(ClickRunning, rollback, move |_s| work())
+            .map(|(_, out): (ClickPaused, T)| out)
+            .map_err(ClickMoveError::from),
+        _ => Err(ClickMoveError::IllegalMove(from)),
+    }
 }
 
 /// Click Worker Node:
@@ -87,6 +258,21 @@ pub fn click_node() -> &'static SnubberNode {
         SnubberNode::builder("click_worker")
             .max_in_flight(1)
             .trip_after_failures(5)
+            // The armed rollback IS `emergency_release_all_hardware`: it calls
+            // `SendInput`, which can sit in UIPI, so its duration is timed and
+            // `RollbackReentrancy::Refuse` stops a release that re-enters the
+            // node from competing with itself for the slot.
+            .rollback_budget_ms(ROLLBACK_BUDGET_MS)
+            .rollback_reentrancy(RollbackReentrancy::Refuse)
+            // Shared with the maintenance classifier (`classify_stall`): one
+            // number per decision, so the builder and the observer cannot drift.
+            // `timeout_ms` stays 0 on purpose — this node's guard is an
+            // entry-time probe, so there is no live guard to reap.
+            .cpu_budget_ms(CLICK_CPU_BUDGET_MS)
+            .stall_ceiling_ms(CLICK_STALL_CEILING_MS)
+            // A leak in a long tray session must stop new runs before it OOMs
+            // the desktop; the 1 Hz sampler in `maintenance_loop` feeds this.
+            .memory_limits(MEMORY_SOFT_KB, MEMORY_HARD_KB)
             .on_fault(|record, stats, _| {
                 crate::debug_log_internal(
                     "error",
@@ -100,6 +286,24 @@ pub fn click_node() -> &'static SnubberNode {
     })
 }
 
+/// Click Run Node (`ExecutionEnvelope` on a settled run):
+/// - Telemetry only. A run that commits with 0 clicks injected did nothing,
+///   which is exactly the "RUNNING but no clicks" class of bug; the floor is
+///   one payload byte (one click), so the counter names it.
+/// - `trip_after_failures(0)`: an envelope miss is telemetry, never breaker
+///   fuel (same law as the crate's `envelope_underflows` column).
+/// - Wide bulkhead: a preempting preset spawns the next run while the old one
+///   is still unwinding, and this node must never refuse either of them.
+pub fn click_run_node() -> &'static SnubberNode {
+    CLICK_RUN_NODE.get_or_init(|| {
+        SnubberNode::builder("click_run")
+            .max_in_flight(8)
+            .trip_after_failures(0)
+            .execution_envelope(ExecutionEnvelope::new(0, 0, 1, 0))
+            .build()
+    })
+}
+
 /// Hotkey Hook Node:
 /// - Guards keyboard/mouse LL hook event processing
 pub fn hotkey_node() -> &'static SnubberNode {
@@ -107,6 +311,12 @@ pub fn hotkey_node() -> &'static SnubberNode {
         SnubberNode::builder("hotkey_hook")
             .max_in_flight(1)
             .trip_after_failures(3)
+            // The hook thread must never block on a release: its budget is
+            // observed by the maintenance tick, and the spin/deadlock verdict
+            // shares these numbers with `classify_stall`.
+            .rollback_budget_ms(ROLLBACK_BUDGET_MS)
+            .cpu_budget_ms(HOOK_CPU_BUDGET_MS)
+            .stall_ceiling_ms(HOOK_STALL_CEILING_MS)
             .on_fault(|record, stats, _| {
                 crate::debug_log_internal(
                     "error",
@@ -127,6 +337,10 @@ pub fn macro_node() -> &'static SnubberNode {
         SnubberNode::builder("macro_executor")
             .max_in_flight(2)
             .trip_after_failures(3)
+            // Macro playback releases held buttons on abort: same SendInput
+            // rollback story as the click worker, same Refuse guard.
+            .rollback_budget_ms(ROLLBACK_BUDGET_MS)
+            .rollback_reentrancy(RollbackReentrancy::Refuse)
             .on_fault(|record, stats, _| {
                 crate::debug_log_internal(
                     "error",
@@ -146,6 +360,9 @@ pub fn watcher_node() -> &'static SnubberNode {
     WATCHER_NODE.get_or_init(|| {
         SnubberNode::builder("file_watcher")
             .max_in_flight(1)
+            // A stalled poll is a notification lost in silence: the body is
+            // timed so the 1 Hz tick can name it instead of guessing.
+            .rollback_budget_ms(ROLLBACK_BUDGET_MS)
             .build()
     })
 }
@@ -153,11 +370,7 @@ pub fn watcher_node() -> &'static SnubberNode {
 /// Profile Switch Node:
 /// - Guards app-profile auto-switch background loop
 pub fn profile_switch_node() -> &'static SnubberNode {
-    PROFILE_SWITCH_NODE.get_or_init(|| {
-        SnubberNode::builder("profile_switch")
-            .max_in_flight(1)
-            .build()
-    })
+    PROFILE_SWITCH_NODE.get_or_init(|| snubber::StaticNode::<1, 1>::build("profile_switch"))
 }
 
 /// Planned admission refusals (`BulkheadFull`) are a normal bulkhead outcome,
@@ -267,6 +480,245 @@ pub fn dump_all_stats() {
     crate::debug_log_internal("warn", "[Stability] ===================================");
 }
 
+// ── 2b. Worker pulses (Front 4: "RUNNING, but no clicks") ───────────────────
+
+/// Click-worker heartbeat. The worker kicks it once per loop iteration and
+/// once per ≤100 ms slice of every long wait, so a frozen thread is a frozen
+/// counter, not an inference from `clicks_done` (which legitimately stands
+/// still between clicks).
+static CLICK_PULSE: OnceLock<WorkerPulse> = OnceLock::new();
+/// Hook-loop heartbeat, kicked once per `MsgWaitForMultipleObjects` iteration.
+static HOOK_PULSE: OnceLock<WorkerPulse> = OnceLock::new();
+/// A pulse is observed only while the thread that owns it exists: an idle
+/// clicker has no worker, and its frozen counter is not a stall.
+static CLICK_PULSE_ARMED: AtomicBool = AtomicBool::new(false);
+
+pub fn click_pulse() -> &'static WorkerPulse {
+    CLICK_PULSE.get_or_init(WorkerPulse::new)
+}
+
+pub fn hook_pulse() -> &'static WorkerPulse {
+    HOOK_PULSE.get_or_init(WorkerPulse::new)
+}
+
+/// Arm/disarm click-pulse observation around one worker run. Disarming must
+/// only happen for the CURRENT run generation (the preempting run keeps it
+/// armed for itself).
+pub fn arm_click_pulse(armed: bool) {
+    CLICK_PULSE_ARMED.store(armed, Ordering::Release);
+}
+
+fn click_pulse_armed() -> bool {
+    CLICK_PULSE_ARMED.load(Ordering::Acquire)
+}
+
+/// The hook pulse is only meaningful while the LL-hook thread exists.
+#[cfg(target_os = "windows")]
+fn hook_pulse_armed() -> bool {
+    crate::platform::windows::hotkey_listener_running()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn hook_pulse_armed() -> bool {
+    false
+}
+
+// ── 2c. Maintenance: rollback, pulses, stall class, memory, snapshots ──────
+
+static MAINTENANCE_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// Start the single stability maintenance thread for this process.
+///
+/// Idempotent: the UI process and the daemon process each own one engine and
+/// therefore each start one thread; a second call is a no-op. Cadence:
+/// 200 ms pulses, 1 Hz rollback + memory, 30 s snapshots. Everything here is
+/// cold — no click path calls into this module.
+pub fn start_maintenance() {
+    if MAINTENANCE_STARTED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("nanoclick-stability".into())
+        .spawn(maintenance_loop);
+    if let Err(e) = spawned {
+        MAINTENANCE_STARTED.store(false, Ordering::Release);
+        crate::debug_log_internal(
+            "warn",
+            &format!("[Stability] maintenance thread not started: {e}"),
+        );
+    }
+}
+
+fn maintenance_loop() {
+    let mut click_watch = PulseWatch::new(CLICK_PULSE_LEASE_MS);
+    let mut hook_watch = PulseWatch::new(HOOK_PULSE_LEASE_MS);
+    let mut last_cpu = process_cpu_ms();
+    // One line per wedged body, not one per second.
+    let mut reported_rollback_epoch = [u64::MAX; 3];
+    let mut memory_pressured = false;
+    let mut tick: u64 = 0;
+    loop {
+        std::thread::sleep(Duration::from_millis(MAINTENANCE_TICK_MS));
+        tick = tick.wrapping_add(1);
+        let now = snubber::now_ms();
+
+        // ── Pulses: a frozen counter names a frozen thread ──────────────
+        if click_pulse_armed() {
+            let landed = click_watch.observe(click_pulse().tick(), now);
+            if !landed {
+                let idle_ms = click_watch.idle_ms(now);
+                let cpu_delta = cpu_delta_since(&mut last_cpu);
+                let kind = classify_stall_ceiling(
+                    idle_ms,
+                    cpu_delta,
+                    CLICK_PULSE_LEASE_MS,
+                    CLICK_CPU_BUDGET_MS,
+                    CLICK_STALL_CEILING_MS,
+                );
+                click_node().note_pulse_stall(idle_ms);
+                crate::debug_log_internal(
+                    "error",
+                    &format!(
+                        "[Stability] click_worker pulse stalled {idle_ms}ms (kind={kind:?}, cpu_delta={cpu_delta}ms)"
+                    ),
+                );
+            }
+        }
+        if hook_pulse_armed() {
+            let landed = hook_watch.observe(hook_pulse().tick(), now);
+            if !landed {
+                let idle_ms = hook_watch.idle_ms(now);
+                let cpu_delta = cpu_delta_since(&mut last_cpu);
+                let kind = classify_stall_ceiling(
+                    idle_ms,
+                    cpu_delta,
+                    HOOK_PULSE_LEASE_MS,
+                    HOOK_CPU_BUDGET_MS,
+                    HOOK_STALL_CEILING_MS,
+                );
+                hotkey_node().note_pulse_stall(idle_ms);
+                crate::debug_log_internal(
+                    "error",
+                    &format!(
+                        "[Stability] hotkey_hook pulse stalled {idle_ms}ms (kind={kind:?}, cpu_delta={cpu_delta}ms)"
+                    ),
+                );
+            }
+        }
+
+        // ── 1 Hz: rollback bodies + memory ─────────────────────────────
+        if tick % 5 == 0 {
+            let watched = [
+                ("click_worker", click_node()),
+                ("macro_executor", macro_node()),
+                ("file_watcher", watcher_node()),
+            ];
+            for (idx, (name, node)) in watched.iter().enumerate() {
+                if let Some(stall) = snubber::watchdog::poll_rollback(node, ROLLBACK_BUDGET_MS) {
+                    if reported_rollback_epoch[idx] != stall.epoch {
+                        reported_rollback_epoch[idx] = stall.epoch;
+                        crate::debug_log_internal(
+                            "error",
+                            &format!(
+                                "[Stability] {name} rollback body wedged: epoch={} task={} elapsed={}ms budget={}ms",
+                                stall.epoch, stall.task_id, stall.elapsed_ms, stall.budget_ms
+                            ),
+                        );
+                    }
+                }
+            }
+
+            if let Some(used_kb) = process_rss_kb() {
+                let verdict = click_node().note_memory_kb(used_kb);
+                if verdict.is_pressured() != memory_pressured {
+                    memory_pressured = verdict.is_pressured();
+                    crate::debug_log_internal(
+                        "warn",
+                        &format!(
+                            "[Stability] memory {} — rss={}kb soft={}kb hard={}kb",
+                            verdict.code(),
+                            used_kb,
+                            MEMORY_SOFT_KB,
+                            MEMORY_HARD_KB
+                        ),
+                    );
+                }
+            }
+        }
+
+        // ── 30 s: keep the cold snapshot files close to live ──────────
+        if tick % 150 == 0 {
+            flush_all_snapshots(SNAPSHOT_GENERATION);
+        }
+    }
+}
+
+/// CPU-time delta (ms) of this process since the previous call.
+///
+/// The crate's `classify_stall` wants an on-CPU sample; in-process we have
+/// no per-thread handle for the worker, so the sample is process-wide. That
+/// is the honest limit: a spinning worker always grows process CPU, while an
+/// idle UI cannot fake growth during the same window — but a busy UI can.
+/// The verdict is diagnostic aid, never a kill switch.
+fn cpu_delta_since(last: &mut Option<u64>) -> u64 {
+    let now = process_cpu_ms();
+    let delta = match (*last, now) {
+        (Some(prev), Some(cur)) => cur.saturating_sub(prev),
+        _ => 0,
+    };
+    *last = now;
+    delta
+}
+
+#[cfg(target_os = "windows")]
+fn process_cpu_ms() -> Option<u64> {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+    let (mut create, mut exit, mut kernel, mut user) = (
+        FILETIME::default(),
+        FILETIME::default(),
+        FILETIME::default(),
+        FILETIME::default(),
+    );
+    let ok = unsafe {
+        GetProcessTimes(
+            GetCurrentProcess(),
+            &mut create,
+            &mut exit,
+            &mut kernel,
+            &mut user,
+        )
+    };
+    ok.ok()?;
+    let ms = |ft: FILETIME| {
+        ((u64::from(ft.dwHighDateTime) << 32) | u64::from(ft.dwLowDateTime)) / 10_000
+    };
+    Some(ms(kernel) + ms(user))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn process_cpu_ms() -> Option<u64> {
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn process_rss_kb() -> Option<u64> {
+    use windows::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+    };
+    use windows::Win32::System::Threading::GetCurrentProcess;
+    let mut pmc = PROCESS_MEMORY_COUNTERS::default();
+    let cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+    let ok = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut pmc, cb) };
+    ok.ok()?;
+    Some(pmc.WorkingSetSize as u64 / 1024)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn process_rss_kb() -> Option<u64> {
+    None
+}
+
 // ── 3. Task steering (TaskConduit / TaskHandle) ─────────────────────────────
 
 /// Live telemetry published by the click worker through the steering conduit.
@@ -371,21 +823,14 @@ impl<T> SafeLockExt<T> for std::sync::Mutex<T> {
 
 // ── 6. Full state snapshot (backend → frontend reconciliation) ───────────────
 
-/// Combined backend state in one struct: clicker, macro, breaker gauges.
-/// The frontend reconciles against this on focus/restore so a backgrounded
-/// WebView cannot show a stale running state.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-pub struct FullStateSnapshot {
-    pub active: bool,
-    pub mode: String,
-    pub clicks_done: u32,
-    pub cps: f64,
-    pub status_text: String,
-    pub breaker_tripped: bool,
-    pub total_faults: u64,
-    pub is_recording: bool,
-    pub is_macro_running: bool,
-    pub timestamp_ms: u64,
+/// Live rollback observability for the status surfaces: `(active, elapsed_ms)`.
+///
+/// One lock-free `RollbackPhase` read (atomics only, no node lock), so a 1 Hz
+/// status poll can never stall behind a wedged rollback body. `elapsed_ms` is
+/// 0 when no body is active or no budget is armed.
+pub fn rollback_status() -> (bool, u64) {
+    let phase = click_node().rollback_phase();
+    (phase.active, phase.elapsed_ms)
 }
 
 pub fn is_breaker_tripped() -> bool {
@@ -395,6 +840,7 @@ pub fn is_breaker_tripped() -> bool {
 pub fn total_system_faults() -> u64 {
     let nodes = [
         click_node(),
+        click_run_node(),
         hotkey_node(),
         macro_node(),
         watcher_node(),
@@ -420,6 +866,7 @@ pub fn all_nodes() -> &'static snubber::NodeSet<'static> {
         let mut set = snubber::NodeSet::new();
         set.register("click_worker", click_node());
         set.register("click_state", click_state_node());
+        set.register("click_run", click_run_node());
         set.register("hotkey_hook", hotkey_node());
         set.register("macro_executor", macro_node());
         set.register("file_watcher", watcher_node());
@@ -453,6 +900,32 @@ pub fn cold_snapshot_path() -> std::path::PathBuf {
     std::env::temp_dir().join("nanoclick_app.snub")
 }
 
+/// Generation stamped into every frame this process writes. The supervisor
+/// generation seam (`snapshot_v1_in`) is 1 today: one engine per process.
+pub const SNAPSHOT_GENERATION: u64 = 1;
+
+/// Every node that owns a `.snub` frame, in one place: flush, diagnosis and
+/// the diagnostics board all iterate this table, so a new node is added once.
+pub const SNAPSHOT_NODES: [(&str, fn() -> &'static SnubberNode); 9] = [
+    ("click_worker", click_node),
+    ("click_state", click_state_node),
+    ("click_run", click_run_node),
+    ("hotkey_hook", hotkey_node),
+    ("macro_executor", macro_node),
+    ("file_watcher", watcher_node),
+    ("profile_switch", profile_switch_node),
+    ("satellite_window", satellite_node),
+    ("config_save", config_node),
+];
+
+fn snapshot_path(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("nanoclick_{name}.snub"))
+}
+
+fn triage_path() -> std::path::PathBuf {
+    std::env::temp_dir().join("nanoclick_triage.txt")
+}
+
 /// Flush one node's snapshot (crash-safe-ish: tmp + rename, no torn frame).
 pub fn flush_node_snapshot(node: &SnubberNode, generation: u64, file_name: &str) {
     let bytes = node.snapshot_v1_in(generation).encode();
@@ -463,39 +936,21 @@ pub fn flush_node_snapshot(node: &SnubberNode, generation: u64, file_name: &str)
     }
 }
 
-/// Flush all seven nodes (one 512 B frame each, `<name>.snub`).
+/// Flush every node (one 512 B frame each, `nanoclick_<name>.snub`).
 pub fn flush_all_snapshots(generation: u64) {
-    let nodes = [
-        ("click_worker", click_node()),
-        ("hotkey_hook", hotkey_node()),
-        ("macro_executor", macro_node()),
-        ("file_watcher", watcher_node()),
-        ("profile_switch", profile_switch_node()),
-        ("satellite_window", satellite_node()),
-        ("config_save", config_node()),
-    ];
-    for (name, node) in nodes {
-        flush_node_snapshot(node, generation, &format!("nanoclick_{name}.snub"));
+    for (name, node) in SNAPSHOT_NODES {
+        flush_node_snapshot(node(), generation, &format!("nanoclick_{name}.snub"));
     }
 }
 
-/// Boot diagnosis: decode `<name>.snub` files, log one `[DIAG]` line per
-/// anomaly found in the previous run. Silence when the shutdown was clean.
-pub fn boot_diagnosis_from_snapshots() {
-    let names = [
-        "click_worker",
-        "hotkey_hook",
-        "macro_executor",
-        "file_watcher",
-        "profile_switch",
-        "satellite_window",
-        "config_save",
-    ];
+/// Boot diagnosis: decode last run's frames, log one line per anomaly.
+/// Returns the snapshots read, so the exit diff has a real baseline.
+pub fn boot_diagnosis_from_snapshots() -> Vec<(&'static str, SnapshotV1)> {
     let policy = snubber::AnomalyPolicy::default();
+    let mut previous = Vec::with_capacity(SNAPSHOT_NODES.len());
     let mut clean = true;
-    for name in names {
-        let path = std::env::temp_dir().join(format!("nanoclick_{name}.snub"));
-        let Ok(bytes) = std::fs::read(&path) else {
+    for (name, _) in SNAPSHOT_NODES {
+        let Ok(bytes) = std::fs::read(snapshot_path(name)) else {
             continue;
         };
         if bytes.len() != snubber::SNAPSHOT_LEN {
@@ -521,42 +976,110 @@ pub fn boot_diagnosis_from_snapshots() {
             }
             Ok(snap) => {
                 let hits = snubber::find_anomalies_for_snapshot(name, &snap, &policy);
-                if hits.is_empty() {
+                for h in &hits {
+                    clean = false;
                     crate::debug_log_internal(
                         "warn",
-                        &format!(
-                            "[Stability] previous shutdown clean for {name} (gen {})",
-                            snap.generation
-                        ),
+                        &format!("[Stability] {}", snubber::diagnostic_line(name, h, &snap)),
                     );
-                } else {
-                    clean = false;
-                    for h in &hits {
-                        crate::debug_log_internal(
-                            "warn",
-                            &format!("[Stability] {}", snubber::diagnostic_line(name, h, &snap)),
-                        );
-                    }
                 }
+                previous.push((name, snap));
             }
         }
     }
     if clean {
-        crate::debug_log_internal("warn", "[Stability] previous shutdown clean (all nodes)");
+        crate::debug_log_internal(
+            "warn",
+            &format!(
+                "[Stability] previous shutdown clean ({} nodes)",
+                SNAPSHOT_NODES.len()
+            ),
+        );
+    }
+    previous
+}
+
+/// Boot hook: diagnose last run, then stamp this run's baseline frames.
+///
+/// The baseline is held in memory for the exit diff and written to disk
+/// immediately, so a crash leaves a frame that belongs to THIS run instead of
+/// a stale one from yesterday that the next boot would misread as a crash.
+pub fn boot_snapshot_cycle() {
+    // Diagnose the previous run's frames BEFORE they are overwritten below.
+    let previous = boot_diagnosis_from_snapshots();
+    let baseline = snapshot_pairs();
+    if let Ok(mut g) = BOARD_BASELINE
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+    {
+        *g = baseline;
+    }
+    flush_all_snapshots(SNAPSHOT_GENERATION);
+    crate::debug_log_internal(
+        "warn",
+        &format!(
+            "[Stability] boot baseline written: {} frames (previous run: {} readable)",
+            SNAPSHOT_NODES.len(),
+            previous.len()
+        ),
+    );
+}
+
+/// Snapshot of every node right now (name + 512 B frame).
+fn snapshot_pairs() -> Vec<(&'static str, SnapshotV1)> {
+    SNAPSHOT_NODES
+        .iter()
+        .map(|(name, node)| (*name, node().snapshot_v1_in(SNAPSHOT_GENERATION)))
+        .collect()
+}
+
+/// Exit hook: flush final frames, then write the triage artifact.
+///
+/// `nanoclick_triage.txt` holds, per node, the crate's `write_triage` card
+/// plus the `SnapshotDiff` against the boot baseline — a real file, not a
+/// promise in a plan document. Cold path: once per process exit.
+pub fn shutdown_snapshot_cycle() {
+    flush_all_snapshots(SNAPSHOT_GENERATION);
+    let baseline = BOARD_BASELINE
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+    let current = snapshot_pairs();
+    let mut out = String::with_capacity(4096);
+    for (name, snap) in &current {
+        let _ = snubber::write_triage(&mut out, name, snap);
+        if let Some((_, before)) = baseline.iter().find(|(n, _)| n == name) {
+            let diff = before.diff(snap);
+            if !diff.is_empty() {
+                let _ = diff.write_summary(&mut out);
+            }
+        }
+        out.push('\n');
+    }
+    let path = triage_path();
+    match std::fs::write(&path, out.as_bytes()) {
+        Ok(()) => crate::debug_log_internal(
+            "warn",
+            &format!("[Stability] triage written: {}", path.display()),
+        ),
+        Err(e) => crate::debug_log_internal(
+            "warn",
+            &format!("[Stability] triage write failed ({}): {e}", path.display()),
+        ),
     }
 }
+
+/// Boot baseline for the exit diff (empty when the boot hook never ran).
+static BOARD_BASELINE: OnceLock<Mutex<Vec<(&'static str, SnapshotV1)>>> = OnceLock::new();
 
 /// Explicit multi-node board for diagnostics (never a `static` inside
 /// the crate — the app builds it on demand from its own handles).
 pub fn board_all_nodes() -> snubber::NodeSet<'static> {
     let mut board = snubber::NodeSet::new();
-    board.register("click_worker", click_node());
-    board.register("hotkey_hook", hotkey_node());
-    board.register("macro_executor", macro_node());
-    board.register("file_watcher", watcher_node());
-    board.register("profile_switch", profile_switch_node());
-    board.register("satellite_window", satellite_node());
-    board.register("config_save", config_node());
+    for (name, node) in SNAPSHOT_NODES {
+        board.register(name, node());
+    }
     board
 }
 
@@ -581,6 +1104,44 @@ mod tests {
     fn test_invariants_reject_out_of_bounds_coordinates() {
         assert!(validate_click_invariants(10.0, 2500, 200, 1920, 1080).is_err());
         assert!(validate_click_invariants(10.0, 100, 2000, 1920, 1080).is_err());
+    }
+
+    #[test]
+    fn test_illegal_click_moves_are_refused_before_admission() {
+        use crate::scheduler::ClickerState;
+        let admissions_before = click_state_node().stats().admission_total();
+        let work = || Ok::<(), &'static str>(());
+        // Idle -> Paused has no rib; the runtime `from` must refuse it.
+        assert!(matches!(
+            click_to_paused(ClickerState::Idle, || {}, work),
+            Err(ClickMoveError::IllegalMove(ClickerState::Idle))
+        ));
+        // Running -> Running and Idle -> Idle are not edges either.
+        assert!(matches!(
+            click_to_running(ClickerState::Running, || {}, work),
+            Err(ClickMoveError::IllegalMove(ClickerState::Running))
+        ));
+        assert!(matches!(
+            click_to_idle(ClickerState::Idle, || {}, work),
+            Err(ClickMoveError::IllegalMove(ClickerState::Idle))
+        ));
+        // Refusals happen before the node is touched: no phantom transactions.
+        assert_eq!(
+            click_state_node().stats().admission_total(),
+            admissions_before,
+            "illegal moves must not consume click_state admissions"
+        );
+    }
+
+    #[test]
+    fn test_legal_click_move_returns_work_outcome() {
+        use crate::scheduler::ClickerState;
+        let got = click_to_running(ClickerState::Idle, || {}, || Ok::<u8, &'static str>(7));
+        assert_eq!(got.unwrap(), 7);
+        let got = click_to_paused(ClickerState::Running, || {}, || Ok::<u8, &'static str>(8));
+        assert_eq!(got.unwrap(), 8);
+        let got = click_to_idle(ClickerState::Paused, || {}, || Ok::<u8, &'static str>(9));
+        assert_eq!(got.unwrap(), 9);
     }
 
     #[test]

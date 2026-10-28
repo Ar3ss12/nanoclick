@@ -13,9 +13,27 @@ pub struct DaemonState {
 }
 impl DaemonState {
     pub fn new() -> Self {
+        // One maintenance thread per engine-owning process: the daemon runs its
+        // own rollback/memory/snapshot observers even when no UI is attached.
+        crate::stability::start_maintenance();
         let manager = Arc::new(crate::config_manager::ConfigManager::new());
         // The daemon OWNS the file: load once, then persist every mutation.
-        let (app_cfg, _) = manager.load_with_action();
+        // Bootstrap binds the freshly loaded config to a `Protected`
+        // transaction: `commit()` publishes it, and a panic in the window
+        // between load and publish drops the half-built config instead of
+        // arming the daemon with it. `Protected` pairs with the v0.1
+        // `SnubberGuard` (the node's `TrackedGuard` settles its own books and
+        // cannot be bound), so the guard is minted from the `config_save`
+        // sequence and its rollback is a recorded, observable discard.
+        let seq = crate::stability::config_node().next_sequence();
+        let bootstrap_guard = snubber::SnubberGuard::new(seq, seq, || {
+            crate::debug_log_internal(
+                "error",
+                "[Daemon] config bootstrap aborted before publish — config discarded",
+            );
+        });
+        let (app_cfg, _) =
+            snubber::Protected::new(manager.load_with_action(), bootstrap_guard).commit();
         let scheduler = Arc::new(crate::scheduler::ClickScheduler::new());
         scheduler.set_config(crate::config::Config::from(app_cfg));
         Self {
@@ -95,16 +113,24 @@ pub fn handle_request(state: &DaemonState, req: &IpcRequest) -> IpcResponse {
             let next = state.scheduler.adjust_cps(delta, None);
             IpcResponse::ok(req.id, serde_json::json!({"cps": next}))
         }
-        "get_full_state" => IpcResponse::ok(
-            req.id,
-            serde_json::json!({
-                "active": state.scheduler.is_active(),
-                "mode": if state.scheduler.is_autoclicker_mode() { "autoclicker" } else { "work" },
-                "clicks_done": state.scheduler.get_clicks_done(),
-                "breaker_tripped": crate::stability::is_breaker_tripped(),
-                "total_faults": crate::stability::total_system_faults(),
-            }),
-        ),
+        "get_full_state" => {
+            // A rollback body runs `SendInput` and can sit in UIPI; the status
+            // surface names it instead of leaving "RUNNING, no clicks" unexplained.
+            let (rollback_active, rollback_elapsed_ms) = crate::stability::rollback_status();
+            IpcResponse::ok(
+                req.id,
+                serde_json::json!({
+                    "active": state.scheduler.is_active(),
+                    "mode": if state.scheduler.is_autoclicker_mode() { "autoclicker" } else { "work" },
+                    "clicks_done": state.scheduler.get_clicks_done(),
+                    "breaker_tripped": crate::stability::is_breaker_tripped(),
+                    "total_faults": crate::stability::total_system_faults(),
+                    "rollback_active": rollback_active,
+                    "rollback_elapsed_ms": rollback_elapsed_ms,
+                    "rollback_budget_ms": crate::stability::ROLLBACK_BUDGET_MS,
+                }),
+            )
+        }
         "activate_preset" => {
             let id = req.params.get("id").and_then(|v| v.as_str()).unwrap_or("");
             match state.scheduler.activate_preset_hotkey(id, None) {
@@ -163,6 +189,7 @@ fn serve_one(state: Arc<DaemonState>, stream: TcpStream) {
 }
 /// Blocking serve loop (call from `main-daemon`).
 pub fn serve(state: Arc<DaemonState>) -> std::io::Result<()> {
+    crate::stability::start_maintenance();
     let listener = TcpListener::bind(daemon_tcp_addr())?;
     for s in listener.incoming().flatten() {
         let st = Arc::clone(&state);
