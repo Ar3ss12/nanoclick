@@ -780,7 +780,7 @@ fn maintenance_loop() {
     let mut last_cpu = process_cpu_ms();
     let mut click_cpu = ThreadCpuSampler::new();
     let mut hook_cpu = ThreadCpuSampler::new();
-    let mut rss = RssGradient::new();
+    let mut rss = RssWindow::new();
     // One line per wedged body, not one per second.
     let mut reported_rollback_epoch = [u64::MAX; ROLLBACK_WATCHED.len()];
     // Edge state of the input desktop: `None` until the first sample, so a
@@ -913,9 +913,10 @@ fn maintenance_loop() {
         // ── 1 Hz: rollback bodies + memory ─────────────────────────────
         if tick.is_multiple_of(5) {
             for (idx, entry) in ROLLBACK_WATCHED.iter().enumerate() {
-                if let Some(stall) =
-                    snubber::watchdog::poll_rollback((entry.node)(), ROLLBACK_BUDGET_MS)
-                {
+                // The budget comes from each node's own builder, not from a
+                // constant here: a row cannot be watched against a number its
+                // node never armed.
+                if let Some(stall) = snubber::watchdog::poll_rollback_node((entry.node)()) {
                     if reported_rollback_epoch[idx] != stall.epoch {
                         reported_rollback_epoch[idx] = stall.epoch;
                         crate::debug_log_internal(
@@ -939,11 +940,13 @@ fn maintenance_loop() {
             // left a wedged macro release logged but not refusing (F-1).
             let mut release_pending = false;
             let mut worst_elapsed = 0;
+            let mut worst_budget = 0;
             for entry in ROLLBACK_WATCHED.iter().filter(|e| e.holds_hardware) {
                 let phase = (entry.node)().rollback_phase();
-                if phase.active && phase.elapsed_ms > ROLLBACK_BUDGET_MS {
+                if phase.active && phase.elapsed_ms > phase.budget_ms {
                     release_pending = true;
                     worst_elapsed = worst_elapsed.max(phase.elapsed_ms);
+                    worst_budget = worst_budget.max(phase.budget_ms);
                 }
             }
             if release_pending != ROLLBACK_PENDING.load(Ordering::Acquire) {
@@ -951,7 +954,7 @@ fn maintenance_loop() {
                 crate::debug_log_internal(
                     if release_pending { "error" } else { "warn" },
                     &format!(
-                        "[Stability] release_pending -> {release_pending} (elapsed={worst_elapsed}ms budget={ROLLBACK_BUDGET_MS}ms)"
+                        "[Stability] release_pending -> {release_pending} (elapsed={worst_elapsed}ms budget={worst_budget}ms)"
                     ),
                 );
             }
@@ -1404,54 +1407,17 @@ fn process_rss_kb() -> Option<u64> {
     None
 }
 
-/// Ring of RSS samples, oldest-overwritten.
-///
 /// The verdict is a DERIVATIVE, not a level: a working set that rises on every
 /// one of `RSS_RING_LEN` clean 30 s samples and never resets is a leak even at
 /// 2 MB per step. One sample below its predecessor (a GC, a tray collapse)
-/// clears the window — a healthy process is allowed to oscillate.
-struct RssGradient {
-    ring: [u64; RSS_RING_LEN],
-    len: usize,
-    next: usize,
-}
-
-impl RssGradient {
-    const fn new() -> Self {
-        Self {
-            ring: [0; RSS_RING_LEN],
-            len: 0,
-            next: 0,
-        }
-    }
-
-    /// Push one sample. Returns `Some(growth)` only when the whole window is
-    /// strictly increasing, where `growth = newest − oldest`.
-    fn push(&mut self, kb: u64) -> Option<u64> {
-        self.ring[self.next] = kb;
-        self.next = (self.next + 1) % RSS_RING_LEN;
-        if self.len < RSS_RING_LEN {
-            self.len += 1;
-        }
-        if self.len < RSS_RING_LEN {
-            return None;
-        }
-        let oldest = self.ring[self.next];
-        let mut previous = oldest;
-        for i in 1..RSS_RING_LEN {
-            let sample = self.ring[(self.next + i) % RSS_RING_LEN];
-            if sample <= previous {
-                return None;
-            }
-            previous = sample;
-        }
-        Some(previous - oldest)
-    }
-}
+/// clears the window — a healthy process is allowed to oscillate. The rule
+/// lives in the crate (`snubber::LeakWatch`); only the window length and the
+/// trip mark are ours.
+type RssWindow = snubber::LeakWatch<RSS_RING_LEN>;
 
 /// Does a monotonic window that grew this much name a leak?
 fn leak_trips(growth_kb: u64) -> bool {
-    growth_kb >= MEMORY_GROWTH_TRIP_KB
+    snubber::growth_crosses(growth_kb, MEMORY_GROWTH_TRIP_KB)
 }
 
 /// A hard stall class may latch a refusal ONLY when this tick has a real
@@ -2134,7 +2100,7 @@ mod tests {
 
     #[test]
     fn test_rss_gradient_names_only_a_full_monotonic_window() {
-        let mut ring = RssGradient::new();
+        let mut ring = RssWindow::new();
         // A short window is not an answer, however steep.
         for kb in [100u64, 200, 300, 400, 500, 600, 700, 800, 900] {
             assert_eq!(ring.push(kb), None);
@@ -2155,7 +2121,7 @@ mod tests {
         assert!(leak_trips(MEMORY_GROWTH_TRIP_KB));
         assert_eq!(MEMORY_GROWTH_TRIP_KB, 120 * 1024);
         // Ten 15 MB steps cross the mark on the tenth sample.
-        let mut ring = RssGradient::new();
+        let mut ring = RssWindow::new();
         let mut last = None;
         for step in 1..=RSS_RING_LEN {
             last = ring.push(step as u64 * 15 * 1024);

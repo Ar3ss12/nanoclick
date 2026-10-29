@@ -77,6 +77,22 @@ Suite green: **511 tests** (404 lib + 102 asset tripwires + 3 daemon handshake
   `ProcessToken` arm is gone as well — it wrote only under `SNUBBER_SUPERVISED`
   and read as a guarantee; `input_guardian` is the real rescue.
 
+### Changed
+
+- **A watched rollback is timed by the node that owns it.** The 1 Hz watcher
+  calls `snubber::watchdog::poll_rollback(&node)` and the release latch reads
+  `phase.budget_ms`, so no observer holds a copy of `ROLLBACK_BUDGET_MS` that
+  a builder change could leave behind. The drift class — a threshold that
+  describes a budget no node armed — is gone, not documented.
+- **The leak window is the crate's, not ours.** The local `RssGradient`
+  (a ring plus the strict-rise rule, previously written twice) is replaced by
+  `snubber::LeakWatch<10>`, and the trip mark by `snubber::growth_crosses`.
+  Behaviour is unchanged — ten 30 s samples, strictly rising, ≥ 120 MB — and
+  the app keeps only the two policy numbers (`RSS_RING_LEN`,
+  `MEMORY_GROWTH_TRIP_KB`). The migration added a flat-window case to the
+  crate's tests: an equal neighbour provably clears the window, which the
+  local copy asserted nowhere.
+
 ## 1.4.0 (2026-10-29)
 
 A resilience release: the click engine gains an out-of-process safety net and
