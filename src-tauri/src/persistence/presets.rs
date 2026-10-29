@@ -263,12 +263,20 @@ mod tests {
             "the snapshot must come back, not an empty store"
         );
         assert_eq!(loaded[1].name, "Second");
-        assert!(matches!(
-            action,
-            PresetsHealAction::RecoveredFromLastGood { .. }
-        ));
+        // The quarantine name carries a wall-clock second, so re-deriving it
+        // here can straddle a tick and look for a file the loader never wrote
+        // (that is how this test went red on CI). The action already reports
+        // the path it used: assert THAT one exists and still holds the bytes.
+        let backup_path = match action {
+            PresetsHealAction::RecoveredFromLastGood { backup_path } => backup_path,
+            other => panic!("expected a recovery from the last-good snapshot, got {other:?}"),
+        };
         // The broken bytes stay on disk for inspection, never silently deleted.
-        assert!(presets_quarantine_path(&live).exists());
+        assert_eq!(
+            fs::read_to_string(&backup_path).unwrap(),
+            "{ not json",
+            "the quarantine must preserve the exact broken bytes: {backup_path:?}"
+        );
     }
 
     #[test]
