@@ -6996,3 +6996,52 @@ fn test_satellite_destroy_lives_only_on_tray_shutdown_and_rollback() {
         "drain_and_emit_ripples must skip hidden satellites instead of emitting"
     );
 }
+
+/// CI checks out snubber a second time, at its own `ref:`. A stale pin
+/// compiles green on a dev host — the path dep is whatever `../../../snubber`
+/// is today — and dies in CI at the first cargo step with E0425/E0599 for
+/// every symbol newer than the pin. Hold the pin to the checkout the build
+/// resolves, so a forgotten bump fails here instead of on the runner.
+#[test]
+fn test_ci_pins_the_snubber_revision_the_build_resolves() {
+    let cargo_toml = include_str!("../Cargo.toml");
+    assert!(
+        cargo_toml.contains("snubber = { path = \"../../../snubber\" }"),
+        "this gate resolves the snubber checkout as ../../../snubber; \
+         update the gate with the dependency"
+    );
+
+    let ci = include_str!("../../.github/workflows/ci.yml");
+    let pin_block = ci
+        .split_once("repository: Ar3ss12/snubber")
+        .expect("ci.yml must check out the snubber dependency")
+        .1;
+    let pin = pin_block
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("ref: "))
+        .expect("ci.yml must pin the snubber checkout to a ref")
+        .trim();
+    assert!(
+        pin.len() == 40 && pin.chars().all(|c| c.is_ascii_hexdigit()),
+        "the snubber pin must be a full 40-hex SHA: {pin}"
+    );
+
+    let checkout = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../snubber");
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&checkout)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("git is required to resolve the snubber checkout revision");
+    assert!(
+        out.status.success(),
+        "git rev-parse failed in {}",
+        checkout.display()
+    );
+    let head = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    assert_eq!(
+        head, pin,
+        "ci.yml pins snubber {pin} but this build resolves {head}; \
+         bump ref: in the same commit that adopts new crate API"
+    );
+}
