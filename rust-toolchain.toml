@@ -1,0 +1,16 @@
+# The toolchain the gates in AGENTS.md §0 are measured on.
+#
+# `channel` is a CHANNEL, not a version: local rustc 1.99.1 is what
+# `stable` resolves to today, and CI's `dtolnay/rust-toolchain@stable` step
+# installs that same channel — so pinning a version here would add a second
+# download for the same compiler and a toolchain the local host does not have.
+# A 1.70-shaped pin (snubber's MSRV) cannot build this tree at all:
+# `u64::is_multiple_of` is 1.87.
+#
+# `components` are what the gates need: `cargo clippy -- -D warnings` and
+# `cargo fmt --check`. `profile = "minimal"` keeps a fresh install to
+# rustc/cargo/rust-std plus those two.
+[toolchain]
+channel = "stable"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

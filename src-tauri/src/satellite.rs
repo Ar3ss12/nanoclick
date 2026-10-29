@@ -107,15 +107,23 @@ pub fn run_satellite_supervisor(label: &'static str, app: tauri::AppHandle) {
                 RestartWindow::new(5, 15),
             );
 
+            let mut spawn_failures: u64 = 0;
             loop {
                 let mut child = match spawn_satellite(label) {
                     Ok(c) => c,
                     Err(e) => {
+                        // 500 ms ±20 %, salted by label and attempt: the hud and
+                        // overlay supervisors must not respawn in lockstep.
+                        spawn_failures = spawn_failures.wrapping_add(1);
+                        let delay = crate::retry::retry_delay_ms(
+                            500,
+                            crate::retry::retry_salt(label) ^ spawn_failures,
+                        );
                         crate::debug_log_internal(
                             "error",
-                            &format!("[Satellite:{label}] spawn failed: {e}, retrying in 500ms"),
+                            &format!("[Satellite:{label}] spawn failed: {e}, retrying in {delay}ms"),
                         );
-                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        std::thread::sleep(std::time::Duration::from_millis(delay));
                         continue;
                     }
                 };

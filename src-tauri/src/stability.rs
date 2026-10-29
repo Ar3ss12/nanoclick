@@ -64,6 +64,17 @@ pub const RSS_RING_LEN: usize = 10;
 /// SHAPE (strictly rising, never resetting) once it has moved 120 MB.
 pub const MEMORY_GROWTH_TRIP_KB: u64 = 122_880;
 
+/// Handle count shares the RSS cadence: ten 30 s samples, same derivative
+/// rule. A leaked `HANDLE` (file, socket, event, desktop) is kernel state and
+/// never shows up in the working set, so the count needs its own window.
+pub const HANDLE_SAMPLE_MS: u64 = RSS_SAMPLE_MS;
+pub const HANDLE_RING_LEN: usize = 10;
+
+/// Growth over a full monotonic window that counts as a handle leak. An idle
+/// session holds a few hundred; 64 handles of steady climb across five
+/// minutes with no dip is a leak, not a burst (a burst dips).
+pub const HANDLE_GROWTH_TRIP: u64 = 64;
+
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 
 #[inline]
@@ -75,6 +86,7 @@ pub fn next_task_id() -> u64 {
 /// Called in-process during teardown or recovery, and by the supervisor on EOF.
 pub fn emergency_release_all_hardware() {
     crate::debug_log_internal("warn", "[Stability] Emergency hardware release triggered");
+    record_tape_event("hardware_arbiter", TAPE_HARDWARE_RELEASE);
     let backend = crate::platform::default_input_backend();
     backend.release_mouse_hold(crate::core::action::MouseButton::Left);
     backend.release_mouse_hold(crate::core::action::MouseButton::Right);
@@ -786,6 +798,9 @@ fn maintenance_loop() {
         MEMORY_GROWTH_TRIP_KB,
         RSS_SAMPLE_MS,
     );
+    let mut handles: snubber::HandleWatch<HANDLE_RING_LEN> =
+        snubber::HandleWatch::new(HANDLE_GROWTH_TRIP, HANDLE_SAMPLE_MS);
+    let mut handle_probe = process_handle_count;
     // One line per wedged body, not one per second.
     let mut reported_rollback_epoch = [u64::MAX; ROLLBACK_WATCHED.len()];
     // Edge state of the input desktop: `None` until the first sample, so a
@@ -877,6 +892,7 @@ fn maintenance_loop() {
                 last_reinstall_ms = now;
                 hotkey_node().report(snubber::FaultKind::Timeout, 1, 0);
                 if request_hook_reinstall() {
+                    record_tape_event("hotkey_hook", TAPE_HOOK_REINSTALL);
                     crate::debug_log_internal(
                         "error",
                         &format!(
@@ -1033,6 +1049,37 @@ fn maintenance_loop() {
                     }
                 }
             }
+
+            // ── Handles: kernel state the RSS watch cannot see ──────────
+            // A leaked handle is a few bytes of kernel state, not resident
+            // pages, so the working set stays flat while the handle table
+            // grows toward its limit. Same rule as memory — a full, strictly
+            // rising window past the mark — and the probe returning `None`
+            // records nothing, because a fabricated `0` would be a dip.
+            if tick.is_multiple_of(HANDLE_SAMPLE_MS / MAINTENANCE_TICK_MS) {
+                let verdict = handles.sample(&mut handle_probe);
+                if let Some(snubber::LeakClassification::Rising {
+                    growth_kb: growth,
+                    rate_kb_sec,
+                }) = verdict
+                {
+                    if !HANDLE_LEAK.swap(true, Ordering::AcqRel) {
+                        crate::debug_log_internal(
+                            "error",
+                            &format!(
+                                "[Stability] handle leak: count grew {growth} over {HANDLE_RING_LEN} samples with no drop (~{}handles/s, handles={})",
+                                rate_kb_sec.unwrap_or(0),
+                                handles.newest().unwrap_or(0)
+                            ),
+                        );
+                    }
+                } else if HANDLE_LEAK.swap(false, Ordering::AcqRel) {
+                    crate::debug_log_internal(
+                        "warn",
+                        "[Stability] handle leak cleared — the count stopped climbing",
+                    );
+                }
+            }
         }
 
         // ── 30 s: keep the cold snapshot files close to live ──────────
@@ -1067,10 +1114,21 @@ static MEMORY_LEVEL: AtomicU64 = AtomicU64::new(LEVEL_OK);
 /// unlike a pressure level, a leak does not clear when a run ends.
 static MEMORY_LEAK: AtomicBool = AtomicBool::new(false);
 
+/// The handle-count window tripped (`HANDLE_GROWTH_TRIP` over
+/// `HANDLE_RING_LEN` rising samples). A process leaking handles runs out of
+/// them, and the first thing to fail is often `SendInput`'s own resources, so
+/// this refuses a start exactly like `MEMORY_LEAK`.
+static HANDLE_LEAK: AtomicBool = AtomicBool::new(false);
+
 /// Test-only leak latch control (the gradient needs five real minutes).
 #[cfg(test)]
 pub(crate) fn test_latch_memory_leak(v: bool) {
     MEMORY_LEAK.store(v, Ordering::Release);
+}
+
+#[cfg(test)]
+pub(crate) fn test_latch_handle_leak(v: bool) {
+    HANDLE_LEAK.store(v, Ordering::Release);
 }
 const LEVEL_OK: u64 = 0;
 const LEVEL_SOFT: u64 = 1;
@@ -1174,6 +1232,9 @@ pub fn start_refusal() -> Option<&'static str> {
     if MEMORY_LEAK.load(Ordering::Acquire) {
         return Some("memory_leak");
     }
+    if HANDLE_LEAK.load(Ordering::Acquire) {
+        return Some("handle_leak");
+    }
     refusal_from(
         ROLLBACK_PENDING.load(Ordering::Acquire),
         ENGINE_STUCK.load(Ordering::Acquire),
@@ -1185,6 +1246,9 @@ pub fn start_refusal() -> Option<&'static str> {
 pub fn status_text_override(current: &str) -> Option<&'static str> {
     if current == "RUNNING" && MEMORY_LEAK.load(Ordering::Acquire) {
         return Some("MEMORY_LEAK");
+    }
+    if current == "RUNNING" && HANDLE_LEAK.load(Ordering::Acquire) {
+        return Some("HANDLE_LEAK");
     }
     override_from(
         current,
@@ -1202,6 +1266,9 @@ pub fn refusal_text() -> Option<&'static str> {
     }
     if MEMORY_LEAK.load(Ordering::Acquire) {
         return Some("MEMORY_LEAK");
+    }
+    if HANDLE_LEAK.load(Ordering::Acquire) {
+        return Some("HANDLE_LEAK");
     }
     label_from(
         ROLLBACK_PENDING.load(Ordering::Acquire),
@@ -1418,6 +1485,24 @@ fn process_rss_kb() -> Option<u64> {
     None
 }
 
+/// Open handles this process holds right now, or `None` when the read fails.
+///
+/// `None` is not zero: the handle watch records nothing on it, so a failed
+/// probe cannot look like the dip that clears the window.
+#[cfg(target_os = "windows")]
+fn process_handle_count() -> Option<u64> {
+    use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
+    let mut count = 0u32;
+    let ok = unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut count) };
+    ok.ok()?;
+    Some(u64::from(count))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn process_handle_count() -> Option<u64> {
+    None
+}
+
 /// The verdict is a DERIVATIVE, not a level: a working set that rises on every
 /// one of `RSS_RING_LEN` clean 30 s samples and never resets is a leak even at
 /// 2 MB per step. One sample below its predecessor (a GC, a tray collapse)
@@ -1456,6 +1541,7 @@ pub fn set_desktop_lost_handler(handler: DesktopLostHandler) {
 }
 
 fn notify_desktop_lost() {
+    record_tape_event("click_worker", TAPE_DESKTOP_LOST);
     let handler = DESKTOP_LOST_HANDLER
         .get_or_init(|| Mutex::new(None))
         .lock()
@@ -1809,9 +1895,11 @@ fn triage_path() -> std::path::PathBuf {
 }
 
 /// Flush one node's snapshot (crash-safe-ish: tmp + rename, no torn frame).
-pub fn flush_node_snapshot(node: &SnubberNode, generation: u64, file_name: &str) {
-    let bytes = node.snapshot_v1_in(generation).encode();
-    let path = std::env::temp_dir().join(file_name);
+fn flush_node_snapshot(name: &'static str, node: &SnubberNode, generation: u64) {
+    let mut snap = node.snapshot_v1_in(generation);
+    snap.tape = node_tape(name);
+    let bytes = snap.encode();
+    let path = snapshot_path(name);
     let tmp = path.with_extension("snub.tmp");
     if std::fs::write(&tmp, bytes).is_ok() {
         let _ = std::fs::rename(&tmp, &path);
@@ -1820,10 +1908,61 @@ pub fn flush_node_snapshot(node: &SnubberNode, generation: u64, file_name: &str)
 
 /// Flush every node (one 512 B frame each, `nanoclick_<role>_<name>.snub`).
 pub fn flush_all_snapshots(generation: u64) {
-    let role = process_role();
     for (name, node) in SNAPSHOT_NODES {
-        flush_node_snapshot(node(), generation, &snapshot_file_name(role, name));
+        flush_node_snapshot(name, node(), generation);
     }
+}
+
+// ── 3e. Flight tape: the last six cold events, per node ───────────────────
+// A frame's counters say HOW MANY; the tape says WHAT HAPPENED, in order,
+// and survives in the same 512 B frame (crate wire format v7). The crate
+// stores `(epoch, task_id, code)` and never interprets `code`, so the
+// vocabulary below is the app's own. Recording happens on cold edges only —
+// a release, a lost desktop, a hook reinstall — never on the click path,
+// where I28 forbids even an uncontended mutex.
+
+/// A hardware release ran (arbiter rollback, desktop loss, teardown).
+pub const TAPE_HARDWARE_RELEASE: u32 = 1;
+/// The input desktop was lost; every input owner was stopped.
+pub const TAPE_DESKTOP_LOST: u32 = 2;
+/// The hook pump froze and the LL hooks were re-registered.
+pub const TAPE_HOOK_REINSTALL: u32 = 3;
+
+type NodeTape = snubber::FlightTape<{ snubber::SNAPSHOT_TAPE_CAP }>;
+
+/// One tape per node name, in `SNAPSHOT_NODES` order. A single process-wide
+/// tape would put the hook's reinstall in the `config_save` frame; a tape per
+/// node keeps each frame's story local to the thing that crashed.
+static TAPE_BOARD: OnceLock<Vec<(&'static str, Mutex<NodeTape>)>> = OnceLock::new();
+
+fn tape_board() -> &'static [(&'static str, Mutex<NodeTape>)] {
+    TAPE_BOARD.get_or_init(|| {
+        SNAPSHOT_NODES
+            .iter()
+            .map(|(name, _)| (*name, Mutex::new(NodeTape::new())))
+            .collect()
+    })
+}
+
+/// Record one app event into a node's tape. `epoch` is the monotonic clock at
+/// the event and `task_id` stays 0: these events are process-scoped, and the
+/// frame already carries the node's task coordinates.
+pub fn record_tape_event(node: &str, code: u32) {
+    let Some((_, tape)) = tape_board().iter().find(|(name, _)| *name == node) else {
+        return;
+    };
+    if let Ok(mut tape) = tape.lock() {
+        tape.record_code(snubber::now_ms(), 0, code);
+    }
+}
+
+/// The node's tape, copied into the frame that is about to be encoded.
+fn node_tape(name: &str) -> NodeTape {
+    tape_board()
+        .iter()
+        .find(|(n, _)| *n == name)
+        .and_then(|(_, tape)| tape.lock().ok().map(|t| *t))
+        .unwrap_or_default()
 }
 
 /// Boot diagnosis: decode last run's frames, log one line per anomaly.
@@ -1912,7 +2051,11 @@ pub fn boot_snapshot_cycle() {
 fn snapshot_pairs() -> Vec<(&'static str, SnapshotV1)> {
     SNAPSHOT_NODES
         .iter()
-        .map(|(name, node)| (*name, node().snapshot_v1_in(SNAPSHOT_GENERATION)))
+        .map(|(name, node)| {
+            let mut snap = node().snapshot_v1_in(SNAPSHOT_GENERATION);
+            snap.tape = node_tape(name);
+            (*name, snap)
+        })
         .collect()
 }
 
@@ -2172,6 +2315,139 @@ mod tests {
             "growth must trip with a rate: {:?}",
             steep.classification()
         );
+    }
+
+    #[test]
+    fn test_handle_growth_names_a_leak_only_on_a_rising_window() {
+        // Global latch: same gate as every other reader of the refusal surface.
+        let _gate = crate::scheduler::test_toggle_gate().lock();
+        let mut watch: snubber::HandleWatch<HANDLE_RING_LEN> =
+            snubber::HandleWatch::new(HANDLE_GROWTH_TRIP, HANDLE_SAMPLE_MS);
+
+        // A short window is not an answer, however steep.
+        for step in 1..=HANDLE_RING_LEN {
+            assert_eq!(
+                watch.note(1_000 + step as u64 * 100).is_rising(),
+                step == HANDLE_RING_LEN,
+                "sample {step} of {HANDLE_RING_LEN}"
+            );
+        }
+        // A flat count keeps the window and reports no leak, forever.
+        let mut flat: snubber::HandleWatch<HANDLE_RING_LEN> =
+            snubber::HandleWatch::new(HANDLE_GROWTH_TRIP, HANDLE_SAMPLE_MS);
+        for _ in 0..HANDLE_RING_LEN * 2 {
+            assert!(!flat.note(4_000).is_rising());
+        }
+        // Monotone but under the mark: a shape, not a verdict.
+        let mut calm: snubber::HandleWatch<HANDLE_RING_LEN> =
+            snubber::HandleWatch::new(HANDLE_GROWTH_TRIP, HANDLE_SAMPLE_MS);
+        for step in 0..HANDLE_RING_LEN {
+            calm.note(1_000 + step as u64 * 4);
+        }
+        assert!(
+            matches!(
+                calm.classification(),
+                snubber::LeakClassification::Stable { growth_kb } if growth_kb < HANDLE_GROWTH_TRIP
+            ),
+            "36 handles over the window must not trip a 64-handle mark: {:?}",
+            calm.classification()
+        );
+        // Ten strictly rising samples past the mark: a leak with a rate.
+        assert!(
+            matches!(
+                watch.classification(),
+                snubber::LeakClassification::Rising {
+                    rate_kb_sec: Some(rate),
+                    ..
+                } if rate > 0
+            ),
+            "the rising window must trip with a rate: {:?}",
+            watch.classification()
+        );
+        // One closed handle clears the evidence — a healthy process oscillates.
+        assert!(!watch.note(1_500).is_rising());
+
+        // An unreadable probe records nothing and therefore names nothing.
+        let mut blind: snubber::HandleWatch<HANDLE_RING_LEN> =
+            snubber::HandleWatch::new(HANDLE_GROWTH_TRIP, HANDLE_SAMPLE_MS);
+        blind.note(1_000);
+        blind.note(2_000);
+        let mut fallible = || None;
+        assert_eq!(blind.sample(&mut fallible), None);
+        assert_eq!(blind.samples(), 2, "a failed read is not a sample");
+
+        // The latch is the reaction, not the log line: arm it and the start
+        // surface must name it, clear it and the surface must go quiet.
+        test_latch_handle_leak(true);
+        assert_eq!(start_refusal(), Some("handle_leak"));
+        assert_eq!(refusal_text(), Some("HANDLE_LEAK"));
+        assert_eq!(status_text_override("RUNNING"), Some("HANDLE_LEAK"));
+        assert_eq!(status_text_override("IDLE"), None);
+        test_latch_handle_leak(false);
+        assert_eq!(start_refusal(), None);
+        assert_eq!(refusal_text(), None);
+        assert_eq!(status_text_override("RUNNING"), None);
+    }
+
+    #[test]
+    fn test_flight_tape_rides_the_cold_frame_and_the_triage_card() {
+        // The exit artifact is what a crash is read from, so the tape has to
+        // be in the same 512 B frame and in the triage card — not in a log
+        // line the process may never flush.
+        record_tape_event("config_save", TAPE_DESKTOP_LOST);
+        record_tape_event("config_save", TAPE_HARDWARE_RELEASE);
+        let (_, snap) = snapshot_pairs()
+            .into_iter()
+            .find(|(name, _)| *name == "config_save")
+            .expect("config_save is a snapshot node");
+        assert_eq!(snap.tape.len(), 2, "the tape must carry the app's events");
+        assert_eq!(
+            snap.tape.newest().map(|e| e.code),
+            Some(TAPE_HARDWARE_RELEASE),
+            "the newest event is the last one recorded"
+        );
+
+        // Encode -> decode keeps the cells: the tape is in the frame, not
+        // beside it, so a crashed run leaves it on disk.
+        let bytes = snap.encode();
+        let back = snubber::SnapshotV1::decode(&bytes).expect("our own frame decodes");
+        assert_eq!(back.tape, snap.tape, "the tape must ride the cold frame");
+
+        let mut out = String::new();
+        snubber::write_triage(&mut out, "config_save", &back).expect("card writes");
+        assert!(
+            out.contains("  tape     events=2 last="),
+            "the triage card must name the tape: {out}"
+        );
+
+        // The exit path must build the card from the same paired snapshot;
+        // a plain `snapshot_v1_in` there would silently drop the tape.
+        let src = include_str!("stability.rs");
+        let start = src
+            .find("pub fn shutdown_snapshot_cycle()")
+            .expect("shutdown_snapshot_cycle exists");
+        let body = &src[start..];
+        let end = body
+            .find("/// Triage artifact schema version")
+            .expect("end of shutdown_snapshot_cycle");
+        assert!(
+            body[..end].contains("snapshot_pairs()"),
+            "the exit triage must use the tape-carrying snapshots"
+        );
+    }
+
+    #[test]
+    fn test_handle_probe_reads_a_real_count_or_says_nothing() {
+        // The probe is the only part of the detector that touches the OS:
+        // it must answer with a live count on Windows and `None` elsewhere,
+        // never a fabricated zero.
+        match process_handle_count() {
+            Some(count) => assert!(count > 0, "a running process holds handles"),
+            None => assert!(
+                !cfg!(target_os = "windows"),
+                "GetProcessHandleCount must answer on Windows"
+            ),
+        }
     }
 
     #[test]

@@ -27,6 +27,7 @@ mod overlay;
 mod persistence;
 pub mod platform;
 mod recorder;
+mod retry;
 pub mod satellite;
 mod scheduler;
 pub mod stability;
@@ -2012,7 +2013,7 @@ fn toggle_hud_window_inner(app: AppHandle, show: bool) -> Result<overlay::Satell
         overlay::bump_satellite_gen("hud");
         overlay::ensure_satellite(&app, "hud")?;
         // Latch is stamped inside ensure_satellite for EVERY build path
-        // (fresh, race survivor, 60 ms retry): no branch may skip it.
+        // (fresh, race survivor, jittered retry): no branch may skip it.
         if let Some(win) = app.get_webview_window("hud") {
             let _ = win.set_ignore_cursor_events(true);
             // Fresh WebView: hidden until hud_ready() fires after DOM render

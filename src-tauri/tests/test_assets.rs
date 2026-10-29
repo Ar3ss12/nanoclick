@@ -3931,6 +3931,35 @@ fn test_shutdown_is_idempotent_and_stops_the_backend_before_the_windows() {
         "hide() leaves the main window (and six WebView2 helpers) alive until the \
          process image disappears — measured: hiding frees nothing"
     );
+
+    // The order, front to back. Teardown is nine owner actions plus the exit
+    // call: no node registry, no rank table — `snubber::RankedSet` orders
+    // `&SnubberNode`s, and none of these steps is a node (a tray icon, an
+    // owner's stop, a file write, a window destroy, a process exit). So the
+    // sequence itself is the contract and it is pinned as a sequence.
+    let ordered = [
+        "persist_window_visibility(app, was_visible);",
+        "stop_tray();",
+        "state.scheduler.set_active(false, None);",
+        "platform::default_input_backend_hotkey_stop();",
+        "platform::stop_recorder_hooks();",
+        "platform::windows::stop_foreground_watch();",
+        "exec.stop();",
+        "refresh_last_good_snapshot",
+        "crate::overlay::destroy_satellite(app, label);",
+        "emergency_release_all_hardware();",
+        "shutdown_snapshot_cycle();",
+        "input_guardian::mark_clean_exit();",
+        "app.exit(0);",
+    ];
+    let mut cursor = 0;
+    for step in ordered {
+        let at = shut[cursor..]
+            .find(step)
+            .map(|i| i + cursor)
+            .unwrap_or_else(|| panic!("teardown step `{step}` is missing or out of order"));
+        cursor = at + step.len();
+    }
 }
 
 /// Nothing may bring the window back once the user closed it to the tray.

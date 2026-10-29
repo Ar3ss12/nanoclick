@@ -402,8 +402,12 @@ pub fn ensure_satellite(app: &AppHandle, label: &str) -> Result<tauri::WebviewWi
     });
     if result.is_err() {
         // Asynchronous teardown lag: on Windows, a window destroyed immediately before
-        // may take 50-100ms for COM to finish cleaning up. Retry once after a brief rest.
-        std::thread::sleep(std::time::Duration::from_millis(60));
+        // may take 50-100ms for COM to finish cleaning up. Retry once after a rest —
+        // 90 ms ±20 % (72-108 ms), whose low edge stays above that 50 ms floor. The
+        // salt is the label, so a hud+overlay retry does not wake on one millisecond
+        // and collide on the one-slot bulkhead.
+        let delay = crate::retry::retry_delay_ms(90, crate::retry::retry_salt(label));
+        std::thread::sleep(std::time::Duration::from_millis(delay));
         result = app.get_webview_window(label).map(Ok).unwrap_or_else(|| {
             build_satellite(app, label).or_else(|err2| app.get_webview_window(label).ok_or(err2))
         });
@@ -558,7 +562,7 @@ fn toggle_overlay_inner(app: AppHandle, show: bool) -> Result<SatelliteToggle, S
         bump_satellite_gen("overlay");
         let win = ensure_satellite(&app, "overlay")?;
         // Latch is stamped inside ensure_satellite for EVERY build path
-        // (fresh, race survivor, 60 ms retry): no branch may skip it.
+        // (fresh, race survivor, jittered retry): no branch may skip it.
         let _ = win.set_ignore_cursor_events(true);
         // Fresh WebView: DON'T show yet — overlay_ready() shows it once the
         // transparent DOM has rendered (Zero-Flash, no DWM white rectangle).

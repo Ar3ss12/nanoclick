@@ -171,7 +171,7 @@ impl ExecutorHandle {
         let node = crate::stability::macro_node();
         // Probe admission: the slot is released at entry (macro serialization
         // is `is_running`), while the rollback stays armed for implicit drop.
-        let guard: snubber::ErasedGuard = match node.probe_erased_auto(|| {
+        let guard: snubber::ErasedGuard<snubber::ProbeSlot> = match node.probe_erased_auto(|| {
             crate::stability::emergency_release_all_hardware();
         }) {
             Ok(g) => g,

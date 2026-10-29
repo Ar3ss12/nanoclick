@@ -4,6 +4,55 @@ All notable changes to NanoClick. Sizes, timings and RAM figures are measured
 and carry the command that re-derives them. Releases before 1.1.1 predate this
 file.
 
+## 1.6.0 (unreleased)
+
+Adoption of the `snubber` 0.8 surface: the handle table gets its own derivative
+watch, the cold frame learns WHAT happened, a refused retry is spread instead
+of fixed, and the compiler is pinned at the repository root.
+
+Suite green: **516 tests** (408 lib + 103 asset tripwires + 3 daemon handshake
++ 2 guardian e2e), clippy `-D warnings`, abort-shaped build (`ci-abort`),
+JS gate 10/10 scripts.
+
+### Added
+
+- **Handle-leak detector** (`stability::HANDLE_RING_LEN` /
+  `snubber::HandleWatch<10>`): `GetProcessHandleCount` is sampled every 30 s,
+  the same cadence as RSS, and only a full, strictly rising window that gained
+  64 handles latches `HANDLE_LEAK` (`handle_leak` / `HANDLE_LEAK`, Start
+  refused, cleared when the count stops climbing). A leaked `HANDLE` is kernel
+  state and never shows up in the working set, so the RSS watch cannot see it.
+  A probe that fails returns `None` and records nothing — a fabricated `0`
+  would read as the dip that disarms the detector.
+- **Cold event tape** (`stability::record_tape_event`): a hardware release, a
+  lost input desktop and a hook re-install are recorded into the owning node's
+  six-cell `FlightTape`, which rides in that node's 512 B `.snub` frame (crate
+  wire v7) and in its triage card. Cold edges only — the click path never
+  takes the tape lock.
+- **Jittered retry** (`retry::retry_delay_ms`): the satellite build retry
+  (90 ms ±20 %, band 72–108 ms, above the 50 ms COM teardown floor) and the
+  OOP supervisor respawn (500 ms ±20 %) are salted by label, so a hud+overlay
+  retry no longer wakes on the same millisecond and collides on the one-slot
+  bulkhead. Deterministic: the same salt always yields the same delay.
+- **`rust-toolchain.toml`** at the repository root: `stable` (the channel CI
+  installs) with `clippy` + `rustfmt`, `profile = "minimal"`.
+
+### Changed
+
+- **Teardown order is pinned front to back.** `shutdown_application` runs nine
+  owner actions plus the exit call; the existing tripwire now asserts the
+  whole sequence, not two anchors. `snubber::RankedSet` was considered and not
+  adopted: it ranks `&SnubberNode` stops, and none of these steps is a node.
+- `snubber` is consumed from the local `../../../snubber` path at 0.8.0
+  (**unpublished**); the CI checkout pin stands at `228d6f3` (the 0.8.0 API
+  the tree calls) until 0.8.0 is on crates.io.
+
+### Fixed
+
+- `ErasedGuard` type annotations at `core/executor.rs` and `scheduler.rs`
+  (`ErasedGuard<ProbeSlot>`), the only two call sites the 0.8 typed slots
+  broke.
+
 ## 1.5.0 (unreleased)
 
 A hardware-ownership release: one token now gates every `SendInput` path, RSS

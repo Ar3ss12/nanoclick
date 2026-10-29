@@ -1788,7 +1788,7 @@ impl ClickScheduler {
             let node = crate::stability::click_node();
             let (conduit, _steering_handle) = crate::stability::create_worker_steering();
 
-            let guard: snubber::ErasedGuard = match node.probe_erased_auto(|| {
+            let guard: snubber::ErasedGuard<snubber::ProbeSlot> = match node.probe_erased_auto(|| {
                 crate::stability::emergency_release_all_hardware();
             }) {
                 Ok(g) => g,
