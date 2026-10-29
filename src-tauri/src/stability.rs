@@ -88,14 +88,16 @@ pub fn emergency_release_all_hardware() {
 // physical gate (a node admission), not a flag someone remembers to check.
 //
 // Two layers, both required:
+//   * one process-wide claim word (`INPUT_CLAIM`) — a click run and a macro
+//     playback are admitted by different arbiters, so their exclusion has to be
+//     one atomic: a `compare_exchange` decides every cross-class race, which a
+//     check-then-set on separate flags cannot (it leaves a window where both
+//     observe a free slot and both write their own flag);
 //   * a per-arbiter `hardware_arbiter` node with `max_in_flight(1)` — the slot
 //     is a HOLDING erased guard, booked for the whole run, so a second start on
-//     the same owner is refused with `BulkheadFull` while the first lives;
-//   * a process-wide class latch (`CLICK_RUN_ACTIVE` / `MACRO_RUN_ACTIVE`) —
-//     the cross-subsystem exclusion a node cannot express, because a click run
-//     and a macro playback are admitted by different arbiters.
-// A real run has exactly one click scheduler, so the class latch *is* the
-// single slot for click-vs-macro. The release itself is a
+//     the same owner is refused with `BulkheadFull` while the first lives.
+// The claim counts click leases (the clicker's own exclusivity is the holding
+// slot) and reserves one bit for the macro lease. The release itself is a
 // `Protected<(), fn()>`: commit disarms it, dropping it runs
 // `emergency_release_all_hardware`. Field order matters — the hardware is
 // released before the slot admits a rival.
@@ -115,23 +117,60 @@ impl HardOwner {
         }
     }
 
-    fn latch(self) -> &'static AtomicBool {
-        match self {
-            HardOwner::ClickRun => &CLICK_RUN_ACTIVE,
-            HardOwner::Macro => &MACRO_RUN_ACTIVE,
+    /// Claim the class on the one shared word. The load and the write are a
+    /// single `compare_exchange`: a rival that wins the race first is observed
+    /// by this call, and a rival that loses is refused by its own.
+    fn claim(self) -> Result<(), HardwareBusy> {
+        loop {
+            let word = INPUT_CLAIM.load(Ordering::Acquire);
+            let macro_held = word & MACRO_CLAIM_BIT != 0;
+            let next = match self {
+                HardOwner::ClickRun => {
+                    if macro_held {
+                        return Err(HardwareBusy::Held { owner: HardOwner::Macro.name() });
+                    }
+                    if word >= CLICK_CLAIM_MAX {
+                        return Err(HardwareBusy::Refused);
+                    }
+                    word + 1
+                }
+                HardOwner::Macro => {
+                    if macro_held {
+                        return Err(HardwareBusy::Held { owner: HardOwner::Macro.name() });
+                    }
+                    if word != 0 {
+                        return Err(HardwareBusy::Held { owner: HardOwner::ClickRun.name() });
+                    }
+                    MACRO_CLAIM_BIT
+                }
+            };
+            if INPUT_CLAIM
+                .compare_exchange_weak(word, next, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return Ok(());
+            }
         }
     }
 
-    fn rival(self) -> HardOwner {
-        match self {
-            HardOwner::ClickRun => HardOwner::Macro,
-            HardOwner::Macro => HardOwner::ClickRun,
+    /// Give the class back. Called from `OwnerFlag::drop`, so a panic inside a
+    /// run frees the claim on the way out.
+    fn release(self) {
+        if self == HardOwner::Macro {
+            INPUT_CLAIM.fetch_and(!MACRO_CLAIM_BIT, Ordering::Release);
+        } else {
+            INPUT_CLAIM.fetch_sub(1, Ordering::Release);
         }
     }
 }
 
-static CLICK_RUN_ACTIVE: AtomicBool = AtomicBool::new(false);
-static MACRO_RUN_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// The whole cross-subsystem arbiter, in one word: low bits count live click
+/// leases, the top bit is the macro lease. One `compare_exchange` on this word
+/// is what makes "both owners at once" unrepresentable rather than merely
+/// unlikely.
+static INPUT_CLAIM: AtomicU32 = AtomicU32::new(0);
+const MACRO_CLAIM_BIT: u32 = 1 << 31;
+const CLICK_CLAIM_MAX: u32 = MACRO_CLAIM_BIT - 1;
 
 /// Rollback type of the release guard. A plain `fn()` keeps `Protected` a
 /// nameable concrete type instead of an erased box.
@@ -149,13 +188,13 @@ pub struct HardwareToken {
     _owner: OwnerFlag,
 }
 
-/// Clears the class latch on every exit path, including an implicit drop after
-/// a panic inside a run.
+/// Releases the claim on every exit path, including an implicit drop after a
+/// panic inside a run.
 struct OwnerFlag(HardOwner);
 
 impl Drop for OwnerFlag {
     fn drop(&mut self) {
-        self.0.latch().store(false, Ordering::Release);
+        self.0.release();
     }
 }
 
@@ -203,17 +242,19 @@ impl HardwareArbiter {
 
     /// Take the hardware lease for `owner`, or name who holds it.
     pub fn acquire(&self, owner: HardOwner) -> Result<HardwareToken, HardwareBusy> {
-        let rival = owner.rival();
-        if rival.latch().load(Ordering::Acquire) {
-            return Err(HardwareBusy::Held {
-                owner: rival.name(),
-            });
-        }
+        // Claim first: once this returns, no rival can be admitted, so an
+        // admission that follows is the only failure path and it gives the
+        // claim straight back.
+        owner.claim()?;
         let seq = next_task_id();
         let slot = match self.node.enter_erased_holding_auto(|| {}) {
             Ok(g) => g,
-            Err(EnterError::BulkheadFull) => return Err(HardwareBusy::Refused),
+            Err(EnterError::BulkheadFull) => {
+                owner.release();
+                return Err(HardwareBusy::Refused);
+            }
             Err(e) => {
+                owner.release();
                 crate::debug_log_internal(
                     "error",
                     &format!("[Stability] hardware arbiter refused admission: {e:?}"),
@@ -221,18 +262,6 @@ impl HardwareArbiter {
                 return Err(HardwareBusy::Refused);
             }
         };
-        owner.latch().store(true, Ordering::Release);
-        // A rival that claimed between the check and the admit: the click side
-        // backs off, so the race always resolves in favour of a macro playback.
-        // The click worker has not been spawned yet, so backing off here means
-        // it never touches the mouse.
-        if owner == HardOwner::ClickRun && rival.latch().load(Ordering::Acquire) {
-            CLICK_RUN_ACTIVE.store(false, Ordering::Release);
-            slot.abort("hardware_busy");
-            return Err(HardwareBusy::Held {
-                owner: rival.name(),
-            });
-        }
         let release = snubber::SnubberGuard::new(seq, seq, emergency_release_all_hardware as HardwareRollback);
         Ok(HardwareToken {
             release: snubber::Protected::new((), release),
@@ -252,7 +281,7 @@ pub fn macro_arbiter() -> &'static HardwareArbiter {
 /// Is a macro playback holding the input hardware right now? Lock-free: the
 /// hotkey thread's refusal check reads this without touching the node.
 pub fn hardware_held_by_macro() -> bool {
-    MACRO_RUN_ACTIVE.load(Ordering::Acquire)
+    INPUT_CLAIM.load(Ordering::Acquire) & MACRO_CLAIM_BIT != 0
 }
 
 // ── 2. Snubber nodes (bulkheads + breakers + telemetry) ─────────────────────
@@ -2001,10 +2030,10 @@ mod tests {
     use std::sync::Arc;
 
     /// The arbiter is the only admission path to hardware: two leases at once
-    /// must be impossible, and the latch it publishes is what the lock-free
+    /// must be impossible, and the claim it publishes is what the lock-free
     /// refusal surface reads.
     ///
-    /// Serialized on the scheduler's toggle gate because the class latch is
+    /// Serialized on the scheduler's toggle gate because the claim word is
     /// process-wide and every `set_active(true)` test takes it too.
     #[test]
     fn test_hardware_arbiter_admits_one_lease_and_names_the_holder() {
@@ -2034,6 +2063,55 @@ mod tests {
         // The latch came home: the next run can take it.
         let second = click.acquire(HardOwner::ClickRun).expect("slot freed by commit");
         second.commit();
+    }
+
+    /// The cross-class exclusion is one word and one CAS. Two flags read and
+    /// then written separately leave a window where both owners observe a free
+    /// slot and both claim it — the exact interleaving the arbiter exists to
+    /// make impossible.
+    #[test]
+    fn the_input_claim_is_a_single_indivisible_word() {
+        let src = include_str!("stability.rs");
+        assert!(
+            src.contains("static INPUT_CLAIM: AtomicU32 = AtomicU32::new(0);"),
+            "the claim must live in one atomic word"
+        );
+        // Split so this assertion's own text is not the match it looks for.
+        let old_click = concat!("CLICK_RUN", "_ACTIVE");
+        let old_macro = concat!("MACRO_RUN", "_ACTIVE");
+        assert!(
+            !src.contains(old_click) && !src.contains(old_macro),
+            "two class booleans are the check-then-set design: a rival can be \
+             admitted between the load and the store"
+        );
+
+        let start = src.find("    fn claim(self)").expect("claim not found");
+        let end = src[start..]
+            .find("    fn release(self)")
+            .map(|i| i + start)
+            .expect("end of claim not found");
+        let body = &src[start..end];
+        assert!(
+            body.contains("compare_exchange_weak") && !body.contains(".store("),
+            "the claim decision and the claim write must be the same instruction"
+        );
+
+        let acquire = src
+            .find("    pub fn acquire(&self, owner: HardOwner)")
+            .expect("acquire not found");
+        let claim = src[acquire..]
+            .find("owner.claim()?")
+            .map(|i| i + acquire)
+            .expect("acquire must claim the word");
+        let admit = src[acquire..]
+            .find("enter_erased_holding_auto")
+            .map(|i| i + acquire)
+            .expect("acquire must take a node slot");
+        assert!(
+            claim < admit,
+            "the claim precedes the admission, so a slot refusal cannot leave \
+             a rival a window between the two"
+        );
     }
 
     #[test]

@@ -317,8 +317,8 @@ pub struct ClickScheduler {
     /// it at the same time, and only the arbiter can hand it out.
     hardware: Arc<Mutex<Option<crate::stability::HardwareToken>>>,
     /// This scheduler's admission gate for that lease (one slot, a real
-    /// `SendInput` release on abort). A real run has exactly one scheduler, so
-    /// this node plus the class latch is the whole process-wide resource.
+    /// `SendInput` release on abort). The cross-class gate is the arbiter's
+    /// `INPUT_CLAIM` word, so the node is the per-run ledger, not the lock.
     hardware_arbiter: crate::stability::HardwareArbiter,
 }
 

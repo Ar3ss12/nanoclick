@@ -9,18 +9,22 @@ file.
 A hardware-ownership release: one token now gates every `SendInput` path, RSS
 is judged by its derivative instead of a ceiling, a secure desktop stops the
 run instead of swallowing clicks, and a frozen hook pump re-registers itself.
-Suite green: **508 tests** (401 lib + 102 asset tripwires + 3 daemon handshake
+Suite green: **509 tests** (402 lib + 102 asset tripwires + 3 daemon handshake
 + 2 guardian e2e), clippy `-D warnings`, JS gate 10/10 scripts.
 
 ### Added
 
 - **Hardware arbiter** (`stability::HardwareArbiter`, `HardwareToken`): the
   click run and macro playback can no longer inject at the same time. The
-  token is a real admission (a one-slot `hardware_arbiter` node) plus a
-  process-wide class latch, so a Start during playback is refused at entry
-  with `hardware_busy` / `HARDWARE_BUSY` instead of interleaving two owners of
-  one cursor. Dropping a token (panic, `?`, generator unwind) runs the same
-  `SendInput` release and then frees the slot, in that order.
+  cross-class gate is a single atomic word (`INPUT_CLAIM`: click leases
+  counted in the low bits, the macro lease in the top bit) won by one
+  `compare_exchange`, so "both owners at once" is unrepresentable rather than
+  a race the losing side might notice; the token also holds a one-slot
+  `hardware_arbiter` admission for the ledger. A Start during playback is
+  refused at entry with `hardware_busy` / `HARDWARE_BUSY` instead of
+  interleaving two owners of one cursor. Dropping a token (panic, `?`,
+  generator unwind) runs the same `SendInput` release, then frees the slot,
+  then gives the claim back, in that order.
 - **Memory-leak detector by derivative**: RSS is sampled every 30 s into a
   10-sample ring (5 minutes). Ten strictly rising samples that add up to
   ≥ 120 MB latch `MEMORY_LEAK`, refuse Start and emit
