@@ -9,7 +9,7 @@ file.
 A hardware-ownership release: one token now gates every `SendInput` path, RSS
 is judged by its derivative instead of a ceiling, a secure desktop stops the
 run instead of swallowing clicks, and a frozen hook pump re-registers itself.
-Suite green: **511 tests** (404 lib + 102 asset tripwires + 3 daemon handshake
+Suite green: **512 tests** (404 lib + 103 asset tripwires + 3 daemon handshake
 + 2 guardian e2e), clippy `-D warnings`, JS gate 10/10 scripts.
 
 ### Added
@@ -92,6 +92,15 @@ Suite green: **511 tests** (404 lib + 102 asset tripwires + 3 daemon handshake
   `MEMORY_GROWTH_TRIP_KB`). The migration added a flat-window case to the
   crate's tests: an equal neighbour provably clears the window, which the
   local copy asserted nowhere.
+- **`snubber` 0.7.0 → 0.7.1: the memory verdict is one crate value.** The
+  tick now feeds `snubber::MemoryTrend<10>` (level + ring + trip mark +
+  sampling interval) instead of `LeakWatch` plus a local `growth_crosses`
+  call, and reads the trend from `classification()` rather than the
+  `sample()` verdict, so a `Soft` level cannot mask a rising window. The
+  leak log now names the shape and the rate (`~Nkb/s`) from the crate's
+  `LeakClassification::Rising`. Same latch, same clearing rule: a window
+  that stops rising still clears `MEMORY_LEAK`. CI's snubber pin moves to
+  the 0.7.1 release commit (9a73db7) in the same change.
 
 ## 1.4.0 (2026-10-29)
 

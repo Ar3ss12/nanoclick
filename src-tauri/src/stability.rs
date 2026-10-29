@@ -780,7 +780,12 @@ fn maintenance_loop() {
     let mut last_cpu = process_cpu_ms();
     let mut click_cpu = ThreadCpuSampler::new();
     let mut hook_cpu = ThreadCpuSampler::new();
-    let mut rss = RssWindow::new();
+    let mut rss = RssWindow::new(
+        MEMORY_SOFT_KB,
+        MEMORY_HARD_KB,
+        MEMORY_GROWTH_TRIP_KB,
+        RSS_SAMPLE_MS,
+    );
     // One line per wedged body, not one per second.
     let mut reported_rollback_epoch = [u64::MAX; ROLLBACK_WATCHED.len()];
     // Edge state of the input desktop: `None` until the first sample, so a
@@ -979,45 +984,51 @@ fn maintenance_loop() {
                 // a strictly rising working set. Sample every 30 s and name
                 // the gradient, not the ceiling.
                 if tick.is_multiple_of(RSS_SAMPLE_MS / MAINTENANCE_TICK_MS) {
-                    match rss.push(used_kb) {
-                        Some(growth) if leak_trips(growth) => {
-                            if !MEMORY_LEAK.swap(true, Ordering::AcqRel) {
-                                crate::debug_log_internal(
-                                    "error",
-                                    &format!(
-                                        "[Stability] memory leak: rss grew {growth}kb over {RSS_RING_LEN} samples with no drop (rss={used_kb}kb)"
-                                    ),
-                                );
-                            }
-                            let hit = snubber::Anomaly {
-                                kind: snubber::AnomalyKind::MemoryGrowth,
-                                node: "click_worker",
-                                pct: 100,
-                                count: used_kb,
-                            };
+                    // `sample` feeds both halves; the verdict is read from
+                    // `classification()` so a Soft level cannot mask a rising
+                    // trend (the level stays the node's admission gate).
+                    let _ = rss.sample(used_kb);
+                    if let snubber::LeakClassification::Rising {
+                        growth_kb,
+                        rate_kb_sec,
+                    } = rss.classification()
+                    {
+                        let rate_kb_sec = rate_kb_sec.unwrap_or(0);
+                        if !MEMORY_LEAK.swap(true, Ordering::AcqRel) {
                             crate::debug_log_internal(
-                                "warn",
+                                "error",
                                 &format!(
-                                    "[Stability] {}",
-                                    snubber::diagnostic_line(
-                                        "click_worker",
-                                        &hit,
-                                        &click_node().snapshot_v1()
-                                    )
+                                    "[Stability] memory leak: rss grew {growth_kb}kb over {RSS_RING_LEN} samples with no drop (~{rate_kb_sec}kb/s, rss={used_kb}kb)"
                                 ),
                             );
                         }
-                        _ => {
-                            // The verdict is the derivative, so it has to be
-                            // revocable: a working set that stopped climbing
-                            // (or dipped, which clears the window) is not a
-                            // leak, and a permanent refusal would be a lie.
-                            if MEMORY_LEAK.swap(false, Ordering::AcqRel) {
-                                crate::debug_log_internal(
-                                    "warn",
-                                    "[Stability] memory leak cleared — the working set stopped climbing",
-                                );
-                            }
+                        let hit = snubber::Anomaly {
+                            kind: snubber::AnomalyKind::MemoryGrowth,
+                            node: "click_worker",
+                            pct: 100,
+                            count: used_kb,
+                        };
+                        crate::debug_log_internal(
+                            "warn",
+                            &format!(
+                                "[Stability] {}",
+                                snubber::diagnostic_line(
+                                    "click_worker",
+                                    &hit,
+                                    &click_node().snapshot_v1()
+                                )
+                            ),
+                        );
+                    } else {
+                        // The verdict is the derivative, so it has to be
+                        // revocable: a working set that stopped climbing
+                        // (or dipped, which clears the window) is not a
+                        // leak, and a permanent refusal would be a lie.
+                        if MEMORY_LEAK.swap(false, Ordering::AcqRel) {
+                            crate::debug_log_internal(
+                                "warn",
+                                "[Stability] memory leak cleared — the working set stopped climbing",
+                            );
                         }
                     }
                 }
@@ -1411,14 +1422,10 @@ fn process_rss_kb() -> Option<u64> {
 /// one of `RSS_RING_LEN` clean 30 s samples and never resets is a leak even at
 /// 2 MB per step. One sample below its predecessor (a GC, a tray collapse)
 /// clears the window — a healthy process is allowed to oscillate. The rule
-/// lives in the crate (`snubber::LeakWatch`); only the window length and the
-/// trip mark are ours.
-type RssWindow = snubber::LeakWatch<RSS_RING_LEN>;
-
-/// Does a monotonic window that grew this much name a leak?
-fn leak_trips(growth_kb: u64) -> bool {
-    snubber::growth_crosses(growth_kb, MEMORY_GROWTH_TRIP_KB)
-}
+/// lives in the crate (`snubber::MemoryTrend`): ring, shape, trip-mark
+/// comparison and rate all come from it; the app owns only the limits, the
+/// window length and the sampling interval.
+type RssWindow = snubber::MemoryTrend<RSS_RING_LEN>;
 
 /// A hard stall class may latch a refusal ONLY when this tick has a real
 /// thread-scoped CPU sample. The process-wide delta is a diagnostic fallback:
@@ -2098,36 +2105,73 @@ mod tests {
         assert_eq!(status_text_override("RUNNING"), None);
     }
 
+    /// The app's real limits and cadence, with the trip mark under test.
+    fn trend_with_trip(trip_kb: u64) -> RssWindow {
+        RssWindow::new(MEMORY_SOFT_KB, MEMORY_HARD_KB, trip_kb, RSS_SAMPLE_MS)
+    }
+
     #[test]
     fn test_rss_gradient_names_only_a_full_monotonic_window() {
-        let mut ring = RssWindow::new();
+        // Trip mark of 1 KiB so the window SHAPE is what the test reads.
+        let mut ring = trend_with_trip(1);
         // A short window is not an answer, however steep.
         for kb in [100u64, 200, 300, 400, 500, 600, 700, 800, 900] {
-            assert_eq!(ring.push(kb), None);
+            let _ = ring.sample(kb);
+            assert!(!ring.classification().is_rising());
         }
         // Ten rising samples: growth is newest - oldest.
-        assert_eq!(ring.push(1_000), Some(900));
+        let _ = ring.sample(1_000);
+        assert!(
+            matches!(
+                ring.classification(),
+                snubber::LeakClassification::Rising {
+                    growth_kb: 900,
+                    ..
+                }
+            ),
+            "ten rising samples name the gradient: {:?}",
+            ring.classification()
+        );
         // A single dip clears the window — a healthy process may oscillate.
-        assert_eq!(ring.push(950), None);
-        assert_eq!(ring.push(960), None);
+        let _ = ring.sample(950);
+        assert!(!ring.classification().is_rising());
+        assert!(matches!(
+            ring.classification(),
+            snubber::LeakClassification::Sawtooth
+        ));
     }
 
     #[test]
     fn test_memory_leak_trip_mark_is_a_growth_not_a_level() {
         // The user-visible contract: 2 MB per step is monotone but not yet a
         // leak verdict; the mark is 120 MB of growth, not 120 MB of RSS.
-        assert!(!leak_trips(9 * 2 * 1024));
-        assert!(!leak_trips(MEMORY_GROWTH_TRIP_KB - 1));
-        assert!(leak_trips(MEMORY_GROWTH_TRIP_KB));
         assert_eq!(MEMORY_GROWTH_TRIP_KB, 120 * 1024);
-        // Ten 15 MB steps cross the mark on the tenth sample.
-        let mut ring = RssWindow::new();
-        let mut last = None;
+        // Ten 2 MB steps: 18 MB of growth is a shape, not a verdict.
+        let mut gentle = trend_with_trip(MEMORY_GROWTH_TRIP_KB);
         for step in 1..=RSS_RING_LEN {
-            last = ring.push(step as u64 * 15 * 1024);
+            let _ = gentle.sample(step as u64 * 2 * 1024);
         }
-        let growth = last.expect("ten rising samples are a window");
-        assert!(leak_trips(growth), "growth={growth}kb must trip");
+        assert!(
+            !gentle.classification().is_rising(),
+            "monotone but under the mark: {:?}",
+            gentle.classification()
+        );
+        // Ten 15 MB steps cross the mark on the tenth sample (135 MB).
+        let mut steep = trend_with_trip(MEMORY_GROWTH_TRIP_KB);
+        for step in 1..=RSS_RING_LEN {
+            let _ = steep.sample(step as u64 * 15 * 1024);
+        }
+        assert!(
+            matches!(
+                steep.classification(),
+                snubber::LeakClassification::Rising {
+                    growth_kb,
+                    rate_kb_sec: Some(rate),
+                } if growth_kb == 135 * 1024 && rate > 0
+            ),
+            "growth must trip with a rate: {:?}",
+            steep.classification()
+        );
     }
 
     #[test]

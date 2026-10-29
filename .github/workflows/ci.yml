@@ -56,7 +56,7 @@ jobs:
           repository: Ar3ss12/snubber
           # Full SHA required: actions/checkout treats a short ref as a
           # branch name and the git fetch dies (measured: first CI run).
-          # This SHA is snubber 0.7.0 — the version must match Cargo.lock, or
+          # This SHA is snubber 0.7.1 — the version must match Cargo.lock, or
           # every `--locked` step dies on a version mismatch before compiling.
           # It must ALSO carry every snubber API this tree calls: this is a
           # separate checkout from the local `../../../snubber` path dep, so a
@@ -66,7 +66,7 @@ jobs:
           # the same commit that starts using new crate API;
           # `test_ci_pins_the_snubber_revision_the_build_resolves` holds the
           # pin to the checkout the local build resolves.
-          ref: 4cbc7b5e9e10c5fde3b8692d232781713313b04f
+          ref: 9a73db7fbcdbde29d03fb4c70e799a4ddd5d6d81
           path: snubber
 
       - name: Stage snubber where the path dependency resolves
