@@ -59,6 +59,7 @@ Fast, unkillable, and built with pure Rust. No Electron, no adware, no backgroun
 * **Human, not robotic:** Timing mimics real finger muscles with subtle micro-jitter and spatial variance.
 * **Zero game stutter:** Click timing math runs on a dedicated worker thread and costs nanoseconds. Your FPS will never dip.
 * **Click where you want:** Lock clicks to specific screen coordinates or let it follow your cursor. Toggle between CPS and millisecond intervals on the fly.
+* **One owner at a time:** a click run and a macro playback can never inject into the same cursor together — the second one is refused at start with a named reason instead of interleaving.
 
 ### Visual Macro Editor
 * **Record or build:** Hit record to capture a mouse sequence in real time, or assemble actions block-by-block in the editor.
@@ -70,6 +71,7 @@ Fast, unkillable, and built with pure Rust. No Electron, no adware, no backgroun
 * **Mouse never gets trapped:** If NanoClick crashes, freezes, or is force-killed via Task Manager, an independent companion process catches it and releases your physical mouse buttons.
 * **Smart Typing Guard:** Pauses clicking automatically the second you start typing in a chat box, so you don't ruin your messages.
 * **FocusGuard:** Pauses within 50 ms if you Alt+Tab out of your game.
+* **Lock screen and UAC aware:** when Windows switches to a secure desktop (lock, UAC prompt, Ctrl+Alt+Del), NanoClick releases every held button and stops the run instead of clicking into a desktop that swallows input.
 * **True background daemon:** The clicking engine runs independently of the window. You can close the interface, minimize to tray, and it idles at just **5.3 MB of RAM**.
 
 ---

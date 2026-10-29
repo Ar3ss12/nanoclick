@@ -46,8 +46,11 @@ cargo test --release --locked -j 2 --tests
 ```
 
 CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the full matrix
-on `windows-latest`: JS gates → `panic = "abort"` compile gate → lib test
-lanes → clippy `-D warnings` → integration suites. All lanes `--locked -j 2`.
+on `windows-latest`: JS gates → clippy `--lib -D warnings` → `panic = "abort"`
+compile gate → lib test lanes → integration suites (assets + daemon handshake +
+guardian e2e). All lanes `--locked -j 2` on the `ci-test` profile; the abort
+gate uses `ci-abort`. The workflow checks out `snubber` separately, because the
+backend depends on it by path.
 
 > **Copy these commands verbatim.** `cmd.exe` has no `#` comments: a trailing
 > `# …` is passed to the test harness as extra filters and silently runs a
@@ -65,7 +68,7 @@ for exactly that class:
 |---|---|---|
 | Grammar (browser-accurate) | `powershell -ExecutionPolicy Bypass -File scripts\check-js-syntax.ps1` | module-mode `SyntaxError`s (checked as `.mjs`), 404 script refs |
 | Lint (broad tripwire) | `powershell -ExecutionPolicy Bypass -File scripts\check-js-lint.ps1` | undefined/unused identifiers, dead code, duplicate keys — oxlint (Rust binary, no `node_modules` required). Gate = **0 errors / 0 warnings** |
-| Rust gates | `cd src-tauri && cargo test --release -j 1 --test test_assets` | grammar + duplicate-declaration scan + boot-guard wiring, run as part of `cargo test` |
+| Rust gates | `cd src-tauri && cargo test --release -j 2 --test test_assets` | grammar + duplicate-declaration scan + boot-guard wiring, run as part of `cargo test` |
 | Release preflight | `scripts\release.ps1` → Stage 0 (PREFLIGHT) | runs the gates **before** `cargo tauri build`, which never runs tests |
 
 Runtime trap: `src/boot_guard.js` is a **classic** script loaded first on every
@@ -78,7 +81,7 @@ module which cannot execute at all.
 ## Changelog
 
 Notable user-facing changes land in [CHANGELOG.md](CHANGELOG.md) under
-`1.4.0 (unreleased)` and are dated only when the release tag is cut. Numbers
+`1.5.0 (unreleased)` and are dated only when the release tag is cut. Numbers
 in the changelog are measured and carry the command that re-derives them.
 
 ## Signing & releases
@@ -105,14 +108,10 @@ cargo tauri build --bundles nsis
 ## Architecture
 
 ```
-
-## Architecture
-
-```
 ┌────────────────────────────  Frontend (vanilla JS) ───────────────────────────┐
 │  UI · presets · visual macro builder · IPC via window.__TAURI__.core.invoke  │
 └──────────────────────────────────────┬───────────────────────────────────────┘
-                                       │ Tauri commands (12)
+                                       │ Tauri commands (49)
 ┌──────────────────────────────────────▼───────────────────────────────────────┐
 │                              Rust backend                                     │
 │  ┌───────────┐  ┌────────────┐  ┌─────────────┐  ┌────────────────────────┐  │
@@ -129,4 +128,10 @@ cargo tauri build --bundles nsis
 - Lazy secondary WebViews: cold boot creates only the main window; overlay and
   HUD are built on demand and destroyed when toggled off.
 - In-process GPU mode is deliberately off (a DirectX reset would hang the
-  click/hook thread); RAM is saved by lazy windows instead.
+  click/hook thread); RAM is saved by lazy windows and deep sleep in the tray
+  (`ui.deep_sleep_to_tray`) instead.
+- The stability layer (`stability.rs`, snubber) runs one 200 ms maintenance
+  thread per process role: worker/hook pulses, the one-word hardware claim for
+  `SendInput`, the rollback watch, the RSS-derivative leak check, the
+  secure-desktop sample and the hook-pump re-install. Details and invariants:
+  [`tech.md`](tech.md) and `agents.md` I37–I43.
