@@ -1152,6 +1152,14 @@ impl ClickScheduler {
             "warn",
             "[Scheduler] stopping run: input desktop lost",
         );
+        // The macro executor holds the same `SendInput` and the same claim bit:
+        // stopping only the clicker left a playback looping against a secure
+        // desktop, so after unlock Start refused `hardware_busy` while nothing
+        // was injecting on the visible desktop. A secure desktop is silence on
+        // every input front, not on one.
+        if let Some(exec) = crate::core::global() {
+            exec.stop();
+        }
         let outcome = self.set_active(false, None);
         crate::debug_log_internal(
             "warn",

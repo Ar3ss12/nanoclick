@@ -97,10 +97,12 @@ pub fn emergency_release_all_hardware() {
 //     is a HOLDING erased guard, booked for the whole run, so a second start on
 //     the same owner is refused with `BulkheadFull` while the first lives.
 // The claim counts click leases (the clicker's own exclusivity is the holding
-// slot) and reserves one bit for the macro lease. The release itself is a
-// `Protected<(), fn()>`: commit disarms it, dropping it runs
-// `emergency_release_all_hardware`. Field order matters — the hardware is
-// released before the slot admits a rival.
+// slot) and reserves one bit for the macro lease. The release itself is the
+// slot's OWN armed rollback: a holding erased guard runs the body before it
+// frees the lane, publishes the body's phase into the node, and catches a
+// panicking body on drop. That is the whole reason there is no second guard:
+// a release living outside the node made the `hardware_arbiter` row of
+// `ROLLBACK_WATCHED` watch an empty closure that could never overrun.
 
 /// Which subsystem holds the hardware. Exactly one class may be active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,18 +174,15 @@ static INPUT_CLAIM: AtomicU32 = AtomicU32::new(0);
 const MACRO_CLAIM_BIT: u32 = 1 << 31;
 const CLICK_CLAIM_MAX: u32 = MACRO_CLAIM_BIT - 1;
 
-/// Rollback type of the release guard. A plain `fn()` keeps `Protected` a
-/// nameable concrete type instead of an erased box.
-type HardwareRollback = fn();
-
 /// One lease on the process-wide input hardware.
 ///
-/// Drop order is the invariant: `release` runs `emergency_release_all_hardware`
-/// before `_slot` frees the admission, so a competitor admitted right after the
-/// drop can never inject into a still-held button.
+/// Drop order is the invariant: the holding erased guard runs its rollback —
+/// `emergency_release_all_hardware` — before it frees the admission, so a
+/// competitor admitted right after the drop can never inject into a
+/// still-held button. The same body is what `ROLLBACK_WATCHED` times: one
+/// release path, one phase, no separate guard to drift from it.
 #[must_use = "dropping the token releases hardware immediately; keep it for the whole run"]
 pub struct HardwareToken {
-    release: snubber::Protected<(), HardwareRollback>,
     _slot: snubber::ErasedGuard,
     _owner: OwnerFlag,
 }
@@ -199,12 +198,11 @@ impl Drop for OwnerFlag {
 }
 
 impl HardwareToken {
-    /// Clean end of a run: disarm the release guard and free the slot without
+    /// Clean end of a run: disarm the slot's rollback and free it without
     /// calling `SendInput` again (the run's own epilogue already released).
     pub fn commit(self) {
-        self.release.commit();
         self._slot.commit();
-        // `_owner` drops here, clearing the latch after both settles.
+        // `_owner` drops here, clearing the latch after the slot settles.
     }
 }
 
@@ -246,8 +244,13 @@ impl HardwareArbiter {
         // admission that follows is the only failure path and it gives the
         // claim straight back.
         owner.claim()?;
-        let seq = next_task_id();
-        let slot = match self.node.enter_erased_holding_auto(|| {}) {
+        // The armed rollback IS the release: the node's phase window covers
+        // the `SendInput` calls, so a wedged release is what the 1 Hz latch
+        // reads on this very node.
+        let slot = match self
+            .node
+            .enter_erased_holding_auto(emergency_release_all_hardware)
+        {
             Ok(g) => g,
             Err(EnterError::BulkheadFull) => {
                 owner.release();
@@ -262,9 +265,7 @@ impl HardwareArbiter {
                 return Err(HardwareBusy::Refused);
             }
         };
-        let release = snubber::SnubberGuard::new(seq, seq, emergency_release_all_hardware as HardwareRollback);
         Ok(HardwareToken {
-            release: snubber::Protected::new((), release),
             _slot: slot,
             _owner: OwnerFlag(owner),
         })
@@ -2197,6 +2198,55 @@ mod tests {
         assert!(holders.contains(&"hardware_arbiter"), "{holders:?}");
         // The hook's rollback only unhooks; it never touches `SendInput`.
         assert!(!holders.contains(&"hotkey_hook"), "{holders:?}");
+    }
+
+    #[test]
+    fn test_arbiter_watch_times_the_release_body() {
+        let src = include_str!("stability.rs");
+        let start = src
+            .find("pub fn acquire(&self, owner: HardOwner)")
+            .expect("acquire exists");
+        let end = src[start..]
+            .find("/// The process-wide macro arbiter")
+            .map(|i| i + start)
+            .expect("end of acquire");
+        let body = &src[start..end];
+        // The watched node must be the one that runs `SendInput`. An empty
+        // rollback here is a latch that can never fire, which is how the
+        // `hardware_arbiter` row spent 1.5.0 watching a `|| {}`.
+        assert!(
+            body.contains("enter_erased_holding_auto(emergency_release_all_hardware)"),
+            "the arbiter slot must arm the release body"
+        );
+        assert!(!body.contains("|| {}"), "an empty rollback cannot overrun");
+        // No second release path: a guard outside the node owns no phase, so
+        // the latch would time a body nobody runs.
+        let protected = concat!("snubber::", "Protected");
+        let standalone = concat!("snubber::Snubber", "Guard");
+        assert!(!src.contains(protected), "the token owns no second release guard");
+        assert!(!src.contains(standalone), "the token owns no second release guard");
+    }
+
+    #[test]
+    fn test_desktop_loss_stops_every_input_owner() {
+        let scheduler = include_str!("scheduler.rs");
+        let start = scheduler
+            .find("pub fn stop_for_desktop_loss")
+            .expect("stop_for_desktop_loss exists");
+        let end = scheduler[start..]
+            .find("/// Emergency stop")
+            .map(|i| i + start)
+            .expect("end of stop_for_desktop_loss");
+        let body = &scheduler[start..end];
+        // A secure desktop is silence on every input front: the click run and
+        // the macro playback share one hardware claim, so stopping one of them
+        // left the other holding `MACRO_CLAIM_BIT` against a dead desktop.
+        assert!(
+            body.contains("crate::core::global()"),
+            "the macro playback must be stopped too: {body}"
+        );
+        assert!(body.contains("exec.stop()"), "the executor stop must run: {body}");
+        assert!(body.contains("set_active(false"), "the click run must be stopped: {body}");
     }
 
     #[test]

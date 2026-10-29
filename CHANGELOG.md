@@ -9,7 +9,7 @@ file.
 A hardware-ownership release: one token now gates every `SendInput` path, RSS
 is judged by its derivative instead of a ceiling, a secure desktop stops the
 run instead of swallowing clicks, and a frozen hook pump re-registers itself.
-Suite green: **509 tests** (402 lib + 102 asset tripwires + 3 daemon handshake
+Suite green: **511 tests** (404 lib + 102 asset tripwires + 3 daemon handshake
 + 2 guardian e2e), clippy `-D warnings`, JS gate 10/10 scripts.
 
 ### Added
@@ -22,9 +22,12 @@ Suite green: **509 tests** (402 lib + 102 asset tripwires + 3 daemon handshake
   a race the losing side might notice; the token also holds a one-slot
   `hardware_arbiter` admission for the ledger. A Start during playback is
   refused at entry with `hardware_busy` / `HARDWARE_BUSY` instead of
-  interleaving two owners of one cursor. Dropping a token (panic, `?`,
-  generator unwind) runs the same `SendInput` release, then frees the slot,
-  then gives the claim back, in that order.
+  interleaving two owners of one cursor. The release is the admission's own
+  armed rollback, not a second guard beside it: dropping a token (panic, `?`,
+  generator unwind) runs `emergency_release_all_hardware` inside the node,
+  then frees the slot, then gives the claim back, in that order. Because the
+  body belongs to the node, the 1 Hz release latch times the same `SendInput`
+  calls it reads.
 - **Memory-leak detector by derivative**: RSS is sampled every 30 s into a
   10-sample ring (5 minutes). Ten strictly rising samples that add up to
   ≥ 120 MB latch `MEMORY_LEAK`, refuse Start and emit
@@ -34,8 +37,10 @@ Suite green: **509 tests** (402 lib + 102 asset tripwires + 3 daemon handshake
 - **Secure-desktop watcher**: while a run can inject, the maintenance tick
   calls `OpenInputDesktop` once a second. `ACCESS_DENIED` means the input is on
   the UAC / lock-screen desktop, where `SendInput` is swallowed and held
-  buttons stay held: the tick releases every button, forces the type-state to
-  Idle and logs the transition once per loss.
+  buttons stay held: the tick releases every button, stops the click run and
+  the macro playback (both own `SendInput`, and a playback left running kept
+  `MACRO_CLAIM_BIT` so Start refused `hardware_busy` after unlock), forces the
+  type-state to Idle and logs the transition once per loss.
 - **Hook pump pulse + re-install**: the hook pump kicks `hook_pulse` every
   iteration; a 500 ms freeze is a deaf-hook threat (Windows drops a low-level
   hook whose owner stops pumping for `LowLevelHooksTimeout`, 200–1000 ms).
@@ -50,6 +55,17 @@ Suite green: **509 tests** (402 lib + 102 asset tripwires + 3 daemon handshake
   the same `SendInput` body, the same budget — was logged but never refused a
   new run. The 1 Hz tick now votes every `ROLLBACK_WATCHED` entry that holds
   hardware (`holds_hardware` column) and latches on the worst elapsed time.
+- The `hardware_arbiter` row of `ROLLBACK_WATCHED` timed an empty closure
+  (`enter_erased_holding_auto(|| {})`) while the real release lived in a
+  `Protected` guard that published no phase, so the row could never fire and
+  the latch read "fine" during a wedged `SendInput`. The admission now arms
+  `emergency_release_all_hardware` itself; the second guard is gone.
+  Tripwire: `test_arbiter_watch_times_the_release_body`.
+- A secure desktop stopped the click run only: a macro playback kept looping
+  and holding `MACRO_CLAIM_BIT`, so after unlock Start refused
+  `hardware_busy` with nothing injecting on the visible desktop.
+  `stop_for_desktop_loss` now stops the executor and the scheduler.
+  Tripwire: `test_desktop_loss_stops_every_input_owner`.
 - A stalled tick could latch `ENGINE_STUCK` from the process-wide CPU delta on
   its first sample of a thread. The latch now requires a real thread-scoped
   sample; the process delta is a log fallback only.
