@@ -185,16 +185,27 @@ impl ExecutorHandle {
             }
         };
 
+        // The same token the click run takes. Playback injects into the same
+        // cursor and holds the same buttons: a run started mid-playback would
+        // interleave two owners of one device. A refusal here is honest, and the
+        // click scheduler's `start_refusal` reports the reverse direction
+        // (`hardware_busy`).
+        let hardware = match crate::stability::macro_arbiter()
+            .acquire(crate::stability::HardOwner::Macro)
+        {
+            Ok(token) => token,
+            Err(busy) => {
+                crate::debug_log_internal(
+                    "warn",
+                    &format!("[Stability] macro playback refused: hardware busy ({busy:?})"),
+                );
+                guard.commit();
+                self.shared.is_running.store(false, Ordering::Release);
+                return;
+            }
+        };
+
         self.shared.cancel.store(false, Ordering::Release);
-        // Rescue seam: the token is inert without a snubber Supervisor
-        // (`stability::arm_hardware_token`), but the shipped out-of-process
-        // rescue (`input_guardian`) covers the abort/kill cases regardless.
-        let task_id = crate::stability::next_task_id();
-        crate::stability::arm_hardware_token(
-            task_id,
-            crate::stability::OP_RELEASE_ALL_INPUTS,
-            1,
-        );
         let mut exit_guard = MacroExitGuard {
             shared: Arc::clone(&self.shared),
             completed: false,
@@ -228,7 +239,7 @@ impl ExecutorHandle {
         }
 
         guard.commit();
-        crate::stability::commit_hardware_token(task_id);
+        hardware.commit();
         exit_guard.completed = true;
     }
 

@@ -355,7 +355,30 @@ pub fn spawn_global_hotkey_listener(scheduler: Arc<ClickScheduler>, app_handle: 
             };
             let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
         }
-        run_keyboard_hook(scheduler, app_handle);
+        // Re-install loop: a frozen pump gets `request_hook_reinstall` from
+        // the maintenance tick, the message loop exits, and the hooks come
+        // back on this same thread (the OS calls a low-level hook back only on
+        // the thread that installed it). Each round is logged and counted.
+        loop {
+            run_keyboard_hook(Arc::clone(&scheduler), app_handle.clone());
+            if GLOBAL_HOTKEY_STOP.load(Ordering::Acquire)
+                || !HOOK_REINSTALL.swap(false, Ordering::AcqRel)
+            {
+                break;
+            }
+            HOOK_REINSTALLS.fetch_add(1, Ordering::Relaxed);
+            crate::debug_log_internal(
+                "warn",
+                &format!(
+                    "[Hotkeys] re-installing LL hooks after a frozen pump (count={})",
+                    HOOK_REINSTALLS.load(Ordering::Relaxed)
+                ),
+            );
+            // Never spin: a failing install must not become a hot loop, and the
+            // gap has to stay under the maintenance tick's 500 ms threat mark
+            // so a re-install in progress is not read as another frozen pump.
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
         guard.commit();
         GLOBAL_HOTKEY_RUNNING.store(false, Ordering::Release);
     });
@@ -549,7 +572,14 @@ fn run_keyboard_hook(scheduler: Arc<ClickScheduler>, app_handle: AppHandle) {
     // Same idea for panics contained at the callback boundary.
     let mut last_hook_panics: u64 = 0;
 
-    while !GLOBAL_HOTKEY_STOP.load(Ordering::Acquire) {
+    // A re-install request that arrived while the hooks were down is satisfied
+    // by THIS install: clearing it here is what keeps the re-install loop from
+    // re-entering on a request it just honoured (each round would otherwise
+    // exit the pump before it can kick the pulse, forever).
+    HOOK_REINSTALL.store(false, Ordering::Release);
+    while !GLOBAL_HOTKEY_STOP.load(Ordering::Acquire)
+        && !HOOK_REINSTALL.load(Ordering::Acquire)
+    {
         // Heartbeat (one Release store, no lock, no I/O): the maintenance tick
         // reports a hook thread that stopped coming back to this line.
         crate::stability::hook_pulse().kick();
@@ -1058,6 +1088,10 @@ pub fn hotkey_diag_dump() -> Vec<String> {
         "hook_panics_contained_total={}",
         HOOK_PANICS.load(Ordering::Relaxed)
     ));
+    out.push(format!(
+        "hook_reinstalls_total={}",
+        HOOK_REINSTALLS.load(Ordering::Relaxed)
+    ));
     out
 }
 
@@ -1065,6 +1099,37 @@ static GLOBAL_HOTKEY_STOP: AtomicBool = AtomicBool::new(false);
 static GLOBAL_HOTKEY_RUNNING: AtomicBool = AtomicBool::new(false);
 /// Thread ID of the hook thread — needed to wake MsgWaitForMultipleObjects via PostThreadMessageW.
 static GLOBAL_HOTKEY_THREAD_ID: AtomicU32 = AtomicU32::new(0);
+/// Set when the maintenance tick decides the pump is frozen and the hooks must
+/// be re-installed. Cleared by the hook thread when it acts on it.
+static HOOK_REINSTALL: AtomicBool = AtomicBool::new(false);
+/// Lifetime count of re-installs, surfaced in `hotkey_diag_dump`.
+static HOOK_REINSTALLS: AtomicU64 = AtomicU64::new(0);
+
+/// TID of the LL-hook thread (0 when the listener is not running). The
+/// maintenance tick opens this thread to classify a frozen pump by ITS CPU.
+pub(crate) fn hook_thread_id() -> u32 {
+    GLOBAL_HOTKEY_THREAD_ID.load(Ordering::Acquire)
+}
+
+/// Ask the hook thread to unhook and re-install. Returns `false` when no
+/// listener thread exists to act on the request.
+///
+/// Windows silently removes a `WH_KEYBOARD_LL` hook whose owner stops pumping
+/// for `LowLevelHooksTimeout`; re-installing on our own mark bounds the deaf
+/// window and leaves a counter behind.
+pub(crate) fn request_hook_reinstall() -> bool {
+    if !GLOBAL_HOTKEY_RUNNING.load(Ordering::Acquire) {
+        return false;
+    }
+    HOOK_REINSTALL.store(true, Ordering::Release);
+    let tid = GLOBAL_HOTKEY_THREAD_ID.load(Ordering::Acquire);
+    if tid != 0 {
+        unsafe {
+            let _ = PostThreadMessageW(tid, WM_QUIT, WPARAM(0), LPARAM(0));
+        }
+    }
+    true
+}
 
 /// Classification of a key-down for the hook loop.
 ///
@@ -2380,6 +2445,51 @@ mod hotpath_silence_tests {
         assert!(
             body.contains("held.retain"),
             "the remaining idle work is the stale-key cleanup"
+        );
+    }
+
+    /// A frozen pump is a deaf hook: Windows drops a low-level hook whose owner
+    /// stops pumping for `LowLevelHooksTimeout` (200–1000 ms). The pulse has to
+    /// be kicked from inside the pump, and the loop has to leave the pump on a
+    /// request so the hooks can be re-installed on the same thread — the OS only
+    /// calls a low-level hook back on the thread that installed it.
+    #[test]
+    fn frozen_pump_requests_and_survives_a_hook_reinstall() {
+        let src = include_str!("mod.rs");
+        let start = src
+            .find("fn run_keyboard_hook")
+            .expect("run_keyboard_hook not found");
+        let body = &src[start..];
+        let pump_end = body
+            .find("UnhookWindowsHookEx")
+            .expect("end of listener loop not found");
+        let pump = &body[..pump_end];
+        assert!(
+            pump.contains("hook_pulse().kick()"),
+            "the pulse must be kicked from inside the pump loop: a counter that \
+             moves while the queue is stuck proves nothing"
+        );
+        assert!(
+            pump.contains("!HOOK_REINSTALL.load"),
+            "the pump must exit on a re-install request, or `PostThreadMessageW` \
+             only wakes a sleep and the dead hook stays dead"
+        );
+        // The re-install loop lives in the thread body, not inside the pump.
+        let thread_body = &src[src
+            .find("pub fn spawn_global_hotkey_listener")
+            .expect("listener spawner not found")..];
+        assert!(
+            thread_body.contains("run_keyboard_hook(Arc::clone(&scheduler)")
+                && thread_body.contains("HOOK_REINSTALL.swap(false"),
+            "the thread must re-install the hooks after the pump returns"
+        );
+        assert!(
+            thread_body.contains("HOOK_REINSTALLS.fetch_add"),
+            "every re-install must be counted for the diag dump"
+        );
+        assert!(
+            src.contains("hook_reinstalls_total="),
+            "hotkey_diag_dump must expose the re-install total"
         );
     }
 }

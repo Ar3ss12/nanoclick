@@ -4,7 +4,60 @@ All notable changes to NanoClick. Sizes, timings and RAM figures are measured
 and carry the command that re-derives them. Releases before 1.1.1 predate this
 file.
 
-## 1.4.0 (unreleased)
+## 1.5.0 (unreleased)
+
+A hardware-ownership release: one token now gates every `SendInput` path, RSS
+is judged by its derivative instead of a ceiling, a secure desktop stops the
+run instead of swallowing clicks, and a frozen hook pump re-registers itself.
+Suite green: **508 tests** (401 lib + 102 asset tripwires + 3 daemon handshake
++ 2 guardian e2e), clippy `-D warnings`, JS gate 10/10 scripts.
+
+### Added
+
+- **Hardware arbiter** (`stability::HardwareArbiter`, `HardwareToken`): the
+  click run and macro playback can no longer inject at the same time. The
+  token is a real admission (a one-slot `hardware_arbiter` node) plus a
+  process-wide class latch, so a Start during playback is refused at entry
+  with `hardware_busy` / `HARDWARE_BUSY` instead of interleaving two owners of
+  one cursor. Dropping a token (panic, `?`, generator unwind) runs the same
+  `SendInput` release and then frees the slot, in that order.
+- **Memory-leak detector by derivative**: RSS is sampled every 30 s into a
+  10-sample ring (5 minutes). Ten strictly rising samples that add up to
+  ≥ 120 MB latch `MEMORY_LEAK`, refuse Start and emit
+  `AnomalyKind::MemoryGrowth`; a window that stops climbing (or dips) clears
+  the verdict. The 1/2 GiB marks stay as a backstop for a process about to
+  die, not as monitoring.
+- **Secure-desktop watcher**: while a run can inject, the maintenance tick
+  calls `OpenInputDesktop` once a second. `ACCESS_DENIED` means the input is on
+  the UAC / lock-screen desktop, where `SendInput` is swallowed and held
+  buttons stay held: the tick releases every button, forces the type-state to
+  Idle and logs the transition once per loss.
+- **Hook pump pulse + re-install**: the hook pump kicks `hook_pulse` every
+  iteration; a 500 ms freeze is a deaf-hook threat (Windows drops a low-level
+  hook whose owner stops pumping for `LowLevelHooksTimeout`, 200–1000 ms).
+  The tick reports `FaultKind::Timeout`, counts the event and asks the hook
+  thread to re-install; the hooks come back on the same thread (the OS only
+  calls a low-level hook back on its installing thread). The lifetime count is
+  in `hotkey_diag_dump` as `hook_reinstalls_total=`.
+
+### Fixed
+
+- `RELEASE_PENDING` read only the click node, so a wedged **macro** release —
+  the same `SendInput` body, the same budget — was logged but never refused a
+  new run. The 1 Hz tick now votes every `ROLLBACK_WATCHED` entry that holds
+  hardware (`holds_hardware` column) and latches on the worst elapsed time.
+- A stalled tick could latch `ENGINE_STUCK` from the process-wide CPU delta on
+  its first sample of a thread. The latch now requires a real thread-scoped
+  sample; the process delta is a log fallback only.
+- Hook-stall classification samples the hook thread's own CPU
+  (`ThreadCpuSampler::observe_tid`), so a busy UI can no longer be read as a
+  busy hook.
+- Dead surface removed: `dump_all_stats()` and `board_all_nodes()` had no
+  callers (the board is read through `SNAPSHOT_NODES`). The inert
+  `ProcessToken` arm is gone as well — it wrote only under `SNUBBER_SUPERVISED`
+  and read as a guarantee; `input_guardian` is the real rescue.
+
+## 1.4.0 (2026-10-29)
 
 A resilience release: the click engine gains an out-of-process safety net and
 a stability interlock (snubber), the interface becomes disposable, and the

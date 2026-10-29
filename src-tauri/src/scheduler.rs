@@ -312,6 +312,14 @@ pub struct ClickScheduler {
     current_running_preset: Arc<Mutex<Option<String>>>,
     /// Presets snapshot used for instant hotkey preemption.
     presets: Arc<Mutex<Vec<crate::config_manager::PresetItem>>>,
+    /// The single hardware lease this scheduler's run holds. `SendInput` is a
+    /// process-wide resource: a click run and a macro playback may never hold
+    /// it at the same time, and only the arbiter can hand it out.
+    hardware: Arc<Mutex<Option<crate::stability::HardwareToken>>>,
+    /// This scheduler's admission gate for that lease (one slot, a real
+    /// `SendInput` release on abort). A real run has exactly one scheduler, so
+    /// this node plus the class latch is the whole process-wide resource.
+    hardware_arbiter: crate::stability::HardwareArbiter,
 }
 
 /// What a single toggle press must do, resolved **without side effects**.
@@ -390,12 +398,19 @@ struct WorkerRunGuard {
     run_gen: Arc<AtomicU64>,
     gen: u64,
     preset: Arc<Mutex<Option<String>>>,
+    hardware: Arc<Mutex<Option<crate::stability::HardwareToken>>>,
 }
 
 impl Drop for WorkerRunGuard {
     fn drop(&mut self) {
         if self.run_gen.load(Ordering::Acquire) != self.gen {
             return;
+        }
+        // A run that ended on its own (limit, timer, focus loss, panic) never
+        // passes through `finish_stop`; the lease must still come home or the
+        // next Start finds the arbiter occupied by a dead run.
+        if let Some(token) = self.hardware.safe_lock().take() {
+            token.commit();
         }
         // This run owns the pulse: a preempting run has already armed it for
         // itself, and its generation is the current one, so this drop cannot
@@ -481,6 +496,8 @@ impl ClickScheduler {
             focus_guard: Arc::new(FocusGuard::new(initial_cfg.pause_on_focus_loss)),
             current_running_preset: Arc::new(Mutex::new(None)),
             presets: Arc::new(Mutex::new(initial_cfg.presets.clone())),
+            hardware: Arc::new(Mutex::new(None)),
+            hardware_arbiter: crate::stability::HardwareArbiter::new("click_hardware"),
         }
     }
 
@@ -937,6 +954,12 @@ impl ClickScheduler {
         // A stop is also the acknowledgement of a wedged run: the next Start
         // needs a fresh worker, so the latch must not survive it.
         crate::stability::clear_engine_stuck();
+        // The run is over: hand the hardware slot back. Committed, not
+        // dropped — the worker's own epilogue already released the buttons,
+        // and a rollback here would fire a redundant `SendInput`.
+        if let Some(token) = self.hardware.safe_lock().take() {
+            token.commit();
+        }
         crate::stability::send_worker_directive(snubber::Directive::Cancel("stop"));
         let handle = self.stop_event.safe_lock().clone();
         platform::signal_stop_event(handle);
@@ -997,6 +1020,30 @@ impl ClickScheduler {
             if let Some(reason) = crate::stability::start_refusal() {
                 toggle_diag_push(format!("[Hotkeys] start blocked: {reason}"));
                 return ToggleOutcome::BlockedByStability;
+            }
+
+            // Hardware arbiter: the run cannot exist without the token. This
+            // is the physical gate, not a flag — the node admits exactly one
+            // holder, so a macro playback that owns the token makes this
+            // Start refuse here instead of interleaving `SendInput` later.
+            // A preempting preset keeps the lease it already holds, so this
+            // branch only runs when no run of this scheduler is live.
+            {
+                let mut slot = self.hardware.safe_lock();
+                if slot.is_none() {
+                    match self
+                        .hardware_arbiter
+                        .acquire(crate::stability::HardOwner::ClickRun)
+                    {
+                        Ok(token) => *slot = Some(token),
+                        Err(busy) => {
+                            toggle_diag_push(format!(
+                                "[Hotkeys] start blocked: hardware busy ({busy:?})"
+                            ));
+                            return ToggleOutcome::BlockedByStability;
+                        }
+                    }
+                }
             }
         }
 
@@ -1059,6 +1106,11 @@ impl ClickScheduler {
                 }
                 Err(e) => {
                     self.active.store(false, Ordering::Release);
+                    // The transition was refused, so no worker exists to own
+                    // the lease: hand it back instead of holding it forever.
+                    if let Some(token) = self.hardware.safe_lock().take() {
+                        token.commit();
+                    }
                     toggle_diag_push(format!("[Transition] Start rejected: {e:?}"));
                     ToggleOutcome::BlockedByTyping
                 }
@@ -1088,6 +1140,23 @@ impl ClickScheduler {
             }
             ToggleOutcome::Stop
         }
+    }
+
+    /// Stop the run because the input desktop is gone (UAC prompt, Win+L).
+    ///
+    /// `SendInput` on a secure desktop is swallowed or queued, so the worker
+    /// cannot release what it holds. There is no AppHandle on the maintenance
+    /// thread: the page learns the state from its own `get_status` resync.
+    pub fn stop_for_desktop_loss(&self) {
+        crate::debug_log_internal(
+            "warn",
+            "[Scheduler] stopping run: input desktop lost",
+        );
+        let outcome = self.set_active(false, None);
+        crate::debug_log_internal(
+            "warn",
+            &format!("[Scheduler] desktop-loss stop outcome={outcome:?}"),
+        );
     }
 
     /// Emergency stop (Priority::Critical on Floor 2, USER_GUIDE Phase 1).
@@ -1659,6 +1728,7 @@ impl ClickScheduler {
     }
 
     fn spawn_worker(&self, app_handle: Option<AppHandle>) {
+        let hardware_lease = Arc::clone(&self.hardware);
         let active = Arc::clone(&self.active);
         let mode_autoclicker = Arc::clone(&self.mode_autoclicker);
         let clicks_done = Arc::clone(&self.clicks_done);
@@ -1705,9 +1775,9 @@ impl ClickScheduler {
                 run_gen,
                 gen: my_gen,
                 preset: run_preset,
+                hardware: hardware_lease,
             };
             let node = crate::stability::click_node();
-            let task_id = crate::stability::next_task_id();
             let (conduit, _steering_handle) = crate::stability::create_worker_steering();
 
             let guard: snubber::ErasedGuard = match node.probe_erased_auto(|| {
@@ -1746,12 +1816,6 @@ impl ClickScheduler {
                     return;
                 }
             };
-            crate::stability::arm_hardware_token(
-                task_id,
-                crate::stability::OP_RELEASE_ALL_INPUTS,
-                1,
-            );
-
             // ── Run envelope (telemetry, never an admission gate) ─────────
             // A run that settles with 0 clicks injected did nothing; the
             // envelope's 1-byte payload floor names that class. Admission
@@ -2568,9 +2632,9 @@ impl ClickScheduler {
                 }
             }
 
-            // Commit snubber transaction and clear supervisor token
+            // Commit the admission transaction. The hardware lease is settled
+            // by `WorkerRunGuard`, which outlives this closure on every path.
             guard.commit();
-            crate::stability::commit_hardware_token(task_id);
         });
     }
 }
@@ -3424,6 +3488,9 @@ mod worker_run_guard_tests {
             run_gen: Arc::clone(run_gen),
             gen,
             preset: Arc::clone(preset),
+            // These tests hold no lease: the slot is empty, and the drop is
+            // what proves an empty slot is not a panic.
+            hardware: Arc::new(Mutex::new(None)),
         }
     }
 

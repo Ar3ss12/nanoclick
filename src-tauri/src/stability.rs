@@ -9,10 +9,9 @@
 //! 512 B snapshot codec. This file owns the node set, the worker
 //! steering handles, the snapshot file paths and the log emission.
 
-use snubber::supervisor::ProcessToken;
 use snubber::*;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 // ── 0. Published P1 budgets (one number per decision, never a literal) ─────
@@ -39,6 +38,12 @@ pub const HOOK_PULSE_LEASE_MS: u64 = 2000;
 pub const HOOK_CPU_BUDGET_MS: u64 = 500;
 pub const HOOK_STALL_CEILING_MS: u64 = 4000;
 
+/// Pump threat mark. Windows removes a `WH_KEYBOARD_LL` hook whose owning
+/// thread stops pumping for `LowLevelHooksTimeout` (200–1000 ms, machine
+/// dependent) and tells nobody. 500 ms is inside that window, so the hook is
+/// re-registered before the OS can orphan it.
+pub const HOOK_PUMP_THREAT_MS: u64 = 500;
+
 /// Admission cadence of the maintenance thread: pulses are observed at 200 ms,
 /// rollback + memory at 1 Hz (every fifth tick), snapshots every 30 s.
 pub const MAINTENANCE_TICK_MS: u64 = 200;
@@ -50,35 +55,20 @@ pub const MAINTENANCE_TICK_MS: u64 = 200;
 pub const MEMORY_SOFT_KB: u64 = 1_048_576;
 pub const MEMORY_HARD_KB: u64 = 2_097_152;
 
-// ── 1. Supervisor opcodes for cross-process input release ──────────────────
-pub const OP_RELEASE_MOUSE_LEFT: u32 = 10;
-pub const OP_RELEASE_MOUSE_RIGHT: u32 = 11;
-pub const OP_RELEASE_MOUSE_MIDDLE: u32 = 12;
-pub const OP_RELEASE_ALL_INPUTS: u32 = 13;
+/// One RSS sample every 30 s; ten of them span five minutes.
+pub const RSS_SAMPLE_MS: u64 = 30_000;
+pub const RSS_RING_LEN: usize = 10;
+
+/// Growth over a full monotonic window that counts as a leak. The ceilings
+/// above are a backstop for a process about to die; a leak is named by its
+/// SHAPE (strictly rising, never resetting) once it has moved 120 MB.
+pub const MEMORY_GROWTH_TRIP_KB: u64 = 122_880;
 
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 
 #[inline]
 pub fn next_task_id() -> u64 {
     NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed)
-}
-
-/// Arm the hardware token for an out-of-process supervisor.
-///
-/// Inert in the shipped topology: snubber only emits the token when it is the
-/// parent (`SNUBBER_SUPERVISED`) and drains its own pipe. NanoClick's rescue
-/// path is [`crate::input_guardian`]; these calls stay because they are the
-/// seam for adopting `snubber::Supervisor` later, and they cost two writes per
-/// run (never per click).
-pub fn arm_hardware_token(task_id: u64, opcode: u32, tag: u8) {
-    let token = ProcessToken::simple(task_id, opcode, tag);
-    token.emit_if_supervised();
-}
-
-/// Emit hardware commit token to external supervisor, clearing armed rescue action.
-pub fn commit_hardware_token(task_id: u64) {
-    let token = ProcessToken::commit(task_id);
-    token.emit_if_supervised();
 }
 
 /// Emergency fallback: release any physically held mouse buttons and keys.
@@ -89,6 +79,180 @@ pub fn emergency_release_all_hardware() {
     backend.release_mouse_hold(crate::core::action::MouseButton::Left);
     backend.release_mouse_hold(crate::core::action::MouseButton::Right);
     backend.release_mouse_hold(crate::core::action::MouseButton::Middle);
+}
+
+// ── 1b. Hardware arbiter (one indivisible resource) ────────────────────────
+// `SendInput` is a single process-wide resource: two holders inject into the
+// same cursor and neither can release the other's held button. Every path that
+// arms hardware therefore has to take the SAME token, and the token has to be a
+// physical gate (a node admission), not a flag someone remembers to check.
+//
+// Two layers, both required:
+//   * a per-arbiter `hardware_arbiter` node with `max_in_flight(1)` — the slot
+//     is a HOLDING erased guard, booked for the whole run, so a second start on
+//     the same owner is refused with `BulkheadFull` while the first lives;
+//   * a process-wide class latch (`CLICK_RUN_ACTIVE` / `MACRO_RUN_ACTIVE`) —
+//     the cross-subsystem exclusion a node cannot express, because a click run
+//     and a macro playback are admitted by different arbiters.
+// A real run has exactly one click scheduler, so the class latch *is* the
+// single slot for click-vs-macro. The release itself is a
+// `Protected<(), fn()>`: commit disarms it, dropping it runs
+// `emergency_release_all_hardware`. Field order matters — the hardware is
+// released before the slot admits a rival.
+
+/// Which subsystem holds the hardware. Exactly one class may be active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HardOwner {
+    ClickRun,
+    Macro,
+}
+
+impl HardOwner {
+    fn name(self) -> &'static str {
+        match self {
+            HardOwner::ClickRun => "click_run",
+            HardOwner::Macro => "macro",
+        }
+    }
+
+    fn latch(self) -> &'static AtomicBool {
+        match self {
+            HardOwner::ClickRun => &CLICK_RUN_ACTIVE,
+            HardOwner::Macro => &MACRO_RUN_ACTIVE,
+        }
+    }
+
+    fn rival(self) -> HardOwner {
+        match self {
+            HardOwner::ClickRun => HardOwner::Macro,
+            HardOwner::Macro => HardOwner::ClickRun,
+        }
+    }
+}
+
+static CLICK_RUN_ACTIVE: AtomicBool = AtomicBool::new(false);
+static MACRO_RUN_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Rollback type of the release guard. A plain `fn()` keeps `Protected` a
+/// nameable concrete type instead of an erased box.
+type HardwareRollback = fn();
+
+/// One lease on the process-wide input hardware.
+///
+/// Drop order is the invariant: `release` runs `emergency_release_all_hardware`
+/// before `_slot` frees the admission, so a competitor admitted right after the
+/// drop can never inject into a still-held button.
+#[must_use = "dropping the token releases hardware immediately; keep it for the whole run"]
+pub struct HardwareToken {
+    release: snubber::Protected<(), HardwareRollback>,
+    _slot: snubber::ErasedGuard,
+    _owner: OwnerFlag,
+}
+
+/// Clears the class latch on every exit path, including an implicit drop after
+/// a panic inside a run.
+struct OwnerFlag(HardOwner);
+
+impl Drop for OwnerFlag {
+    fn drop(&mut self) {
+        self.0.latch().store(false, Ordering::Release);
+    }
+}
+
+impl HardwareToken {
+    /// Clean end of a run: disarm the release guard and free the slot without
+    /// calling `SendInput` again (the run's own epilogue already released).
+    pub fn commit(self) {
+        self.release.commit();
+        self._slot.commit();
+        // `_owner` drops here, clearing the latch after both settles.
+    }
+}
+
+/// Why a hardware acquisition was refused. `Held` names the rival class;
+/// `Refused` means the ledger itself refused (bookkeeping failure).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HardwareBusy {
+    /// The other subsystem holds the hardware right now.
+    Held { owner: &'static str },
+    /// The node refused for a non-bulkhead reason (bookkeeping failure).
+    Refused,
+}
+
+/// Admission for one class of hardware holder.
+pub struct HardwareArbiter {
+    node: SnubberNode,
+}
+
+impl HardwareArbiter {
+    #[must_use]
+    pub fn new(node_name: &'static str) -> Self {
+        Self {
+            node: SnubberNode::builder(node_name)
+                .max_in_flight(1)
+                .trip_after_failures(0)
+                .rollback_budget_ms(ROLLBACK_BUDGET_MS)
+                .rollback_reentrancy(RollbackReentrancy::Refuse)
+                .build(),
+        }
+    }
+
+    pub fn node(&self) -> &SnubberNode {
+        &self.node
+    }
+
+    /// Take the hardware lease for `owner`, or name who holds it.
+    pub fn acquire(&self, owner: HardOwner) -> Result<HardwareToken, HardwareBusy> {
+        let rival = owner.rival();
+        if rival.latch().load(Ordering::Acquire) {
+            return Err(HardwareBusy::Held {
+                owner: rival.name(),
+            });
+        }
+        let seq = next_task_id();
+        let slot = match self.node.enter_erased_holding_auto(|| {}) {
+            Ok(g) => g,
+            Err(EnterError::BulkheadFull) => return Err(HardwareBusy::Refused),
+            Err(e) => {
+                crate::debug_log_internal(
+                    "error",
+                    &format!("[Stability] hardware arbiter refused admission: {e:?}"),
+                );
+                return Err(HardwareBusy::Refused);
+            }
+        };
+        owner.latch().store(true, Ordering::Release);
+        // A rival that claimed between the check and the admit: the click side
+        // backs off, so the race always resolves in favour of a macro playback.
+        // The click worker has not been spawned yet, so backing off here means
+        // it never touches the mouse.
+        if owner == HardOwner::ClickRun && rival.latch().load(Ordering::Acquire) {
+            CLICK_RUN_ACTIVE.store(false, Ordering::Release);
+            slot.abort("hardware_busy");
+            return Err(HardwareBusy::Held {
+                owner: rival.name(),
+            });
+        }
+        let release = snubber::SnubberGuard::new(seq, seq, emergency_release_all_hardware as HardwareRollback);
+        Ok(HardwareToken {
+            release: snubber::Protected::new((), release),
+            _slot: slot,
+            _owner: OwnerFlag(owner),
+        })
+    }
+}
+
+/// The process-wide macro arbiter. Its node is the one the snapshot board and
+/// the rollback watcher read.
+pub fn macro_arbiter() -> &'static HardwareArbiter {
+    static ARBITER: OnceLock<HardwareArbiter> = OnceLock::new();
+    ARBITER.get_or_init(|| HardwareArbiter::new("hardware_arbiter"))
+}
+
+/// Is a macro playback holding the input hardware right now? Lock-free: the
+/// hotkey thread's refusal check reads this without touching the node.
+pub fn hardware_held_by_macro() -> bool {
+    MACRO_RUN_ACTIVE.load(Ordering::Acquire)
 }
 
 // ── 2. Snubber nodes (bulkheads + breakers + telemetry) ─────────────────────
@@ -310,6 +474,16 @@ pub fn click_run_node() -> &'static SnubberNode {
     })
 }
 
+/// Hardware Arbiter Node:
+/// - Holds the macro side's single input slot (see [`HardwareToken`]).
+/// - `trip_after_failures(0)`: a breaker here would refuse input for the rest
+///   of the session with no way back — the node guards a resource, not work.
+/// - The rollback body is the same `SendInput` release as the workers', so its
+///   duration is published and watched like theirs (`ROLLBACK_WATCHED`).
+pub fn hardware_node() -> &'static SnubberNode {
+    macro_arbiter().node()
+}
+
 /// Hotkey Hook Node:
 /// - Guards keyboard/mouse LL hook event processing
 pub fn hotkey_node() -> &'static SnubberNode {
@@ -435,57 +609,6 @@ pub fn config_node() -> &'static SnubberNode {
     })
 }
 
-/// Dump comprehensive stability ledger to logs.
-/// Cold path: cached `stats()` per node, rendered outside the lock.
-pub fn dump_all_stats() {
-    let nodes = [
-        ("click_worker", click_node()),
-        ("hotkey_hook", hotkey_node()),
-        ("macro_executor", macro_node()),
-        ("file_watcher", watcher_node()),
-        ("profile_switch", profile_switch_node()),
-        ("satellite_window", satellite_node()),
-        ("config_save", config_node()),
-    ];
-
-    crate::debug_log_internal("warn", "[Stability] === Snubber Diagnostics Ledger ===");
-    let policy = snubber::AnomalyPolicy::default();
-    for (name, node) in nodes {
-        let stats = node.stats();
-        crate::debug_log_internal(
-            "warn",
-            &format!(
-                "[Stability:{name}] started={} committed={} aborts={} drops={} bulk_rejects={} rate_rejects={} stale={} breaker_trips={} poison_recoveries={} catastrophic={} shed_bulk={} shed_rate={} shed_stale={}",
-                stats.total_started,
-                stats.committed,
-                stats.explicit_aborts,
-                stats.implicit_drops,
-                stats.bulkhead_rejections,
-                stats.rate_rejected,
-                stats.stale_epochs_rejected,
-                stats.breaker_trips,
-                stats.poison_recoveries,
-                stats.catastrophic_faults(),
-                stats.shed_bulkhead(),
-                stats.shed_rate(),
-                stats.shed_stale(),
-            ),
-        );
-        // One-line verdict per node: silence when healthy, [DIAG] when not.
-        let snap = node.snapshot_v1();
-        for hit in snubber::find_anomalies(name, &stats, &policy) {
-            crate::debug_log_internal(
-                "warn",
-                &format!(
-                    "[Stability] {}",
-                    snubber::diagnostic_line(name, &hit, &snap)
-                ),
-            );
-        }
-    }
-    crate::debug_log_internal("warn", "[Stability] ===================================");
-}
-
 // ── 2b. Worker pulses (Front 4: "RUNNING, but no clicks") ───────────────────
 
 /// Click-worker heartbeat. The worker kicks it once per loop iteration and
@@ -582,26 +705,67 @@ pub fn start_maintenance() {
 /// publishes `rollback_budget_ms` cannot stay unread: the hook carried a
 /// budget nothing observed, which is the same dead-knob class the satellite
 /// node was cleaned of.
-type RollbackWatched = (&'static str, fn() -> &'static SnubberNode);
-const ROLLBACK_WATCHED: [RollbackWatched; 4] = [
-    ("click_worker", click_node),
-    ("hotkey_hook", hotkey_node),
-    ("macro_executor", macro_node),
-    ("file_watcher", watcher_node),
+///
+/// `holds_hardware` is what the release latch reads. A wedged release matters
+/// only when the body that hangs is the one touching `SendInput`; before this
+/// column existed the latch watched `click_worker` alone, so a wedged
+/// `macro_executor` release (same body, same budget) was logged and ignored.
+struct RollbackWatched {
+    name: &'static str,
+    node: fn() -> &'static SnubberNode,
+    holds_hardware: bool,
+}
+
+const ROLLBACK_WATCHED: [RollbackWatched; 5] = [
+    RollbackWatched {
+        name: "click_worker",
+        node: click_node,
+        holds_hardware: true,
+    },
+    RollbackWatched {
+        name: "hotkey_hook",
+        node: hotkey_node,
+        holds_hardware: false,
+    },
+    RollbackWatched {
+        name: "macro_executor",
+        node: macro_node,
+        holds_hardware: true,
+    },
+    RollbackWatched {
+        name: "hardware_arbiter",
+        node: hardware_node,
+        holds_hardware: true,
+    },
+    RollbackWatched {
+        name: "file_watcher",
+        node: watcher_node,
+        holds_hardware: false,
+    },
 ];
 
 fn maintenance_loop() {
     let mut click_watch = PulseWatch::new(CLICK_PULSE_LEASE_MS);
     let mut hook_watch = PulseWatch::new(HOOK_PULSE_LEASE_MS);
     let mut last_cpu = process_cpu_ms();
-    let mut worker_cpu = WorkerCpuSampler::new();
+    let mut click_cpu = ThreadCpuSampler::new();
+    let mut hook_cpu = ThreadCpuSampler::new();
+    let mut rss = RssGradient::new();
     // One line per wedged body, not one per second.
     let mut reported_rollback_epoch = [u64::MAX; ROLLBACK_WATCHED.len()];
+    // Edge state of the input desktop: `None` until the first sample, so a
+    // process that starts on a secure desktop does not fire a false edge.
+    let mut desktop_was_lost: Option<bool> = None;
+    let mut last_reinstall_ms: u64 = 0;
     let mut tick: u64 = 0;
     loop {
         std::thread::sleep(Duration::from_millis(MAINTENANCE_TICK_MS));
         tick = tick.wrapping_add(1);
         let now = snubber::now_ms();
+        // ONE process sample per tick, shared by both stall branches. Calling
+        // `cpu_delta_since` twice made the second branch read a ~0 delta and
+        // silently classify the hook from nothing.
+        let process_delta = cpu_delta_since(&mut last_cpu);
 
         // ── Pulses: a frozen counter names a frozen thread ──────────────
         if click_pulse_armed() {
@@ -610,9 +774,10 @@ fn maintenance_loop() {
                 let idle_ms = click_watch.idle_ms(now);
                 // Only the worker's own CPU may turn silence into a spin; a
                 // busy UI thread must not supply the delta. The process sample
-                // stays the fallback when the thread cannot be opened.
-                let process_delta = cpu_delta_since(&mut last_cpu);
-                let cpu_delta = worker_cpu.observe().unwrap_or(process_delta);
+                // is logged as a fallback when the thread cannot be opened,
+                // but it never latches (F-2: `None` means "unknown", not "0").
+                let thread_delta = click_cpu.observe();
+                let cpu_delta = thread_delta.unwrap_or(process_delta);
                 let kind = classify_stall_ceiling(
                     idle_ms,
                     cpu_delta,
@@ -621,11 +786,9 @@ fn maintenance_loop() {
                     CLICK_STALL_CEILING_MS,
                 );
                 click_node().note_pulse_stall(idle_ms);
-                // Only the two hard classes latch a refusal: `SleepBlocked`
-                // is an OS/EDR pause below the ceiling, and refusing Start on
-                // every slow driver callback would be worse than the stall.
-                let hard = matches!(kind, StallKind::CpuSpin | StallKind::DeadlockStall);
-                if hard && !ENGINE_STUCK.swap(true, Ordering::AcqRel) {
+                if hard_stall_latches(kind, thread_delta)
+                    && !ENGINE_STUCK.swap(true, Ordering::AcqRel)
+                {
                     crate::debug_log_internal(
                         "error",
                         &format!("[Stability] engine_stuck latched (kind={kind:?})"),
@@ -634,7 +797,8 @@ fn maintenance_loop() {
                 crate::debug_log_internal(
                     "error",
                     &format!(
-                        "[Stability] click_worker pulse stalled {idle_ms}ms (kind={kind:?}, cpu_delta={cpu_delta}ms)"
+                        "[Stability] click_worker pulse stalled {idle_ms}ms (kind={kind:?}, cpu_delta={cpu_delta}ms, thread_sample={})",
+                        thread_delta.is_some()
                     ),
                 );
             } else if ENGINE_STUCK.swap(false, Ordering::AcqRel) {
@@ -646,9 +810,13 @@ fn maintenance_loop() {
         }
         if hook_pulse_armed() {
             let landed = hook_watch.observe(hook_pulse().tick(), now);
+            let idle_ms = hook_watch.idle_ms(now);
             if !landed {
-                let idle_ms = hook_watch.idle_ms(now);
-                let cpu_delta = cpu_delta_since(&mut last_cpu);
+                // Same thread-scoped sample as the click worker: the hook is
+                // this process's only other thread that must stay live, and a
+                // process-wide delta cannot tell it apart from the UI (F-3).
+                let thread_delta = hook_cpu.observe_tid(hook_thread_tid());
+                let cpu_delta = thread_delta.unwrap_or(process_delta);
                 let kind = classify_stall_ceiling(
                     idle_ms,
                     cpu_delta,
@@ -660,23 +828,71 @@ fn maintenance_loop() {
                 crate::debug_log_internal(
                     "error",
                     &format!(
-                        "[Stability] hotkey_hook pulse stalled {idle_ms}ms (kind={kind:?}, cpu_delta={cpu_delta}ms)"
+                        "[Stability] hotkey_hook pulse stalled {idle_ms}ms (kind={kind:?}, cpu_delta={cpu_delta}ms, thread_sample={})",
+                        thread_delta.is_some()
                     ),
                 );
+            }
+            // ── Pump threat: re-register BEFORE the OS drops the hook ────
+            // Windows silently unhooks a low-level hook whose owner stops
+            // pumping for `LowLevelHooksTimeout` (200–1000 ms, machine
+            // dependent). Re-registering on our own 500 ms mark turns a
+            // silent deaf-hook into a bounded, logged outage.
+            if idle_ms > HOOK_PUMP_THREAT_MS && now.saturating_sub(last_reinstall_ms) >= HOOK_PUMP_THREAT_MS {
+                last_reinstall_ms = now;
+                hotkey_node().report(snubber::FaultKind::Timeout, 1, 0);
+                if request_hook_reinstall() {
+                    crate::debug_log_internal(
+                        "error",
+                        &format!(
+                            "[Stability] hotkey_hook pump frozen {idle_ms}ms — re-registering LL hooks"
+                        ),
+                    );
+                }
+            }
+        }
+
+        // ── Input desktop: a secure desktop swallows SendInput ──────────
+        // Sampled only while something could be injecting: an idle tray
+        // process has no buttons to unstick, and I16 forbids "just in case"
+        // background reads. `desktop_was_lost` resets between runs, so a run
+        // that begins on a locked/uac desktop is caught on its first sample.
+        if tick.is_multiple_of(5) {
+            if click_pulse_armed() || hardware_held_by_macro() {
+                let lost = secure_desktop_active();
+                let edge = desktop_edge(desktop_was_lost.replace(lost), lost);
+                match edge {
+                    DesktopEdge::Lost => {
+                        crate::debug_log_internal(
+                            "error",
+                            "[Stability] input desktop lost (UAC / lock screen) — releasing hardware and stopping the run",
+                        );
+                        emergency_release_all_hardware();
+                        notify_desktop_lost();
+                    }
+                    DesktopEdge::Restored => {
+                        crate::debug_log_internal("warn", "[Stability] input desktop restored");
+                    }
+                    DesktopEdge::None => {}
+                }
+            } else {
+                desktop_was_lost = None;
             }
         }
 
         // ── 1 Hz: rollback bodies + memory ─────────────────────────────
         if tick.is_multiple_of(5) {
-            for (idx, (name, node)) in ROLLBACK_WATCHED.iter().enumerate() {
-                if let Some(stall) = snubber::watchdog::poll_rollback(node(), ROLLBACK_BUDGET_MS) {
+            for (idx, entry) in ROLLBACK_WATCHED.iter().enumerate() {
+                if let Some(stall) =
+                    snubber::watchdog::poll_rollback((entry.node)(), ROLLBACK_BUDGET_MS)
+                {
                     if reported_rollback_epoch[idx] != stall.epoch {
                         reported_rollback_epoch[idx] = stall.epoch;
                         crate::debug_log_internal(
                             "error",
                             &format!(
-                                "[Stability] {name} rollback body wedged: epoch={} task={} elapsed={}ms budget={}ms",
-                                stall.epoch, stall.task_id, stall.elapsed_ms, stall.budget_ms
+                                "[Stability] {} rollback body wedged: epoch={} task={} elapsed={}ms budget={}ms",
+                                entry.name, stall.epoch, stall.task_id, stall.elapsed_ms, stall.budget_ms
                             ),
                         );
                     }
@@ -687,15 +903,25 @@ fn maintenance_loop() {
             // Sampled from the phase mirror (atomics only), not from the log
             // path above: a body that finished between reads must clear the
             // latch on this very tick, or Start stays refused forever.
-            let phase = click_node().rollback_phase();
-            let release_pending = phase.active && phase.elapsed_ms > ROLLBACK_BUDGET_MS;
+            //
+            // Every hardware-holding body votes: the click run and macro
+            // playback run the SAME release, so watching only `click_worker`
+            // left a wedged macro release logged but not refusing (F-1).
+            let mut release_pending = false;
+            let mut worst_elapsed = 0;
+            for entry in ROLLBACK_WATCHED.iter().filter(|e| e.holds_hardware) {
+                let phase = (entry.node)().rollback_phase();
+                if phase.active && phase.elapsed_ms > ROLLBACK_BUDGET_MS {
+                    release_pending = true;
+                    worst_elapsed = worst_elapsed.max(phase.elapsed_ms);
+                }
+            }
             if release_pending != ROLLBACK_PENDING.load(Ordering::Acquire) {
                 ROLLBACK_PENDING.store(release_pending, Ordering::Release);
                 crate::debug_log_internal(
                     if release_pending { "error" } else { "warn" },
                     &format!(
-                        "[Stability] release_pending -> {release_pending} (elapsed={}ms budget={}ms)",
-                        phase.elapsed_ms, ROLLBACK_BUDGET_MS
+                        "[Stability] release_pending -> {release_pending} (elapsed={worst_elapsed}ms budget={ROLLBACK_BUDGET_MS}ms)"
                     ),
                 );
             }
@@ -714,6 +940,53 @@ fn maintenance_loop() {
                             MEMORY_HARD_KB
                         ),
                     );
+                }
+                // The 1/2 GiB marks are a BACKSTOP for a process about to die
+                // with the desktop. A leak has a signature long before that:
+                // a strictly rising working set. Sample every 30 s and name
+                // the gradient, not the ceiling.
+                if tick.is_multiple_of(RSS_SAMPLE_MS / MAINTENANCE_TICK_MS) {
+                    match rss.push(used_kb) {
+                        Some(growth) if leak_trips(growth) => {
+                            if !MEMORY_LEAK.swap(true, Ordering::AcqRel) {
+                                crate::debug_log_internal(
+                                    "error",
+                                    &format!(
+                                        "[Stability] memory leak: rss grew {growth}kb over {RSS_RING_LEN} samples with no drop (rss={used_kb}kb)"
+                                    ),
+                                );
+                            }
+                            let hit = snubber::Anomaly {
+                                kind: snubber::AnomalyKind::MemoryGrowth,
+                                node: "click_worker",
+                                pct: 100,
+                                count: used_kb,
+                            };
+                            crate::debug_log_internal(
+                                "warn",
+                                &format!(
+                                    "[Stability] {}",
+                                    snubber::diagnostic_line(
+                                        "click_worker",
+                                        &hit,
+                                        &click_node().snapshot_v1()
+                                    )
+                                ),
+                            );
+                        }
+                        _ => {
+                            // The verdict is the derivative, so it has to be
+                            // revocable: a working set that stopped climbing
+                            // (or dipped, which clears the window) is not a
+                            // leak, and a permanent refusal would be a lie.
+                            if MEMORY_LEAK.swap(false, Ordering::AcqRel) {
+                                crate::debug_log_internal(
+                                    "warn",
+                                    "[Stability] memory leak cleared — the working set stopped climbing",
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -744,6 +1017,17 @@ static ENGINE_STUCK: AtomicBool = AtomicBool::new(false);
 
 /// Last memory verdict, as a rank so it fits one atomic.
 static MEMORY_LEVEL: AtomicU64 = AtomicU64::new(LEVEL_OK);
+
+/// The RSS gradient detector tripped: ten consecutive 30 s samples rose, and
+/// the window grew past `MEMORY_GROWTH_TRIP_KB`. Latched for the session —
+/// unlike a pressure level, a leak does not clear when a run ends.
+static MEMORY_LEAK: AtomicBool = AtomicBool::new(false);
+
+/// Test-only leak latch control (the gradient needs five real minutes).
+#[cfg(test)]
+pub(crate) fn test_latch_memory_leak(v: bool) {
+    MEMORY_LEAK.store(v, Ordering::Release);
+}
 const LEVEL_OK: u64 = 0;
 const LEVEL_SOFT: u64 = 1;
 const LEVEL_HARD: u64 = 2;
@@ -838,6 +1122,14 @@ fn override_from(
 /// Order is severity, not age: an unfinished release outranks a stuck engine
 /// (the release owns the hardware), and both outrank memory pressure.
 pub fn start_refusal() -> Option<&'static str> {
+    // A macro playback owns the only hardware slot: a click run would either
+    // be refused by the arbiter or interleave `SendInput` with it.
+    if hardware_held_by_macro() {
+        return Some("hardware_busy");
+    }
+    if MEMORY_LEAK.load(Ordering::Acquire) {
+        return Some("memory_leak");
+    }
     refusal_from(
         ROLLBACK_PENDING.load(Ordering::Acquire),
         ENGINE_STUCK.load(Ordering::Acquire),
@@ -847,6 +1139,9 @@ pub fn start_refusal() -> Option<&'static str> {
 
 /// Status text a surface must show INSTEAD of the click loop's own text.
 pub fn status_text_override(current: &str) -> Option<&'static str> {
+    if current == "RUNNING" && MEMORY_LEAK.load(Ordering::Acquire) {
+        return Some("MEMORY_LEAK");
+    }
     override_from(
         current,
         ROLLBACK_PENDING.load(Ordering::Acquire),
@@ -858,6 +1153,12 @@ pub fn status_text_override(current: &str) -> Option<&'static str> {
 /// Label for a refused start, usable when there is no run to override
 /// (the page button, the tray toast). Same texts as the `RUNNING` override.
 pub fn refusal_text() -> Option<&'static str> {
+    if hardware_held_by_macro() {
+        return Some("HARDWARE_BUSY");
+    }
+    if MEMORY_LEAK.load(Ordering::Acquire) {
+        return Some("MEMORY_LEAK");
+    }
     label_from(
         ROLLBACK_PENDING.load(Ordering::Acquire),
         ENGINE_STUCK.load(Ordering::Acquire),
@@ -899,11 +1200,11 @@ pub(crate) fn test_latch_engine_stuck(v: bool) {
 
 /// CPU-time delta (ms) of this process since the previous call.
 ///
-/// The click stall uses [`WorkerCpuSampler`] first; this process-wide sample
-/// is the fallback when the worker thread cannot be opened, and the only
-/// source for the hook stall. A spinning worker always grows process CPU, but
-/// so does a busy UI in the same window — which is why the click verdict does
-/// not rely on it alone. The verdict is a diagnostic aid, never a kill switch.
+/// Both stall branches sample their own thread first; this process-wide delta
+/// is only the logged fallback when that thread cannot be opened. A spinning
+/// worker always grows process CPU, but so does a busy UI in the same window —
+/// which is why neither verdict latches on this number (see
+/// [`hard_stall_latches`]).
 fn cpu_delta_since(last: &mut Option<u64>) -> u64 {
     let now = process_cpu_ms();
     let delta = match (*last, now) {
@@ -945,24 +1246,24 @@ fn process_cpu_ms() -> Option<u64> {
     None
 }
 
-/// Thread-scoped CPU sample for the click worker.
+/// Thread-scoped CPU sample, owned by one watcher per observed thread.
 ///
-/// The process-wide sample cannot separate a spinning worker from a busy UI
-/// thread: once the pulse is frozen, a repainting WebView supplies the CPU
-/// delta and `classify_stall_ceiling` answers `CpuSpin` — which latches
-/// `ENGINE_STUCK` and refuses Start. The worker publishes its TID; this
-/// sampler opens that thread and reads `GetThreadTimes`, so only the worker's
-/// own CPU can justify the spin verdict. `None` (no id, open failure, first
-/// contact) makes the caller fall back to the process delta.
+/// The process-wide sample cannot separate a spinning worker (or a wedged hook
+/// pump) from a busy UI thread: once a pulse is frozen, a repainting WebView
+/// supplies the CPU delta and `classify_stall_ceiling` answers `CpuSpin`. Each
+/// watched thread publishes its TID; this sampler opens that thread and reads
+/// `GetThreadTimes`, so only the watched thread's own CPU can justify a
+/// verdict. `None` (no id, open failure, first contact) means "no sample", and
+/// the caller must not latch on it.
 #[cfg(target_os = "windows")]
-struct WorkerCpuSampler {
+struct ThreadCpuSampler {
     tid: u32,
     handle: Option<windows::Win32::Foundation::HANDLE>,
     last_ms: Option<u64>,
 }
 
 #[cfg(target_os = "windows")]
-impl WorkerCpuSampler {
+impl ThreadCpuSampler {
     fn new() -> Self {
         Self {
             tid: 0,
@@ -1014,7 +1315,7 @@ impl WorkerCpuSampler {
 }
 
 #[cfg(target_os = "windows")]
-impl Drop for WorkerCpuSampler {
+impl Drop for ThreadCpuSampler {
     fn drop(&mut self) {
         self.release();
     }
@@ -1038,15 +1339,19 @@ fn thread_cpu_ms(handle: windows::Win32::Foundation::HANDLE) -> Option<u64> {
 }
 
 #[cfg(not(target_os = "windows"))]
-struct WorkerCpuSampler;
+struct ThreadCpuSampler;
 
 #[cfg(not(target_os = "windows"))]
-impl WorkerCpuSampler {
+impl ThreadCpuSampler {
     fn new() -> Self {
         Self
     }
 
     fn observe(&mut self) -> Option<u64> {
+        None
+    }
+
+    fn observe_tid(&mut self, _tid: u32) -> Option<u64> {
         None
     }
 }
@@ -1067,6 +1372,188 @@ fn process_rss_kb() -> Option<u64> {
 #[cfg(not(target_os = "windows"))]
 fn process_rss_kb() -> Option<u64> {
     None
+}
+
+/// Ring of RSS samples, oldest-overwritten.
+///
+/// The verdict is a DERIVATIVE, not a level: a working set that rises on every
+/// one of `RSS_RING_LEN` clean 30 s samples and never resets is a leak even at
+/// 2 MB per step. One sample below its predecessor (a GC, a tray collapse)
+/// clears the window — a healthy process is allowed to oscillate.
+struct RssGradient {
+    ring: [u64; RSS_RING_LEN],
+    len: usize,
+    next: usize,
+}
+
+impl RssGradient {
+    const fn new() -> Self {
+        Self {
+            ring: [0; RSS_RING_LEN],
+            len: 0,
+            next: 0,
+        }
+    }
+
+    /// Push one sample. Returns `Some(growth)` only when the whole window is
+    /// strictly increasing, where `growth = newest − oldest`.
+    fn push(&mut self, kb: u64) -> Option<u64> {
+        self.ring[self.next] = kb;
+        self.next = (self.next + 1) % RSS_RING_LEN;
+        if self.len < RSS_RING_LEN {
+            self.len += 1;
+        }
+        if self.len < RSS_RING_LEN {
+            return None;
+        }
+        let oldest = self.ring[self.next];
+        let mut previous = oldest;
+        for i in 1..RSS_RING_LEN {
+            let sample = self.ring[(self.next + i) % RSS_RING_LEN];
+            if sample <= previous {
+                return None;
+            }
+            previous = sample;
+        }
+        Some(previous - oldest)
+    }
+}
+
+/// Does a monotonic window that grew this much name a leak?
+fn leak_trips(growth_kb: u64) -> bool {
+    growth_kb >= MEMORY_GROWTH_TRIP_KB
+}
+
+/// A hard stall class may latch a refusal ONLY when this tick has a real
+/// thread-scoped CPU sample. The process-wide delta is a diagnostic fallback:
+/// a repainting UI can supply any growth it likes, and latching `ENGINE_STUCK`
+/// on that would refuse Start for a reason nobody can reproduce (F-2).
+fn hard_stall_latches(kind: StallKind, thread_sample: Option<u64>) -> bool {
+    thread_sample.is_some() && matches!(kind, StallKind::CpuSpin | StallKind::DeadlockStall)
+}
+
+// ── 2d. Secure desktop watcher ─────────────────────────────────────────────
+
+type DesktopLostHandler = Arc<dyn Fn() + Send + Sync>;
+
+static DESKTOP_LOST_HANDLER: OnceLock<Mutex<Option<DesktopLostHandler>>> = OnceLock::new();
+
+/// Register the reaction to losing the input desktop (UAC prompt, Win+L).
+///
+/// The caller is the scheduler: a secure desktop swallows `SendInput`, so the
+/// run must be stopped and its held buttons released — the click thread cannot
+/// see the transition itself.
+pub fn set_desktop_lost_handler(handler: DesktopLostHandler) {
+    if let Ok(mut slot) = DESKTOP_LOST_HANDLER
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+    {
+        *slot = Some(handler);
+    }
+}
+
+fn notify_desktop_lost() {
+    let handler = DESKTOP_LOST_HANDLER
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|g| g.clone());
+    if let Some(handler) = handler {
+        // The maintenance thread is the only thing watching every other
+        // subsystem: a panicking handler must not take it down with the loop.
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler())).is_err() {
+            crate::debug_log_internal(
+                "error",
+                "[Stability] desktop-lost handler panicked; the run may still hold buttons",
+            );
+        }
+    }
+}
+
+/// What changed about the input desktop since the previous sample. Pure, so
+/// the reaction is testable without a UAC prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DesktopEdge {
+    None,
+    Lost,
+    Restored,
+}
+
+fn desktop_edge(previous: Option<bool>, lost: bool) -> DesktopEdge {
+    if !lost {
+        return match previous {
+            Some(true) => DesktopEdge::Restored,
+            _ => DesktopEdge::None,
+        };
+    }
+    // A persistent lock screen fires once, not every second. The first sample
+    // of a run does fire: a run that somehow starts while the desktop is
+    // secure has buttons it can no longer release.
+    match previous {
+        Some(true) => DesktopEdge::None,
+        Some(false) | None => DesktopEdge::Lost,
+    }
+}
+
+/// Is the thread's input desktop unreachable because another desktop (UAC,
+/// lock screen, Ctrl+Alt+Del) owns input?
+///
+/// `OpenInputDesktop` succeeds on the normal desktop and fails with
+/// `ACCESS_DENIED` on a secure one — a process can never open the secure
+/// desktop. Any other failure is reported as "unknown" so a transient resource
+/// error cannot stop a healthy run.
+#[cfg(target_os = "windows")]
+fn secure_desktop_active() -> bool {
+    use windows::Win32::System::StationsAndDesktops::{
+        CloseDesktop, OpenInputDesktop, DESKTOP_ACCESS_FLAGS, DESKTOP_READOBJECTS,
+        DESKTOP_SWITCHDESKTOP,
+    };
+    let opened = unsafe {
+        OpenInputDesktop(
+            windows::Win32::System::StationsAndDesktops::DESKTOP_CONTROL_FLAGS::default(),
+            false,
+            DESKTOP_ACCESS_FLAGS(DESKTOP_READOBJECTS.0 | DESKTOP_SWITCHDESKTOP.0),
+        )
+    };
+    match opened {
+        Ok(handle) => {
+            let _ = unsafe { CloseDesktop(handle) };
+            false
+        }
+        // `from_win32` folds the Win32 code into an HRESULT; the facility bits
+        // are not part of the error identity.
+        Err(e) => (e.code().0 as u32 & 0xFFFF) == windows::Win32::Foundation::ERROR_ACCESS_DENIED.0,
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn secure_desktop_active() -> bool {
+    false
+}
+
+/// TID of the LL-hook thread (0 when the listener is not running). Sampled by
+/// the maintenance tick so a frozen hook is classified on ITS CPU, not the
+/// process total.
+#[cfg(target_os = "windows")]
+fn hook_thread_tid() -> u32 {
+    crate::platform::windows::hook_thread_id()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn hook_thread_tid() -> u32 {
+    0
+}
+
+/// Ask the hook thread to unhook and re-install its LL hooks. Returns `false`
+/// when no hook thread exists.
+#[cfg(target_os = "windows")]
+fn request_hook_reinstall() -> bool {
+    crate::platform::windows::request_hook_reinstall()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn request_hook_reinstall() -> bool {
+    false
 }
 
 // ── 3. Task steering (TaskConduit / TaskHandle) ─────────────────────────────
@@ -1217,6 +1704,7 @@ pub fn all_nodes() -> &'static snubber::NodeSet<'static> {
         set.register("click_worker", click_node());
         set.register("click_state", click_state_node());
         set.register("click_run", click_run_node());
+        set.register("hardware_arbiter", hardware_node());
         set.register("hotkey_hook", hotkey_node());
         set.register("macro_executor", macro_node());
         set.register("file_watcher", watcher_node());
@@ -1229,14 +1717,21 @@ pub fn all_nodes() -> &'static snubber::NodeSet<'static> {
 
 /// Catastrophic fault sum across worker nodes (panic/timeout/process-died/
 /// implicit-drop). Non-zero means a code defect — inspect the fault ledger.
-/// Public name retained for the status bar and test call sites.
+///
+/// FROZEN NAME: pinned by `include_str!` tripwires and by the status surface.
+/// The vocabulary is the retired reactor metaphor (agents.md §5), kept because
+/// renaming it rewrites stored tripwire strings, not because it describes
+/// anything. New code says "catastrophic faults".
 pub fn total_nuclear_breaches() -> u64 {
     all_nodes().total_catastrophic_faults()
 }
 
 /// Shedding sum across worker nodes: `(bulkhead, rate, stale)` stay separate
 /// columns (saturated worker vs. input spam vs. stale epoch) — never merged.
-/// Public name retained for the status bar and test call sites.
+///
+/// FROZEN NAME: same reason as [`total_nuclear_breaches`] — tripwire-pinned
+/// legacy vocabulary. The columns are shed counts, and that is what callers
+/// mean.
 pub fn total_hydraulic_shed() -> (u64, u64, u64) {
     all_nodes().total_hydraulic_shed()
 }
@@ -1289,10 +1784,11 @@ pub type SnapshotNodeEntry = (&'static str, fn() -> &'static SnubberNode);
 
 /// Every node that owns a `.snub` frame, in one place: flush, diagnosis and
 /// the diagnostics board all iterate this table, so a new node is added once.
-pub const SNAPSHOT_NODES: [SnapshotNodeEntry; 9] = [
+pub const SNAPSHOT_NODES: [SnapshotNodeEntry; 10] = [
     ("click_worker", click_node),
     ("click_state", click_state_node),
     ("click_run", click_run_node),
+    ("hardware_arbiter", hardware_node),
     ("hotkey_hook", hotkey_node),
     ("macro_executor", macro_node),
     ("file_watcher", watcher_node),
@@ -1499,20 +1995,162 @@ fn rotate_triage(path: &std::path::Path) {
 /// Boot baseline for the exit diff (empty when the boot hook never ran).
 static BOARD_BASELINE: OnceLock<Mutex<Vec<(&'static str, SnapshotV1)>>> = OnceLock::new();
 
-/// Explicit multi-node board for diagnostics (never a `static` inside
-/// the crate — the app builds it on demand from its own handles).
-pub fn board_all_nodes() -> snubber::NodeSet<'static> {
-    let mut board = snubber::NodeSet::new();
-    for (name, node) in SNAPSHOT_NODES {
-        board.register(name, node());
-    }
-    board
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    /// The arbiter is the only admission path to hardware: two leases at once
+    /// must be impossible, and the latch it publishes is what the lock-free
+    /// refusal surface reads.
+    ///
+    /// Serialized on the scheduler's toggle gate because the class latch is
+    /// process-wide and every `set_active(true)` test takes it too.
+    #[test]
+    fn test_hardware_arbiter_admits_one_lease_and_names_the_holder() {
+        let _gate = crate::scheduler::test_toggle_gate().lock();
+        let click = HardwareArbiter::new("test_click_hardware");
+        // A click run may still be unwinding from the previous test's stop.
+        let mut first = None;
+        for _ in 0..50 {
+            if let Ok(token) = macro_arbiter().acquire(HardOwner::Macro) {
+                first = Some(token);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let first = first.expect("a free arbiter must admit");
+        assert!(hardware_held_by_macro());
+        assert_eq!(start_refusal(), Some("hardware_busy"));
+        assert_eq!(refusal_text(), Some("HARDWARE_BUSY"));
+        // Physical gate: no second slot, whoever asks.
+        assert!(matches!(
+            click.acquire(HardOwner::ClickRun),
+            Err(HardwareBusy::Held { owner: "macro" })
+        ));
+        first.commit();
+        assert!(!hardware_held_by_macro());
+        assert_eq!(start_refusal(), None);
+        // The latch came home: the next run can take it.
+        let second = click.acquire(HardOwner::ClickRun).expect("slot freed by commit");
+        second.commit();
+    }
+
+    #[test]
+    fn test_memory_leak_latch_refuses_a_start_and_names_the_reason() {
+        // Global latch: serialized against every other test that reads the
+        // reaction surface through the same gate the scheduler tests take.
+        let _gate = crate::scheduler::test_toggle_gate().lock();
+        test_latch_memory_leak(true);
+        assert_eq!(start_refusal(), Some("memory_leak"));
+        assert_eq!(refusal_text(), Some("MEMORY_LEAK"));
+        assert_eq!(status_text_override("RUNNING"), Some("MEMORY_LEAK"));
+        // IDLE keeps its own text: a leak is a start guard, not a run label.
+        assert_eq!(status_text_override("IDLE"), None);
+        test_latch_memory_leak(false);
+        assert_eq!(start_refusal(), None);
+        assert_eq!(refusal_text(), None);
+        assert_eq!(status_text_override("RUNNING"), None);
+    }
+
+    #[test]
+    fn test_rss_gradient_names_only_a_full_monotonic_window() {
+        let mut ring = RssGradient::new();
+        // A short window is not an answer, however steep.
+        for kb in [100u64, 200, 300, 400, 500, 600, 700, 800, 900] {
+            assert_eq!(ring.push(kb), None);
+        }
+        // Ten rising samples: growth is newest - oldest.
+        assert_eq!(ring.push(1_000), Some(900));
+        // A single dip clears the window — a healthy process may oscillate.
+        assert_eq!(ring.push(950), None);
+        assert_eq!(ring.push(960), None);
+    }
+
+    #[test]
+    fn test_memory_leak_trip_mark_is_a_growth_not_a_level() {
+        // The user-visible contract: 2 MB per step is monotone but not yet a
+        // leak verdict; the mark is 120 MB of growth, not 120 MB of RSS.
+        assert!(!leak_trips(9 * 2 * 1024));
+        assert!(!leak_trips(MEMORY_GROWTH_TRIP_KB - 1));
+        assert!(leak_trips(MEMORY_GROWTH_TRIP_KB));
+        assert_eq!(MEMORY_GROWTH_TRIP_KB, 120 * 1024);
+        // Ten 15 MB steps cross the mark on the tenth sample.
+        let mut ring = RssGradient::new();
+        let mut last = None;
+        for step in 1..=RSS_RING_LEN {
+            last = ring.push(step as u64 * 15 * 1024);
+        }
+        let growth = last.expect("ten rising samples are a window");
+        assert!(leak_trips(growth), "growth={growth}kb must trip");
+    }
+
+    #[test]
+    fn test_hard_stall_never_latches_without_a_thread_sample() {
+        assert!(!hard_stall_latches(StallKind::CpuSpin, None));
+        assert!(!hard_stall_latches(StallKind::DeadlockStall, None));
+        assert!(hard_stall_latches(StallKind::CpuSpin, Some(0)));
+        assert!(hard_stall_latches(StallKind::DeadlockStall, Some(0)));
+        // Slow but alive: neither hard class.
+        assert!(!hard_stall_latches(StallKind::SleepBlocked, Some(500)));
+    }
+
+    #[test]
+    fn test_desktop_edge_fires_once_per_transition() {
+        // A run's first sample counts: an already-secure desktop must stop it.
+        assert_eq!(desktop_edge(None, true), DesktopEdge::Lost);
+        assert_eq!(desktop_edge(None, false), DesktopEdge::None);
+        assert_eq!(desktop_edge(Some(false), true), DesktopEdge::Lost);
+        assert_eq!(desktop_edge(Some(true), true), DesktopEdge::None);
+        assert_eq!(desktop_edge(Some(true), false), DesktopEdge::Restored);
+        assert_eq!(desktop_edge(Some(false), false), DesktopEdge::None);
+    }
+
+    #[test]
+    fn test_every_hardware_holder_is_watched_for_a_wedged_release() {
+        let holders: Vec<&str> = ROLLBACK_WATCHED
+            .iter()
+            .filter(|e| e.holds_hardware)
+            .map(|e| e.name)
+            .collect();
+        // A wedged release on either body races a new run for the same buttons.
+        assert!(holders.contains(&"click_worker"), "{holders:?}");
+        assert!(holders.contains(&"macro_executor"), "{holders:?}");
+        assert!(holders.contains(&"hardware_arbiter"), "{holders:?}");
+        // The hook's rollback only unhooks; it never touches `SendInput`.
+        assert!(!holders.contains(&"hotkey_hook"), "{holders:?}");
+    }
+
+    #[test]
+    fn test_hardware_arbiter_is_the_only_input_path() {
+        let scheduler = include_str!("scheduler.rs");
+        let executor = include_str!("core/executor.rs");
+        // The click run takes the token before it spawns a worker...
+        let start = scheduler
+            .find("pub fn set_active")
+            .expect("set_active exists");
+        let acquire = scheduler[start..]
+            .find(".acquire(crate::stability::HardOwner::ClickRun)")
+            .expect("set_active must take the hardware token");
+        let spawn = scheduler[start..]
+            .find("self.spawn_worker")
+            .expect("set_active spawns the worker");
+        assert!(
+            acquire < spawn,
+            "the token must be taken before the worker can click"
+        );
+        // ...and macro playback takes the same resource, so the two can never
+        // hold the hardware at once.
+        assert!(executor.contains("macro_arbiter()"));
+        assert!(executor.contains("HardOwner::Macro"));
+        // Neither side may bypass the arbiter with a raw node admission.
+        assert!(!scheduler.contains("hardware_node().enter"));
+        assert!(!executor.contains("hardware_node().enter"));
+        // The inert supervisor seam is gone: it emitted nothing without a
+        // snubber parent and read as a guarantee.
+        assert!(!scheduler.contains("arm_hardware_token"));
+        assert!(!executor.contains("arm_hardware_token"));
+    }
 
     #[test]
     fn test_refusal_precedence_release_engine_memory() {
@@ -1658,7 +2296,7 @@ mod tests {
             }
         });
         let tid = rx.recv().unwrap();
-        let mut sampler = WorkerCpuSampler::new();
+        let mut sampler = ThreadCpuSampler::new();
         // No published worker: no sample, so the caller falls back to process.
         assert_eq!(sampler.observe_tid(0), None);
         // First contact is a baseline, not a delta.
@@ -1676,7 +2314,7 @@ mod tests {
 
     #[test]
     fn test_every_published_rollback_budget_has_a_watcher() {
-        let watched: Vec<&str> = ROLLBACK_WATCHED.iter().map(|(name, _)| *name).collect();
+        let watched: Vec<&str> = ROLLBACK_WATCHED.iter().map(|e| e.name).collect();
         // The hook runs `shutdown_global_hotkey_listener` as its rollback body;
         // its budget used to be published and never read.
         assert!(watched.contains(&"hotkey_hook"));
@@ -1798,16 +2436,25 @@ mod tests {
     }
 
     #[test]
-    fn test_supervisor_hardware_token() {
-        let task_id = next_task_id();
-        let token = ProcessToken::simple(task_id, OP_RELEASE_ALL_INPUTS, 1);
-        let bytes = token.to_bytes();
-        assert_eq!(&bytes[0..4], b"SNUB");
-
-        let parsed = ProcessToken::from_body_bytes(&bytes[4..44].try_into().unwrap());
-        assert_eq!(parsed.task, task_id);
-        assert_eq!(parsed.opcode, OP_RELEASE_ALL_INPUTS);
-        assert_eq!(parsed.payload[0], 1);
+    fn test_inert_supervisor_token_path_stays_buried() {
+        // F-5: `ProcessToken::emit_if_supervised` writes only when the process
+        // runs under `SNUBBER_SUPERVISED`, so on a normal desktop it released
+        // nothing — `input_guardian` is the actual rescue for a held button.
+        // The arbiter owns the hardware now; a resurrected token arm would be a
+        // second, silently inert owner.
+        let lib = include_str!("lib.rs");
+        let sched = include_str!("scheduler.rs");
+        let exec = include_str!("core/executor.rs");
+        for (name, src) in [("lib.rs", lib), ("scheduler.rs", sched), ("executor.rs", exec)] {
+            assert!(
+                !src.contains("ProcessToken"),
+                "{name} must not touch the supervisor token: it is inert outside a supervised run"
+            );
+            assert!(
+                !src.contains("arm_hardware_token"),
+                "{name} must not rely on the inert arm; acquire_hardware owns the hardware"
+            );
+        }
     }
 
     #[test]

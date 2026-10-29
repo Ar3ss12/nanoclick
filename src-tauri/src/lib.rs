@@ -2202,6 +2202,13 @@ pub fn run() {
     let scheduler = Arc::new(ClickScheduler::new());
     scheduler.set_config(config::Config::from(initial_app_cfg.clone()));
     scheduler.update_presets(crate::persistence::presets::load_presets());
+    // A secure desktop (UAC, Win+L) swallows `SendInput`: the click thread
+    // cannot see the transition and would leave buttons held on the desktop it
+    // can no longer reach. The maintenance tick watches for it and calls back.
+    crate::stability::set_desktop_lost_handler(Arc::new({
+        let scheduler = Arc::clone(&scheduler);
+        move || scheduler.stop_for_desktop_loss()
+    }));
 
     let scheduler_for_setup = Arc::clone(&scheduler);
     let config_manager_arc = Arc::clone(&config_manager);

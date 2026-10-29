@@ -36,6 +36,10 @@ impl DaemonState {
             snubber::Protected::new(manager.load_with_action(), bootstrap_guard).commit();
         let scheduler = Arc::new(crate::scheduler::ClickScheduler::new());
         scheduler.set_config(crate::config::Config::from(app_cfg));
+        crate::stability::set_desktop_lost_handler(Arc::new({
+            let scheduler = Arc::clone(&scheduler);
+            move || scheduler.stop_for_desktop_loss()
+        }));
         Self {
             scheduler,
             config_manager: manager,
