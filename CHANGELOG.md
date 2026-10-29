@@ -6,7 +6,7 @@ file.
 
 ## 1.6.0 (unreleased)
 
-Adoption of the `snubber` 0.8 surface: the handle table gets its own derivative
+Adoption of the `snubber` 0.7.5 surface: the handle table gets its own derivative
 watch, the cold frame learns WHAT happened, a refused retry is spread instead
 of fixed, and the compiler is pinned at the repository root.
 
@@ -43,9 +43,10 @@ JS gate 10/10 scripts.
   owner actions plus the exit call; the existing tripwire now asserts the
   whole sequence, not two anchors. `snubber::RankedSet` was considered and not
   adopted: it ranks `&SnubberNode` stops, and none of these steps is a node.
-- `snubber` is consumed from the local `../../../snubber` path at 0.8.0
-  (**unpublished**); the CI checkout pin stands at `228d6f3` (the 0.8.0 API
-  the tree calls) until 0.8.0 is on crates.io.
+- `snubber` 0.7.5 is a registry dependency. The path dep, the second CI
+  checkout and its SHA pin (I44) are gone: a path dep compiled whatever the
+  dev host had, so the runner could stay green while users built a different
+  API. `test_ci_no_longer_pins_a_sha` holds the registry form.
 
 ### Fixed
 

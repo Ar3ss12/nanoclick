@@ -59,7 +59,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rand = "0.8"
 directories = "5.0"
-snubber = { path = "../../../snubber" }
+snubber = "0.7.5"
 
 # Test-only: parking_lot::ReentrantMutex powers the cfg(test) toggle gate in
 # scheduler.rs (serializes toggle calls against the process-global stability

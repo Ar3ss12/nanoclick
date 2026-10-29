@@ -49,8 +49,8 @@ CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the full matrix
 on `windows-latest`: JS gates → clippy `--lib -D warnings` → `panic = "abort"`
 compile gate → lib test lanes → integration suites (assets + daemon handshake +
 guardian e2e). All lanes `--locked -j 2` on the `ci-test` profile; the abort
-gate uses `ci-abort`. The workflow checks out `snubber` separately, because the
-backend depends on it by path.
+gate uses `ci-abort`. `snubber` is a registry dependency, so the workflow checks
+nothing out for it.
 
 > **Copy these commands verbatim.** `cmd.exe` has no `#` comments: a trailing
 > `# …` is passed to the test harness as extra filters and silently runs a

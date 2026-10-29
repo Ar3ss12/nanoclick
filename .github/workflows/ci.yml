@@ -39,41 +39,10 @@ jobs:
       run:
         shell: bash
     steps:
-      # The snubber dependency is a path dep (`../../../snubber` relative to
-      # src-tauri). From $GITHUB_WORKSPACE/nanoclick/src-tauri that resolves
-      # TWO levels above $GITHUB_WORKSPACE (measured: first CI run died with
-      # "failed to read G:\snubber\Cargo.toml" — actions/checkout cannot
-      # check out outside the workspace), so after the checkout the tree is
-      # copied to the location the path dep actually resolves to.
       - name: Checkout nanoclick
         uses: actions/checkout@v4
         with:
           path: nanoclick
-
-      - name: Checkout snubber (path dependency)
-        uses: actions/checkout@v4
-        with:
-          repository: Ar3ss12/snubber
-          # Full SHA required: actions/checkout treats a short ref as a
-          # branch name and the git fetch dies (measured: first CI run).
-          # This SHA is snubber 0.8.0 (unreleased) — the version must match
-          # Cargo.lock, or every `--locked` step dies on a version mismatch
-          # before compiling.
-          # It must ALSO carry every snubber API this tree calls: this is a
-          # separate checkout from the local `../../../snubber` path dep, so a
-          # stale SHA compiles green on the dev host and dies here at the
-          # first cargo step with E0425/E0599 (pin c1eef0d lacked the
-          # LeakWatch / growth_crosses / poll_rollback_node API). Bump it in
-          # the same commit that starts using new crate API;
-          # `test_ci_pins_the_snubber_revision_the_build_resolves` holds the
-          # pin to the checkout the local build resolves.
-          ref: 228d6f330274b2e98836008f34d87785e7d3d502
-          path: snubber
-
-      - name: Stage snubber where the path dependency resolves
-        run: |
-          rm -rf "$GITHUB_WORKSPACE/../snubber"
-          cp -r "$GITHUB_WORKSPACE/snubber" "$GITHUB_WORKSPACE/../snubber"
 
       - name: Install Node 20
         uses: actions/setup-node@v4
