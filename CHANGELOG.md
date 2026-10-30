@@ -84,7 +84,10 @@ only the lib), abort-shaped build (`ci-abort`), JS gate 10/10 scripts.
   `--all-targets` lane failed on it, and a one-line revert returned the lane to
   exit 0. The tripwire is proved the same way — writing `--lib` back into the
   workflow turns it red (`0 passed; 1 failed`, "the clippy lane must lint every
-  target") and widening it again clears it. Tripwire:
+  target") and widening it again clears it. On the runner the widened step took
+  153 s (CI run 41082043859, `5083ae3`, whole gate job 13m36s) against 208 s for
+  the `--lib` step on the previous run 41071685085 (`2a33933`, 18m35s), so the
+  wider scope costs no extra CI minutes. Tripwire:
   `test_the_ci_lint_lane_covers_every_target`.
 - **Teardown order is pinned front to back.** `shutdown_application` runs nine
   owner actions plus the exit call; the existing tripwire now asserts the
