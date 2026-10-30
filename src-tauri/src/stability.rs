@@ -801,6 +801,8 @@ fn maintenance_loop() {
     let mut handles: snubber::HandleWatch<HANDLE_RING_LEN> =
         snubber::HandleWatch::new(HANDLE_GROWTH_TRIP, HANDLE_SAMPLE_MS);
     let mut handle_probe = process_handle_count;
+    // Counts readable samples so the baseline line lands once per full window.
+    let mut handle_windows: u64 = 0;
     // One line per wedged body, not one per second.
     let mut reported_rollback_epoch = [u64::MAX; ROLLBACK_WATCHED.len()];
     // Edge state of the input desktop: `None` until the first sample, so a
@@ -904,31 +906,35 @@ fn maintenance_loop() {
         }
 
         // ── Input desktop: a secure desktop swallows SendInput ──────────
-        // Sampled only while something could be injecting: an idle tray
-        // process has no buttons to unstick, and I16 forbids "just in case"
-        // background reads. `desktop_was_lost` resets between runs, so a run
-        // that begins on a locked/uac desktop is caught on its first sample.
-        if tick.is_multiple_of(5) {
-            if click_pulse_armed() || hardware_held_by_macro() {
-                let lost = secure_desktop_active();
-                let edge = desktop_edge(desktop_was_lost.replace(lost), lost);
-                match edge {
-                    DesktopEdge::Lost => {
-                        crate::debug_log_internal(
-                            "error",
-                            "[Stability] input desktop lost (UAC / lock screen) — releasing hardware and stopping the run",
-                        );
-                        emergency_release_all_hardware();
-                        notify_desktop_lost();
-                    }
-                    DesktopEdge::Restored => {
-                        crate::debug_log_internal("warn", "[Stability] input desktop restored");
-                    }
-                    DesktopEdge::None => {}
+        // Sampled EVERY tick while something could be injecting: a 1 Hz
+        // cadence let UAC / Win+L keep buttons held for up to a second, and
+        // that window is the whole damage. The call fails fast with
+        // ACCESS_DENIED on a secure desktop, so 5 Hz costs one syscall.
+        // Gated on an injection-capable run only: an idle tray process has no
+        // buttons to unstick, and I16 forbids "just in case" background reads.
+        // `desktop_was_lost` resets between runs, so a run that begins on a
+        // locked/uac desktop is caught on its first sample.
+        if click_pulse_armed() || hardware_held_by_macro() {
+            // The tick that ends a run must not lose the edge: sample, then
+            // let the next tick reset when nothing holds hardware.
+            let lost = secure_desktop_active();
+            let edge = desktop_edge(desktop_was_lost.replace(lost), lost);
+            match edge {
+                DesktopEdge::Lost => {
+                    crate::debug_log_internal(
+                        "error",
+                        "[Stability] input desktop lost (UAC / lock screen) — releasing hardware and stopping the run",
+                    );
+                    emergency_release_all_hardware();
+                    notify_desktop_lost();
                 }
-            } else {
-                desktop_was_lost = None;
+                DesktopEdge::Restored => {
+                    crate::debug_log_internal("warn", "[Stability] input desktop restored");
+                }
+                DesktopEdge::None => {}
             }
+        } else {
+            desktop_was_lost = None;
         }
 
         // ── 1 Hz: rollback bodies + memory ─────────────────────────────
@@ -1000,14 +1006,17 @@ fn maintenance_loop() {
                 // a strictly rising working set. Sample every 30 s and name
                 // the gradient, not the ceiling.
                 if tick.is_multiple_of(RSS_SAMPLE_MS / MAINTENANCE_TICK_MS) {
-                    // `sample` feeds both halves; the verdict is read from
-                    // `classification()` so a Soft level cannot mask a rising
-                    // trend (the level stays the node's admission gate).
-                    let _ = rss.sample(used_kb);
+                    // `sample` answers the whole question: the level and the
+                    // trend come from the same observation, so a Soft level
+                    // cannot mask a rising window (the level stays the node's
+                    // admission gate). Reading `classification()` again was a
+                    // second question to the same ring for an answer already
+                    // in hand.
+                    let report = rss.sample(used_kb);
                     if let snubber::LeakClassification::Rising {
                         growth_kb,
                         rate_kb_sec,
-                    } = rss.classification()
+                    } = report.trend
                     {
                         let rate_kb_sec = rate_kb_sec.unwrap_or(0);
                         if !MEMORY_LEAK.swap(true, Ordering::AcqRel) {
@@ -1056,28 +1065,43 @@ fn maintenance_loop() {
             // grows toward its limit. Same rule as memory — a full, strictly
             // rising window past the mark — and the probe returning `None`
             // records nothing, because a fabricated `0` would be a dip.
+            //
+            // The window is also published for the diagnostic dump and logged
+            // once per completed window: `HANDLE_GROWTH_TRIP` was armed
+            // without field data, and the only way to size it is to see what
+            // a healthy process's count actually does.
             if tick.is_multiple_of(HANDLE_SAMPLE_MS / MAINTENANCE_TICK_MS) {
-                let verdict = handles.sample(&mut handle_probe);
-                if let Some(snubber::LeakClassification::Rising {
-                    growth_kb: growth,
-                    rate_kb_sec,
-                }) = verdict
-                {
-                    if !HANDLE_LEAK.swap(true, Ordering::AcqRel) {
+                if let Some(verdict) = handles.sample(&mut handle_probe) {
+                    publish_handle_window(&handles);
+                    if let snubber::LeakClassification::Rising {
+                        growth_kb: growth,
+                        rate_kb_sec,
+                    } = verdict
+                    {
+                        if !HANDLE_LEAK.swap(true, Ordering::AcqRel) {
+                            crate::debug_log_internal(
+                                "error",
+                                &format!(
+                                    "[Stability] handle leak: count grew {growth} over {HANDLE_RING_LEN} samples with no drop (~{}handles/s, handles={})",
+                                    rate_kb_sec.unwrap_or(0),
+                                    handles.newest().unwrap_or(0)
+                                ),
+                            );
+                        }
+                    } else if HANDLE_LEAK.swap(false, Ordering::AcqRel) {
                         crate::debug_log_internal(
-                            "error",
-                            &format!(
-                                "[Stability] handle leak: count grew {growth} over {HANDLE_RING_LEN} samples with no drop (~{}handles/s, handles={})",
-                                rate_kb_sec.unwrap_or(0),
-                                handles.newest().unwrap_or(0)
-                            ),
+                            "warn",
+                            "[Stability] handle leak cleared — the count stopped climbing",
                         );
                     }
-                } else if HANDLE_LEAK.swap(false, Ordering::AcqRel) {
-                    crate::debug_log_internal(
-                        "warn",
-                        "[Stability] handle leak cleared — the count stopped climbing",
-                    );
+                    // One line per completed window (5 min), not per sample.
+                    handle_windows += 1;
+                    if handle_windows.is_multiple_of(HANDLE_RING_LEN as u64) {
+                        crate::debug_log_internal(
+                            "warn",
+                            &format!("[Stability] handle window: {}", handle_window_line()),
+                        );
+                    }
                 }
             }
         }
@@ -1130,6 +1154,100 @@ pub(crate) fn test_latch_memory_leak(v: bool) {
 pub(crate) fn test_latch_handle_leak(v: bool) {
     HANDLE_LEAK.store(v, Ordering::Release);
 }
+
+// ── Handle window mirror: what a field log can see ────────────────────────
+// `HANDLE_GROWTH_TRIP` (64 handles over ten 30 s samples) was armed without
+// field data, so the window's own numbers are published here: the diagnostic
+// dump reads them on demand and the tick logs them once per completed window.
+// Sentinels, not zeros: `0` is a real handle count in a test and a fabricated
+// dip everywhere else, so "never sampled" must not read as a number.
+
+const HANDLE_UNREAD: u64 = u64::MAX;
+const TREND_NO_SAMPLE: u64 = 0;
+/// Index into [`HANDLE_TREND_CODES`]; `0` means "no readable sample yet".
+static HANDLE_TREND: AtomicU64 = AtomicU64::new(TREND_NO_SAMPLE);
+/// Newest readable count, or [`HANDLE_UNREAD`].
+static HANDLE_NEWEST: AtomicU64 = AtomicU64::new(HANDLE_UNREAD);
+/// Samples currently held by the window.
+static HANDLE_SAMPLES: AtomicU64 = AtomicU64::new(0);
+/// `newest - oldest` of a `Stable` / `Rising` window; unread otherwise.
+static HANDLE_GROWTH: AtomicU64 = AtomicU64::new(HANDLE_UNREAD);
+/// Handles per second of a `Rising` window; unread otherwise.
+static HANDLE_RATE: AtomicU64 = AtomicU64::new(HANDLE_UNREAD);
+
+const HANDLE_TREND_CODES: [&str; 6] = [
+    "no-sample",
+    "warming",
+    "stable",
+    "rising",
+    "sawtooth",
+    // The enum is `#[non_exhaustive]`: a verdict this build does not know is
+    // reported as such rather than folded into a neighbour it might not be.
+    "other",
+];
+
+fn handle_trend_rank(verdict: snubber::LeakClassification) -> u64 {
+    match verdict {
+        snubber::LeakClassification::Warming { .. } => 1,
+        snubber::LeakClassification::Stable { .. } => 2,
+        snubber::LeakClassification::Rising { .. } => 3,
+        snubber::LeakClassification::Sawtooth => 4,
+        _ => 5,
+    }
+}
+
+/// Copy the tick-owned window into the atomics another thread may read.
+fn publish_handle_window<const N: usize>(watch: &snubber::HandleWatch<N>) {
+    let verdict = watch.classification();
+    let (growth, rate) = match verdict {
+        snubber::LeakClassification::Stable { growth_kb } => (Some(growth_kb), None),
+        snubber::LeakClassification::Rising {
+            growth_kb,
+            rate_kb_sec,
+        } => (Some(growth_kb), rate_kb_sec),
+        _ => (None, None),
+    };
+    HANDLE_SAMPLES.store(watch.samples() as u64, Ordering::Release);
+    HANDLE_NEWEST.store(watch.newest().unwrap_or(HANDLE_UNREAD), Ordering::Release);
+    HANDLE_GROWTH.store(growth.unwrap_or(HANDLE_UNREAD), Ordering::Release);
+    HANDLE_RATE.store(rate.unwrap_or(HANDLE_UNREAD), Ordering::Release);
+    HANDLE_TREND.store(handle_trend_rank(verdict), Ordering::Release);
+}
+
+/// One line over the published handle window: count, fill, trend, growth and
+/// the configured mark, so a field log can size `HANDLE_GROWTH_TRIP` against
+/// what a healthy process actually does. `-` means "not available", never `0`.
+pub fn handle_window_line() -> String {
+    format_handle_window(
+        HANDLE_NEWEST.load(Ordering::Acquire),
+        HANDLE_SAMPLES.load(Ordering::Acquire),
+        HANDLE_TREND.load(Ordering::Acquire),
+        HANDLE_GROWTH.load(Ordering::Acquire),
+        HANDLE_RATE.load(Ordering::Acquire),
+    )
+}
+
+fn format_handle_window(newest: u64, samples: u64, trend: u64, growth: u64, rate: u64) -> String {
+    let trend = HANDLE_TREND_CODES[(trend as usize).min(HANDLE_TREND_CODES.len() - 1)];
+    let number = |v: u64| {
+        if v == HANDLE_UNREAD {
+            "-".to_string()
+        } else {
+            v.to_string()
+        }
+    };
+    format!(
+        "handles={} samples={samples}/{HANDLE_RING_LEN} trend={trend} growth={} trip={HANDLE_GROWTH_TRIP} rate={}",
+        number(newest),
+        number(growth),
+        if rate == HANDLE_UNREAD {
+            "-".to_string()
+        } else {
+            format!("{rate}/s")
+        },
+    )
+}
+
 const LEVEL_OK: u64 = 0;
 const LEVEL_SOFT: u64 = 1;
 const LEVEL_HARD: u64 = 2;
@@ -2390,6 +2508,68 @@ mod tests {
     }
 
     #[test]
+    fn test_handle_window_line_is_the_field_baseline() {
+        let _gate = crate::scheduler::test_toggle_gate().lock();
+        // Before any readable sample the line says so instead of printing the
+        // zeros that would look like a healthy flat count.
+        let cold = format_handle_window(HANDLE_UNREAD, 0, TREND_NO_SAMPLE, HANDLE_UNREAD, HANDLE_UNREAD);
+        assert_eq!(
+            cold,
+            format!("handles=- samples=0/{HANDLE_RING_LEN} trend=no-sample growth=- trip={HANDLE_GROWTH_TRIP} rate=-"),
+            "an unread window must not be dressed as a number"
+        );
+
+        // A full, slowly climbing window names its own drift and the mark it
+        // stayed under — the datum the 64-handle trip was armed without.
+        let mut calm: snubber::HandleWatch<HANDLE_RING_LEN> =
+            snubber::HandleWatch::new(HANDLE_GROWTH_TRIP, HANDLE_SAMPLE_MS);
+        for step in 0..HANDLE_RING_LEN {
+            calm.note(1_000 + step as u64 * 5);
+        }
+        publish_handle_window(&calm);
+        let line = handle_window_line();
+        assert!(line.contains("handles=1045"), "{line}");
+        assert!(
+            line.contains(&format!("samples={HANDLE_RING_LEN}/{HANDLE_RING_LEN}")),
+            "{line}"
+        );
+        assert!(line.contains("trend=stable"), "{line}");
+        assert!(line.contains("growth=45"), "{line}");
+        assert!(line.contains(&format!("trip={HANDLE_GROWTH_TRIP}")), "{line}");
+        assert!(line.ends_with("rate=-"), "no rise, no rate: {line}");
+
+        // A rising window carries the slope it crossed the mark with.
+        let mut rising: snubber::HandleWatch<HANDLE_RING_LEN> =
+            snubber::HandleWatch::new(HANDLE_GROWTH_TRIP, HANDLE_SAMPLE_MS);
+        for step in 0..HANDLE_RING_LEN {
+            rising.note(1_000 + step as u64 * 100);
+        }
+        publish_handle_window(&rising);
+        let line = handle_window_line();
+        assert!(line.contains("trend=rising"), "{line}");
+        assert!(line.contains("growth=900"), "{line}");
+        assert!(line.contains("/s"), "a rising window names its rate: {line}");
+        assert!(!line.contains("rate=-"), "{line}");
+    }
+
+    #[test]
+    fn test_the_diag_dump_carries_the_handle_window() {
+        // The window lives inside the maintenance tick; without this line a
+        // field log has no handle count and the trip mark cannot be tuned.
+        let dump = include_str!("lib.rs");
+        assert!(
+            dump.contains("crate::stability::handle_window_line()"),
+            "TRIPWIRE FIRED: dump_input_diagnostics must log the handle window"
+        );
+        // And the line builder stays public to the crate's command layer.
+        assert!(
+            include_str!("stability.rs")
+                .contains("pub fn handle_window_line() -> String"),
+            "TRIPWIRE FIRED: handle_window_line is the one number source"
+        );
+    }
+
+    #[test]
     fn test_flight_tape_rides_the_cold_frame_and_the_triage_card() {
         // The exit artifact is what a crash is read from, so the tape has to
         // be in the same 512 B frame and in the triage card — not in a log
@@ -2469,6 +2649,33 @@ mod tests {
         assert_eq!(desktop_edge(Some(true), true), DesktopEdge::None);
         assert_eq!(desktop_edge(Some(true), false), DesktopEdge::Restored);
         assert_eq!(desktop_edge(Some(false), false), DesktopEdge::None);
+    }
+
+    /// The secure desktop is sampled on EVERY maintenance tick while a run can
+    /// inject. A 1 Hz cadence behind `tick.is_multiple_of(5)` left up to a
+    /// second in which UAC / Win+L had already swallowed input while the
+    /// buttons stayed down — the exact window the stop exists to close.
+    #[test]
+    fn test_desktop_is_sampled_every_tick_while_injecting() {
+        let src = include_str!("stability.rs");
+        let marker = "// ── Input desktop: a secure desktop swallows SendInput";
+        let at = src.find(marker).expect("desktop sampler marker missing");
+        let tail = &src[at..];
+        let sample = tail
+            .find("secure_desktop_active();")
+            .expect("sampler call missing");
+        let window = &tail[..sample];
+        assert!(
+            !window.contains("is_multiple_of"),
+            "TRIPWIRE FIRED: the secure-desktop sample sits behind a tick gate — \
+             a 1 Hz sample leaves up to a second of held buttons on UAC / Win+L; \
+             the sample belongs to every tick"
+        );
+        assert!(
+            window.contains("click_pulse_armed() || hardware_held_by_macro()"),
+            "TRIPWIRE FIRED: the sample must stay gated on an injection-capable \
+             run — an idle tray process has nothing to unstick (I16)"
+        );
     }
 
     #[test]

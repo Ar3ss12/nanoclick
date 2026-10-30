@@ -757,7 +757,8 @@ fn prepare_nsis_update(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Dump the input layer's diagnostic ring buffers into the log.
+/// Dump the input layer's diagnostic ring buffers and the stability handle
+/// window into the log.
 ///
 /// The keyboard hook and the toggle gate record every decision
 /// (`fired_action=…`, `suppressed_action=…`, `reject_reason=invalid_binding`,
@@ -789,6 +790,13 @@ fn dump_input_diagnostics() -> usize {
     for line in ripples {
         debug_log_internal("warn", &format!("[Diag] ripple: {line}"));
     }
+    // The handle window is the one stability number a field log cannot
+    // reconstruct: the trip mark was armed without data, and the count only
+    // exists inside the maintenance tick.
+    debug_log_internal(
+        "warn",
+        &format!("[Diag] stability: {}", crate::stability::handle_window_line()),
+    );
     #[cfg(target_os = "windows")]
     {
         debug_log_internal(

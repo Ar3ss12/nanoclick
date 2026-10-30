@@ -10,8 +10,8 @@ Adoption of the `snubber` 0.7.5 surface: the handle table gets its own derivativ
 watch, the cold frame learns WHAT happened, a refused retry is spread instead
 of fixed, and the compiler is pinned at the repository root.
 
-Suite green: **516 tests** (408 lib + 103 asset tripwires + 3 daemon handshake
-+ 2 guardian e2e), clippy `-D warnings`, abort-shaped build (`ci-abort`),
+Suite green: **520 tests** (411 lib + 104 asset tripwires + 3 daemon handshake
++ 2 guardian e2e), clippy `-D warnings` (lib), abort-shaped build (`ci-abort`),
 JS gate 10/10 scripts.
 
 ### Added
@@ -36,6 +36,16 @@ JS gate 10/10 scripts.
   bulkhead. Deterministic: the same salt always yields the same delay.
 - **`rust-toolchain.toml`** at the repository root: `stable` (the channel CI
   installs) with `clippy` + `rustfmt`, `profile = "minimal"`.
+- **Handle-window diagnostics** (`stability::handle_window_line()`): the tick
+  mirrors the sampled window into atomics (`handles`, `samples/10`, `trend`,
+  `growth`, `trip`, `rate`) and `dump_input_diagnostics` logs it at `warn`, so
+  a field log carries the count the 64-handle mark was armed without; the tick
+  also logs one baseline line per completed window (5 min). `-` means "not
+  available", never a fabricated `0`.
+- **One-snubber lock tripwire** (`test_the_lock_carries_exactly_one_snubber`):
+  the existing check reads only the first lock entry, so a second copy — a
+  stale path package beside the registry one — would have stayed green while
+  two APIs shared the tree.
 
 ### Changed
 
@@ -47,9 +57,22 @@ JS gate 10/10 scripts.
   checkout and its SHA pin (I44) are gone: a path dep compiled whatever the
   dev host had, so the runner could stay green while users built a different
   API. `test_ci_no_longer_pins_a_sha` holds the registry form.
+- **Secure desktop is sampled on every maintenance tick** (5 Hz), not once a
+  second: a 1 Hz sample left buttons held for up to a second on UAC / Win+L,
+  which is the whole damage. The gate is the injection-capable run, not the
+  tick counter, so an idle tray process still reads nothing (I16). Tripwire:
+  `test_desktop_is_sampled_every_tick_while_injecting`.
+- **`HANDLE_LEAK` clears only on a readable, non-rising verdict.** A probe
+  that returned `None` used to fall into the same branch as `Stable` and clear
+  the latch while the window it contradicted had not changed.
+- **One memory question per sample**: `MemoryTrend::sample()`'s `MemoryReport`
+  carries the trend, so the tick reads `report.trend` instead of calling
+  `classification()` a second time.
 
 ### Fixed
 
+- `HANDLE_LEAK` could be cleared by a failed handle probe (`None` took the
+  "not rising" branch), while the window still said `Rising`.
 - `ErasedGuard` type annotations at `core/executor.rs` and `scheduler.rs`
   (`ErasedGuard<ProbeSlot>`), the only two call sites the 0.8 typed slots
   broke.

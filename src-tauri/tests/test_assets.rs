@@ -7072,3 +7072,28 @@ fn test_ci_no_longer_pins_a_sha() {
         "snubber must resolve from the registry with a checksum, not a path"
     );
 }
+
+/// One `snubber` in the lock, not one per dependent.
+///
+/// `test_ci_no_longer_pins_a_sha` reads the FIRST entry, so a second copy — a
+/// stale path package beside the registry one — would compile happily and
+/// keep the gate green while two different APIs share the tree. The count is
+/// the contract: the binary ships the registry version or it does not build.
+#[test]
+fn test_the_lock_carries_exactly_one_snubber() {
+    let lock = include_str!("../../Cargo.lock");
+    let packages: Vec<&str> = lock
+        .split("[[package]]")
+        .filter(|block| block.contains("name = \"snubber\""))
+        .collect();
+    assert_eq!(
+        packages.len(),
+        1,
+        "Cargo.lock must resolve exactly one snubber package, found {}",
+        packages.len()
+    );
+    assert!(
+        packages[0].contains("source = \"registry+"),
+        "the one snubber entry must come from the registry, not a path"
+    );
+}
