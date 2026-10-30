@@ -1211,6 +1211,10 @@ impl ConfigManager {
 #[allow(unused_imports)]
 pub use crate::defaults::migrate_config;
 
+fn default_hotkey_debounce_ms() -> u32 {
+    80
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1258,17 +1262,19 @@ mod tests {
 
     #[test]
     fn stats_config_serialization_roundtrip() {
-        let mut stats = StatsConfig::default();
-        stats.total_clicks = 12345;
-        stats.total_sessions = 42;
-        stats.total_active_ms = 3600000;
-        stats.max_cps = 55.5;
-        stats.history.push(StatHistoryPoint {
-            timestamp: 100000,
-            clicks: 250,
-            active_ms: 10000,
-            avg_cps: 25.0,
-        });
+        let stats = StatsConfig {
+            total_clicks: 12345,
+            total_sessions: 42,
+            total_active_ms: 3600000,
+            max_cps: 55.5,
+            history: vec![StatHistoryPoint {
+                timestamp: 100000,
+                clicks: 250,
+                active_ms: 10000,
+                avg_cps: 25.0,
+            }],
+            ..StatsConfig::default()
+        };
         let json = serde_json::to_string(&stats).unwrap();
         let restored: StatsConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.total_clicks, 12345);
@@ -1371,8 +1377,4 @@ mod tests {
         let restored: AppConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.ui.language, "en");
     }
-}
-
-fn default_hotkey_debounce_ms() -> u32 {
-    80
 }

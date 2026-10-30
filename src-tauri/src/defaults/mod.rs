@@ -1013,7 +1013,7 @@ mod tests {
     fn embedded_default_json_is_valid_and_safe() {
         let cfg = get_embedded_default_config();
         assert_eq!(cfg.schema_version, 2);
-        assert_eq!(cfg.first_run, true);
+        assert!(cfg.first_run, "the shipped default must boot as a first run");
         assert_eq!(cfg.engine.click_type, "single");
         assert_eq!(cfg.engine.target_cps, 10.0);
         assert!(cfg.presets.len() >= 4);

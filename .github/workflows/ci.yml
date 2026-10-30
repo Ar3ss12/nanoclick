@@ -62,19 +62,22 @@ jobs:
         working-directory: nanoclick
         run: powershell -ExecutionPolicy Bypass -File scripts/check-js.ps1
 
-      # ── 1. Lints — lib only, deny all warnings ──────────────────────────
-      # Fast-fail beats deep-fail: clippy costs ~1m on a warm cache, while the
-      # abort compile + test lanes below cost ~10m together. A lint error is
-      # cheaper to discover before either of them has run.
+      # ── 1. Lints — every target, deny all warnings ──────────────────────
+      # Fast-fail beats deep-fail: clippy costs well under the abort compile +
+      # test lanes below, so a lint error is cheaper to discover first.
       # Runs on the ci-test profile so it shares dependency artifacts with the
       # test lanes below; --release here would compile the whole dep graph a
       # second time under a profile nothing else uses.
-      # Test targets are intentionally excluded: the local gate keeps include_str
-      # tripwire strings byte-exact, and clippy --fix on tests risks rewriting
-      # them. CI must never be weaker than the local gate.
-      - name: Clippy (lib, -D warnings)
+      # --all-targets, not --lib: a --lib lane never compiles cfg(test) code,
+      # so the whole `#[cfg(test)]` surface and every tests/*.rs suite could go
+      # lint-red unnoticed. Measured cold re-check of this crate with warm
+      # deps: --lib 8.4s, --all-targets 33.7s (both -D warnings, exit 0).
+      # CI checks and never fixes: clippy --fix could rewrite the literal
+      # include_str! tripwire strings in tests/test_assets.rs, which must stay
+      # byte-exact. Tripwire: test_the_ci_lint_lane_covers_every_target.
+      - name: Clippy (all targets, -D warnings)
         working-directory: nanoclick/src-tauri
-        run: cargo clippy --profile ci-test --locked -j 2 --lib -- -D warnings
+        run: cargo clippy --profile ci-test --locked -j 2 --all-targets -- -D warnings
 
       # ── 2. Abort-shaped compile gate ─────────────────────────────────────
       # Lib + both bins compiled with panic=abort on stable. Running TESTS

@@ -2769,10 +2769,12 @@ mod tests {
         // never a fabricated zero.
         match process_handle_count() {
             Some(count) => assert!(count > 0, "a running process holds handles"),
-            None => assert!(
-                !cfg!(target_os = "windows"),
-                "GetProcessHandleCount must answer on Windows"
-            ),
+            // The arm is chosen by the target, so the Windows build cannot
+            // reach a branch that only says "this may not happen here".
+            #[cfg(target_os = "windows")]
+            None => panic!("GetProcessHandleCount must answer on Windows"),
+            #[cfg(not(target_os = "windows"))]
+            None => {}
         }
     }
 

@@ -1472,13 +1472,15 @@ setTimeout(function () {
 "#;
 
 /// Behavioural verification of `boot_guard.js` on a real V8 (Node + the minimal
-/// DOM/IPC stub from BOOT_GUARD_HARNESS above):
-///   * "dead"    — the handshake flag is never raised: the guard must report
-///                 `[BOOT] MODULE DID NOT EXECUTE (SyntaxError class)` exactly
-///                 once AND render the banner. This is the only detection that
-///                 survives a module-level SyntaxError.
-///   * "healthy" — the flag is raised: the watchdog must stay silent (no false
-///                 alarms on a normal boot).
+/// DOM/IPC stub from BOOT_GUARD_HARNESS above).
+///
+/// - "dead": the handshake flag is never raised. The guard must report
+///   `[BOOT] MODULE DID NOT EXECUTE (SyntaxError class)` exactly once AND render
+///   the banner — this is the only detection that survives a module-level
+///   SyntaxError.
+/// - "healthy": the flag is raised, so the watchdog must stay silent (no false
+///   alarms on a normal boot).
+///
 /// Dedupe is asserted as well: one crash fired twice must produce one report.
 #[test]
 fn test_boot_guard_behaviour_on_node() {
@@ -5209,7 +5211,7 @@ fn matches_in_window_hotkey(binding_str: &str, current_key: &str, held_keys: &[&
         return false;
     }
     let groups: Vec<&str> = binding_str
-        .split(|c| c == '/' || c == '|')
+        .split(['/', '|'])
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .collect();
@@ -7030,13 +7032,20 @@ fn test_satellite_destroy_lives_only_on_tray_shutdown_and_rollback() {
 /// SHA pin existed because a path dep resolves to whatever the dev host has,
 /// which also hid a stale dev tree behind a green runner. Hold the registry
 /// form: a path dep, a staged checkout or a `ref:` pin is a regression to the
-/// divergence this contract retires.
+/// divergence this contract retires. The requirement is an exact `=X.Y.Z` pin,
+/// so a bare caret here is a silent auto-upgrade path back to divergence.
 #[test]
 fn test_ci_no_longer_pins_a_sha() {
     let cargo_toml = include_str!("../Cargo.toml");
     assert!(
-        cargo_toml.contains("snubber = \"0.7.6\""),
-        "snubber must be consumed from the registry at the published version"
+        cargo_toml.contains("snubber = \"=0.7.6\""),
+        "snubber must be pinned exactly to the registry version the app was \
+         gated on"
+    );
+    assert!(
+        !cargo_toml.contains("snubber = \"0.7.6\""),
+        "a caret requirement lets `cargo update -p snubber` move the app onto \
+         a version no gate has measured"
     );
     assert!(
         !cargo_toml.contains("path = \"../../../snubber\""),
@@ -7095,5 +7104,40 @@ fn test_the_lock_carries_exactly_one_snubber() {
     assert!(
         packages[0].contains("source = \"registry+"),
         "the one snubber entry must come from the registry, not a path"
+    );
+}
+
+/// The lint lane must see the code the test lanes compile.
+///
+/// `cargo clippy --lib` never builds `cfg(test)` code, so every `#[cfg(test)]`
+/// module and every `tests/*.rs` suite could go lint-red while CI stayed green
+/// — the blind spot the 2026-10-30 sweep found its findings in. Widening
+/// the lane only stays a fix if something holds it open, so the command form is
+/// pinned here.
+///
+/// The lane must also never run `--fix`: this file compares `include_str!`
+/// sources against literal tripwire strings, and a machine rewrite of either
+/// side silently changes what the gate asserts.
+#[test]
+fn test_the_ci_lint_lane_covers_every_target() {
+    let ci = include_str!("../../.github/workflows/ci.yml");
+    let after = ci
+        .split("cargo clippy")
+        .nth(1)
+        .expect("ci.yml must run a cargo clippy lane");
+    let lane = after.split('\n').next().unwrap_or(after).trim();
+
+    assert!(
+        lane.contains("--all-targets"),
+        "the clippy lane must lint every target, not only the lib: {lane}"
+    );
+    assert!(
+        !lane.contains("--lib "),
+        "a --lib lane cannot see cfg(test) code: {lane}"
+    );
+    assert!(lane.contains("-D warnings"), "the lane must deny warnings: {lane}");
+    assert!(
+        !lane.contains("--fix"),
+        "CI checks lints; --fix would rewrite tripwire literals: {lane}"
     );
 }

@@ -257,9 +257,11 @@ mod tests {
 
     #[test]
     fn boot_totals_are_inherited_not_reset() {
-        let mut totals = StatsConfig::default();
-        totals.total_clicks = 1234;
-        totals.total_sessions = 7;
+        let totals = StatsConfig {
+            total_clicks: 1234,
+            total_sessions: 7,
+            ..StatsConfig::default()
+        };
         let mut s = SessionStats::with_totals(totals);
         s.tick(true, 0, 10.0, 1_000); // first run of the session
         assert_eq!(s.totals.total_sessions, 8);

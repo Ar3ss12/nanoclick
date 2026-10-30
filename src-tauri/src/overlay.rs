@@ -683,12 +683,6 @@ mod tests {
     }
 
     #[test]
-    fn test_overlay_module_exists() {
-        // Basic compile and sanity check
-        assert!(true);
-    }
-
-    #[test]
     fn test_satellite_hud_check_mark_follows_preference() {
         // The tray HUD item must show the live preference (same contract as
         // mode/clicking marks) — a blind item is how the tray "controlled"
@@ -895,9 +889,9 @@ mod tests {
         // Fast Recreate: Windows asynchronous COM teardown lag is mitigated by
         // a 60ms backoff in ensure_satellite. An invalid or non-existent label
         // must fail gracefully without panic or corruption.
-        assert_eq!(matches!("overlay", "overlay" | "hud"), true);
-        assert_eq!(matches!("hud", "overlay" | "hud"), true);
-        assert_eq!(matches!("unknown_window", "overlay" | "hud"), false);
+        assert!(matches!("overlay", "overlay" | "hud"));
+        assert!(matches!("hud", "overlay" | "hud"));
+        assert!(!matches!("unknown_window", "overlay" | "hud"));
     }
 
     // Level 2: Facade State Machine & Concurrency Test

@@ -11,9 +11,9 @@ watch, the cold frame learns WHAT happened, a refused retry is spread instead
 of fixed, a slope shorter than a full window is named instead of hidden, and
 the compiler is pinned at the repository root.
 
-Suite green: **522 tests** (413 lib + 104 asset tripwires + 3 daemon handshake
-+ 2 guardian e2e), clippy `-D warnings` (lib), abort-shaped build (`ci-abort`),
-JS gate 10/10 scripts.
+Suite green: **522 tests** (412 lib + 105 asset tripwires + 3 daemon handshake
++ 2 guardian e2e), clippy `-D warnings` over `--all-targets` (every target, not
+only the lib), abort-shaped build (`ci-abort`), JS gate 10/10 scripts.
 
 ### Added
 
@@ -61,20 +61,48 @@ JS gate 10/10 scripts.
 
 ### Changed
 
+- **The lint lane covers every target** (I49). CI ran `cargo clippy --lib`, and
+  `--lib` never compiles `cfg(test)` code: findings inside the `#[cfg(test)]`
+  modules and inside every `tests/*.rs` suite were invisible to the gate while
+  those very suites ran green. The lane is `--all-targets` now, and the code
+  under it is clean — `assertions_on_constants`, `bool_assert_comparison`,
+  `items_after_test_module`, `field_reassign_with_default`, `type_complexity`,
+  `len_zero`, `redundant_closure`, `manual_flatten`,
+  `manual_pattern_char_comparison`, `doc_overindented_list_items` and
+  `doc_lazy_continuation` across 12 source files, every one fixed at its source
+  with no rule allowed out and no assertion weakened. The three constant-bound
+  guards (`TRAY_FLUSH_WAIT_MS`, `WM_TRAY_CALLBACK`, `OWN_WRITE_GRACE_MS`) moved
+  from runtime `assert!` to `const _: () = assert!(…)`, which is both what the
+  lint asks for and strictly stronger: inside `cfg(test)` code, a violated bound
+  stops every build that compiles the test lanes — the lint lane included —
+  instead of failing one test nobody reruns. `test_overlay_module_exists` was
+  `assert!(true)` — deleted, not repaired, which is why the lib lane reads 412
+  where it read 413. Cost, cold
+  re-check of this crate with warm dependency artifacts: `--lib` 8.4 s,
+  `--all-targets` 33.7 s, both `-D warnings`. Proved by injecting a `len_zero`
+  finding into `overlay.rs`'s test module: the `--lib` lane exited 0 over it, the
+  `--all-targets` lane failed on it, and a one-line revert returned the lane to
+  exit 0. The tripwire is proved the same way — writing `--lib` back into the
+  workflow turns it red (`0 passed; 1 failed`, "the clippy lane must lint every
+  target") and widening it again clears it. Tripwire:
+  `test_the_ci_lint_lane_covers_every_target`.
 - **Teardown order is pinned front to back.** `shutdown_application` runs nine
   owner actions plus the exit call; the existing tripwire now asserts the
   whole sequence, not two anchors. `snubber::RankedSet` was considered and not
   adopted: it ranks `&SnubberNode` stops, and none of these steps is a node.
-- `snubber` 0.7.6 is a registry dependency (`src-tauri/Cargo.toml`, lock entry
-  `0.7.6` checksum `b533ab7f…`). The path dep, the second CI
-  checkout and its SHA pin (I44) are gone: a path dep compiled whatever the
-  dev host had, so the runner could stay green while users built a different
-  API. `test_ci_no_longer_pins_a_sha` holds the registry form — measured by
-  putting the requirement back to `0.7.5`: the suite goes
-  `103 passed; 1 failed` on that tripwire, and a one-line revert returns it to
-  `104 passed; 0 failed`. 0.7.6 is a source-compatible minor release for this
-  app: every `LeakClassification` match already carries a wildcard, and the
-  drain arm-identity fix touches nothing NanoClick calls (it uses no
+- **`snubber` is an exact registry pin.** `src-tauri/Cargo.toml` carries
+  `snubber = "=0.7.6"` (lock entry `0.7.6`, checksum `b533ab7f…`). The path dep,
+  the second CI checkout and its SHA pin (I44) are gone: a path dep compiled
+  whatever the dev host had, so the runner could stay green while users built a
+  different API. A caret left the same hole one step later — `cargo update -p
+  snubber` would move the app onto a release no gate here has measured without
+  any line in this repo changing — so the requirement uses `=`.
+  `test_ci_no_longer_pins_a_sha` holds all three: registry source, exact pin, and
+  the absence of the caret form — measured by writing the caret back: the asset
+  suite goes `104 passed; 1 failed` on that tripwire, and a one-character revert
+  returns it to `105 passed; 0 failed`. 0.7.6 is a source-compatible minor release
+  for this app: every `LeakClassification` match already carries a wildcard, and
+  the drain arm-identity fix touches nothing NanoClick calls (it uses no
   `PipeDrain` / `WorkerPool`).
 - **Secure desktop is sampled on every maintenance tick** (5 Hz), not once a
   second: a 1 Hz sample left buttons held for up to a second on UAC / Win+L,

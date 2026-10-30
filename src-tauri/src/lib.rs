@@ -2975,8 +2975,13 @@ mod tray_lifetime_tests {
     #[test]
     fn flush_wait_stays_short_and_bounded() {
         // The user is waiting for a tray interaction to feel instant; the wait
-        // exists only to let the page persist pending stats.
-        assert!(TRAY_FLUSH_WAIT_MS <= 1000, "keep the tray snappy");
+        // exists only to let the page persist pending stats. Const context turns
+        // a raised value into a build failure rather than a slow tray nobody
+        // notices until release.
+        const _: () = assert!(
+            TRAY_FLUSH_WAIT_MS <= 1000,
+            "TRAY_FLUSH_WAIT_MS must stay within a second — keep the tray snappy"
+        );
     }
 
     #[test]

@@ -663,6 +663,20 @@ pub fn verify_portable_signature(binary_bytes: &[u8], sig_text: &str, pubkey_b64
     pubkey.verify(binary_bytes, &sig, false).is_ok()
 }
 
+/// Play a standard Windows alert/warning chime when UIPI prevents action.
+pub fn play_warning_sound() {
+    unsafe {
+        let _ = MessageBeep(MB_ICONWARNING);
+    }
+}
+
+/// Initialize Per-Monitor V2 DPI awareness programmatically at startup.
+pub fn init_dpi_awareness() {
+    unsafe {
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -788,19 +802,5 @@ mod tests {
     fn error_classifier_names_the_stage() {
         let msg = classify_portable_update_error("verify", "mismatch");
         assert!(msg.contains("verify") && msg.contains("mismatch"));
-    }
-}
-
-/// Play a standard Windows alert/warning chime when UIPI prevents action.
-pub fn play_warning_sound() {
-    unsafe {
-        let _ = MessageBeep(MB_ICONWARNING);
-    }
-}
-
-/// Initialize Per-Monitor V2 DPI awareness programmatically at startup.
-pub fn init_dpi_awareness() {
-    unsafe {
-        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
 }

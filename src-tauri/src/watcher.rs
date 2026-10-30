@@ -233,11 +233,14 @@ mod tests {
     /// half of all saves were judged as external edits.
     #[test]
     fn own_write_grace_covers_the_poll_interval() {
-        assert!(
+        // Const context, so raising POLL_INTERVAL_MS or DEBOUNCE_MS past the
+        // grace stops the build instead of shipping saves that read as foreign
+        // edits. A formatted panic message is not callable in a constant, so
+        // the names are the message.
+        const _: () = assert!(
             OWN_WRITE_GRACE_MS > POLL_INTERVAL_MS + DEBOUNCE_MS,
-            "grace {OWN_WRITE_GRACE_MS}ms must exceed one poll ({POLL_INTERVAL_MS}ms) \
-             plus the debounce ({DEBOUNCE_MS}ms), or our own writes are reported as \
-             external edits"
+            "OWN_WRITE_GRACE_MS must exceed POLL_INTERVAL_MS + DEBOUNCE_MS, \
+             or our own writes are reported as external edits"
         );
     }
 

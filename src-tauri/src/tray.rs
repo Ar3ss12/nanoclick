@@ -786,7 +786,10 @@ mod tests {
     fn callback_message_sits_in_wm_app_range() {
         // Below WM_APP belongs to Windows; above WM_APP+0x3FFF to other apps.
         assert_eq!(WM_TRAY_CALLBACK, WM_APP_BASE + 1);
-        assert!(WM_TRAY_CALLBACK > 0x8000 && WM_TRAY_CALLBACK < 0xC000);
+        const _: () = assert!(
+            WM_TRAY_CALLBACK > 0x8000 && WM_TRAY_CALLBACK < 0xC000,
+            "WM_TRAY_CALLBACK must sit inside the WM_APP range reserved for this app"
+        );
     }
 
     #[test]

@@ -13,15 +13,13 @@ fn spawn_test_server(state: Arc<DaemonState>) -> String {
     std::thread::Builder::new()
         .name("test-daemon-server".into())
         .spawn(move || {
-            for stream in listener.incoming() {
-                if let Ok(s) = stream {
-                    let st = Arc::clone(&state);
-                    std::thread::spawn(move || {
-                        nanoclick::daemon_transport::serve_stream(&st, s, |st, req| {
-                            handle_request(st.as_ref(), req)
-                        })
-                    });
-                }
+            for s in listener.incoming().flatten() {
+                let st = Arc::clone(&state);
+                std::thread::spawn(move || {
+                    nanoclick::daemon_transport::serve_stream(&st, s, |st, req| {
+                        handle_request(st.as_ref(), req)
+                    })
+                });
             }
         })
         .ok();

@@ -1839,7 +1839,8 @@ mod physical_integration_tests {
         UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL,
     };
 
-    static CAPTURE_TX: OnceLock<StdMutex<Option<mpsc::Sender<(u16, bool)>>>> = OnceLock::new();
+    type CaptureSender = mpsc::Sender<(u16, bool)>;
+    static CAPTURE_TX: OnceLock<StdMutex<Option<CaptureSender>>> = OnceLock::new();
     /// Live test capture-hook handle. Windows may silently remove a low-level
     /// hook after heavy SendInput activity, so tests must be able to reinstall
     /// it instead of relying on a one-shot initializer.
@@ -1921,7 +1922,7 @@ mod physical_integration_tests {
             thread::sleep(Duration::from_millis(40));
             inject_key(0x5B, true);
             let events = drain_filtered(&rx, &[0x5B], 1);
-            if events.len() >= 1 {
+            if !events.is_empty() {
                 // Hook alive. Leave this fresh channel in place; caller will
                 // swap its own channel anyway.
                 return;
@@ -2050,7 +2051,7 @@ mod physical_integration_tests {
         for (vk, is_down) in &combo_events {
             if *is_down {
                 held.insert(*vk);
-                if combo_matches(&combo, *vk, &held, |k| key_down(k)) {
+                if combo_matches(&combo, *vk, &held, key_down) {
                     fired += 1;
                 }
             } else {
@@ -2111,7 +2112,7 @@ mod physical_integration_tests {
             let mut held = HashSet::new();
             held.insert(vk);
             assert!(
-                combo_matches(&combo, vk, &held, |k| key_down(k)),
+                combo_matches(&combo, vk, &held, key_down),
                 "{label} combo must match its own trigger"
             );
         }
@@ -2136,7 +2137,7 @@ mod physical_integration_tests {
         let mut held = HashSet::new();
         held.insert(wrong_trigger);
         assert!(
-            !combo_matches(combo, wrong_trigger, &held, |k| key_down(k)),
+            !combo_matches(combo, wrong_trigger, &held, key_down),
             "combo {:?} must not fire for unrelated trigger 0x{wrong_trigger:02X}",
             combo.trigger
         );

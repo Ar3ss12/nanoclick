@@ -59,7 +59,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rand = "0.8"
 directories = "5.0"
-snubber = "0.7.6"
+# Exact (`=`) pin: `cargo update -p snubber` cannot slide the app onto a newer
+# minor without this line changing, so the version the app ships is the version
+# someone chose. A bump is one edit here plus that command plus the gate
+# battery; `test_ci_no_longer_pins_a_sha` holds both the pin and the registry
+# source.
+snubber = "=0.7.6"
 
 # Test-only: parking_lot::ReentrantMutex powers the cfg(test) toggle gate in
 # scheduler.rs (serializes toggle calls against the process-global stability

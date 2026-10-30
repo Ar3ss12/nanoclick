@@ -43,14 +43,17 @@ cargo test --release --locked -j 2 --lib -- physical
 
 cargo test --release --locked -j 2 --tests
 # integration suites: asset tripwires, daemon handshake (+ chaos lane), guardian e2e
+
+cargo clippy --profile ci-test --locked -j 2 --all-targets -- -D warnings
+# every target, including cfg(test) code and tests/*.rs — the same lane CI runs
 ```
 
 CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the full matrix
-on `windows-latest`: JS gates → clippy `--lib -D warnings` → `panic = "abort"`
-compile gate → lib test lanes → integration suites (assets + daemon handshake +
-guardian e2e). All lanes `--locked -j 2` on the `ci-test` profile; the abort
-gate uses `ci-abort`. `snubber` is a registry dependency, so the workflow checks
-nothing out for it.
+on `windows-latest`: JS gates → clippy `--all-targets -D warnings` →
+`panic = "abort"` compile gate → lib test lanes → integration suites (assets +
+daemon handshake + guardian e2e). All lanes `--locked -j 2` on the `ci-test`
+profile; the abort gate uses `ci-abort`. `snubber` is a registry dependency, so
+the workflow checks nothing out for it.
 
 > **Copy these commands verbatim.** `cmd.exe` has no `#` comments: a trailing
 > `# …` is passed to the test harness as extra filters and silently runs a
