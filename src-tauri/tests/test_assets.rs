@@ -7035,7 +7035,7 @@ fn test_satellite_destroy_lives_only_on_tray_shutdown_and_rollback() {
 fn test_ci_no_longer_pins_a_sha() {
     let cargo_toml = include_str!("../Cargo.toml");
     assert!(
-        cargo_toml.contains("snubber = \"0.7.5\""),
+        cargo_toml.contains("snubber = \"0.7.6\""),
         "snubber must be consumed from the registry at the published version"
     );
     assert!(
@@ -7063,8 +7063,8 @@ fn test_ci_no_longer_pins_a_sha() {
         .1;
     let block = entry.split("[[package]]").next().unwrap_or(entry);
     assert!(
-        block.contains("version = \"0.7.5\""),
-        "Cargo.lock must resolve snubber 0.7.5"
+        block.contains("version = \"0.7.6\""),
+        "Cargo.lock must resolve snubber 0.7.6"
     );
     assert!(
         block.contains("registry+https://github.com/rust-lang/crates.io-index")

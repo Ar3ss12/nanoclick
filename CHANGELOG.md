@@ -6,11 +6,12 @@ file.
 
 ## 1.6.0 (unreleased)
 
-Adoption of the `snubber` 0.7.5 surface: the handle table gets its own derivative
+Adoption of the `snubber` 0.7.6 surface: the handle table gets its own derivative
 watch, the cold frame learns WHAT happened, a refused retry is spread instead
-of fixed, and the compiler is pinned at the repository root.
+of fixed, a slope shorter than a full window is named instead of hidden, and
+the compiler is pinned at the repository root.
 
-Suite green: **520 tests** (411 lib + 104 asset tripwires + 3 daemon handshake
+Suite green: **522 tests** (413 lib + 104 asset tripwires + 3 daemon handshake
 + 2 guardian e2e), clippy `-D warnings` (lib), abort-shaped build (`ci-abort`),
 JS gate 10/10 scripts.
 
@@ -46,6 +47,17 @@ JS gate 10/10 scripts.
   the existing check reads only the first lock entry, so a second copy — a
   stale path package beside the registry one — would have stayed green while
   two APIs shared the tree.
+- **Advisory slope is named** (`snubber::LeakClassification::Advisory`, new in
+  0.7.6): a window that is 3–9 samples deep and projects past the trip mark is
+  reported as its own verdict instead of falling into the table's `other` arm —
+  `handle_window_line()` prints `trend=advisory` with the measured growth and
+  rate, and the maintenance tick logs one `warn` slope line per RSS and handle
+  window on the sample that ENTERS the advisory shape (`advisory_edge`), so a
+  climbing window says so five minutes before it can trip. It never latches
+  `MEMORY_LEAK` / `HANDLE_LEAK` and never refuses Start: `is_rising()` is false
+  by design, and `start_refusal()` stays `None`. Tripwires:
+  `test_an_advisory_slope_is_named_and_never_refuses_a_start`,
+  `test_the_advisory_edge_logs_once_until_the_window_changes_shape`.
 
 ### Changed
 
@@ -53,10 +65,17 @@ JS gate 10/10 scripts.
   owner actions plus the exit call; the existing tripwire now asserts the
   whole sequence, not two anchors. `snubber::RankedSet` was considered and not
   adopted: it ranks `&SnubberNode` stops, and none of these steps is a node.
-- `snubber` 0.7.5 is a registry dependency. The path dep, the second CI
+- `snubber` 0.7.6 is a registry dependency (`src-tauri/Cargo.toml`, lock entry
+  `0.7.6` checksum `b533ab7f…`). The path dep, the second CI
   checkout and its SHA pin (I44) are gone: a path dep compiled whatever the
   dev host had, so the runner could stay green while users built a different
-  API. `test_ci_no_longer_pins_a_sha` holds the registry form.
+  API. `test_ci_no_longer_pins_a_sha` holds the registry form — measured by
+  putting the requirement back to `0.7.5`: the suite goes
+  `103 passed; 1 failed` on that tripwire, and a one-line revert returns it to
+  `104 passed; 0 failed`. 0.7.6 is a source-compatible minor release for this
+  app: every `LeakClassification` match already carries a wildcard, and the
+  drain arm-identity fix touches nothing NanoClick calls (it uses no
+  `PipeDrain` / `WorkerPool`).
 - **Secure desktop is sampled on every maintenance tick** (5 Hz), not once a
   second: a 1 Hz sample left buttons held for up to a second on UAC / Win+L,
   which is the whole damage. The gate is the injection-capable run, not the

@@ -3425,9 +3425,9 @@ checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 
 [[package]]
 name = "snubber"
-version = "0.7.5"
+version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d39f5f5ef0a2342ce35c959840800a7c365179d2e08ad97605530d7edb08ed1c"
+checksum = "b533ab7fe03be466e2b363cfede68c6b3ec0b576a6fdf2bff1cad5a8d715c64c"
 
 [[package]]
 name = "socket2"

@@ -1056,6 +1056,23 @@ fn maintenance_loop() {
                             );
                         }
                     }
+                    if advisory_edge(&MEMORY_ADVISORY, report.trend) {
+                        if let snubber::LeakClassification::Advisory {
+                            growth_kb,
+                            projected_growth_kb,
+                            samples,
+                            rate_kb_sec,
+                        } = report.trend
+                        {
+                            crate::debug_log_internal(
+                                "warn",
+                                &format!(
+                                    "[Stability] rss slope early: {growth_kb}kb over {samples} samples (projected {projected_growth_kb}kb, trip={MEMORY_GROWTH_TRIP_KB}kb, ~{}kb/s) — a slope to look at, not a leak verdict",
+                                    rate_kb_sec.unwrap_or(0)
+                                ),
+                            );
+                        }
+                    }
                 }
             }
 
@@ -1102,6 +1119,23 @@ fn maintenance_loop() {
                             &format!("[Stability] handle window: {}", handle_window_line()),
                         );
                     }
+                    if advisory_edge(&HANDLE_ADVISORY, verdict) {
+                        if let snubber::LeakClassification::Advisory {
+                            growth_kb,
+                            projected_growth_kb,
+                            samples,
+                            rate_kb_sec,
+                        } = verdict
+                        {
+                            crate::debug_log_internal(
+                                "warn",
+                                &format!(
+                                    "[Stability] handle slope early: {growth_kb} over {samples} samples (projected {projected_growth_kb}, trip={HANDLE_GROWTH_TRIP}, ~{}handles/s) — not a leak verdict",
+                                    rate_kb_sec.unwrap_or(0)
+                                ),
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -1144,6 +1178,14 @@ static MEMORY_LEAK: AtomicBool = AtomicBool::new(false);
 /// this refuses a start exactly like `MEMORY_LEAK`.
 static HANDLE_LEAK: AtomicBool = AtomicBool::new(false);
 
+/// `snubber::LeakClassification::Advisory` is being answered right now — a
+/// partial window whose slope, projected across a full one, would cross the
+/// trip mark. Log-only: the latch stays the full window's job.
+static MEMORY_ADVISORY: AtomicBool = AtomicBool::new(false);
+
+/// The same early-slope edge for the handle window.
+static HANDLE_ADVISORY: AtomicBool = AtomicBool::new(false);
+
 /// Test-only leak latch control (the gradient needs five real minutes).
 #[cfg(test)]
 pub(crate) fn test_latch_memory_leak(v: bool) {
@@ -1170,17 +1212,22 @@ static HANDLE_TREND: AtomicU64 = AtomicU64::new(TREND_NO_SAMPLE);
 static HANDLE_NEWEST: AtomicU64 = AtomicU64::new(HANDLE_UNREAD);
 /// Samples currently held by the window.
 static HANDLE_SAMPLES: AtomicU64 = AtomicU64::new(0);
-/// `newest - oldest` of a `Stable` / `Rising` window; unread otherwise.
+/// `newest - oldest` of a `Stable` / `Rising` / `Advisory` window; unread
+/// otherwise.
 static HANDLE_GROWTH: AtomicU64 = AtomicU64::new(HANDLE_UNREAD);
-/// Handles per second of a `Rising` window; unread otherwise.
+/// Handles per second of a `Rising` or `Advisory` window; unread otherwise.
 static HANDLE_RATE: AtomicU64 = AtomicU64::new(HANDLE_UNREAD);
 
-const HANDLE_TREND_CODES: [&str; 6] = [
+const HANDLE_TREND_CODES: [&str; 7] = [
     "no-sample",
     "warming",
     "stable",
     "rising",
     "sawtooth",
+    // A partial window that would cross the mark if it kept climbing. Named,
+    // because folding it into "other" would hide the one signal that arrives
+    // before the verdict.
+    "advisory",
     // The enum is `#[non_exhaustive]`: a verdict this build does not know is
     // reported as such rather than folded into a neighbour it might not be.
     "other",
@@ -1192,7 +1239,21 @@ fn handle_trend_rank(verdict: snubber::LeakClassification) -> u64 {
         snubber::LeakClassification::Stable { .. } => 2,
         snubber::LeakClassification::Rising { .. } => 3,
         snubber::LeakClassification::Sawtooth => 4,
-        _ => 5,
+        snubber::LeakClassification::Advisory { .. } => 5,
+        _ => 6,
+    }
+}
+
+/// True on the sample that ENTERS an advisory slope, false on every other
+/// verdict (which also re-arms the edge). One log per slope instead of one per
+/// 30 s sample, because the slope is a signal to look at and not a fault.
+fn advisory_edge(seen: &AtomicBool, verdict: snubber::LeakClassification) -> bool {
+    match verdict {
+        snubber::LeakClassification::Advisory { .. } => !seen.swap(true, Ordering::AcqRel),
+        _ => {
+            seen.store(false, Ordering::Release);
+            false
+        }
     }
 }
 
@@ -1204,6 +1265,11 @@ fn publish_handle_window<const N: usize>(watch: &snubber::HandleWatch<N>) {
         snubber::LeakClassification::Rising {
             growth_kb,
             rate_kb_sec,
+        } => (Some(growth_kb), rate_kb_sec),
+        snubber::LeakClassification::Advisory {
+            growth_kb,
+            rate_kb_sec,
+            ..
         } => (Some(growth_kb), rate_kb_sec),
         _ => (None, None),
     };
@@ -2550,6 +2616,86 @@ mod tests {
         assert!(line.contains("growth=900"), "{line}");
         assert!(line.contains("/s"), "a rising window names its rate: {line}");
         assert!(!line.contains("rate=-"), "{line}");
+    }
+
+    /// `snubber::LeakClassification::Advisory` is a partial window that would
+    /// cross the mark if it kept climbing. The app must SHOW it and must not
+    /// ACT on it: the rank table names it (so the field baseline that sizes
+    /// `HANDLE_GROWTH_TRIP` sees the slope instead of `other`), and the start
+    /// surface stays open because a verdict still belongs to a full window.
+    #[test]
+    fn test_an_advisory_slope_is_named_and_never_refuses_a_start() {
+        let _gate = crate::scheduler::test_toggle_gate().lock();
+        test_latch_memory_leak(false);
+        test_latch_handle_leak(false);
+
+        // Five of ten samples, strictly rising, growth 160 over a 64 mark.
+        let mut watch: snubber::HandleWatch<HANDLE_RING_LEN> =
+            snubber::HandleWatch::new(HANDLE_GROWTH_TRIP, HANDLE_SAMPLE_MS);
+        for step in 0..5u64 {
+            watch.note(1_000 + step * 40);
+        }
+        let verdict = watch.classification();
+        assert!(
+            matches!(
+                verdict,
+                snubber::LeakClassification::Advisory {
+                    growth_kb: 160,
+                    projected_growth_kb: 360,
+                    samples: 5,
+                    ..
+                }
+            ),
+            "half a window that would trip is advisory: {:?}",
+            verdict
+        );
+        assert!(
+            !verdict.is_rising(),
+            "an advisory is a slope, never a verdict: {verdict:?}"
+        );
+
+        publish_handle_window(&watch);
+        let line = handle_window_line();
+        assert!(line.contains("trend=advisory"), "{line}");
+        assert!(line.contains("handles=1160"), "{line}");
+        assert!(
+            line.contains(&format!("samples=5/{HANDLE_RING_LEN}")),
+            "{line}"
+        );
+        assert!(line.contains("growth=160"), "{line}");
+        assert!(line.contains("rate=1/s"), "the slope carries its rate: {line}");
+
+        // And the reaction surface stays shut: advisory latches nothing.
+        assert_eq!(start_refusal(), None, "{line}");
+        assert_eq!(refusal_text(), None, "{line}");
+    }
+
+    /// One log line per slope, not one per 30 s sample, and the edge re-arms
+    /// when the window leaves the slope — otherwise the early signal either
+    /// floods the log or fires exactly once per process life.
+    #[test]
+    fn test_the_advisory_edge_logs_once_until_the_window_changes_shape() {
+        MEMORY_ADVISORY.store(false, Ordering::Release);
+        let slope = snubber::LeakClassification::Advisory {
+            growth_kb: 160,
+            projected_growth_kb: 360,
+            samples: 5,
+            rate_kb_sec: Some(1),
+        };
+        assert!(advisory_edge(&MEMORY_ADVISORY, slope), "the slope opens");
+        assert!(
+            !advisory_edge(&MEMORY_ADVISORY, slope),
+            "staying on the slope does not re-log"
+        );
+        assert!(
+            !advisory_edge(&MEMORY_ADVISORY, snubber::LeakClassification::Sawtooth),
+            "a verdict that is not an advisory logs nothing"
+        );
+        assert!(
+            advisory_edge(&MEMORY_ADVISORY, slope),
+            "leaving the slope re-arms the edge"
+        );
+        MEMORY_ADVISORY.store(false, Ordering::Release);
     }
 
     #[test]
