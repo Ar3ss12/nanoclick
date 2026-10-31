@@ -6,7 +6,7 @@ Fast, unkillable, and built with pure Rust. No Electron, no adware, no backgroun
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011-0078D6?style=flat-square" alt="Platform">
   <img src="https://img.shields.io/badge/RAM_in_tray-5.3_MB-2ea44f?style=flat-square" alt="RAM">
-  <img src="https://img.shields.io/badge/Installer-3.4_MB-orange?style=flat-square" alt="Size">
+  <img src="https://img.shields.io/badge/Installer-3.5_MB-orange?style=flat-square" alt="Size">
   <img src="https://img.shields.io/badge/License-Noncommercial-blue?style=flat-square" alt="License">
   <a href="https://github.com/Ar3ss12/nanoclick/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Ar3ss12/nanoclick/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
 </p>
@@ -20,11 +20,11 @@ Fast, unkillable, and built with pure Rust. No Electron, no adware, no backgroun
 
 <p align="center">
   <a href="https://github.com/Ar3ss12/nanoclick/releases/latest">
-    <b>[ Download Installer — 3.4 MB ]</b>
+    <b>[ Download Installer — 3.5 MB ]</b>
   </a>
   &nbsp;&nbsp;•&nbsp;&nbsp;
   <a href="https://github.com/Ar3ss12/nanoclick/releases/latest">
-    <b>[ Download Portable — 9.7 MB ]</b>
+    <b>[ Download Portable — 9.8 MB ]</b>
   </a>
 </p>
 
@@ -46,7 +46,7 @@ Fast, unkillable, and built with pure Rust. No Electron, no adware, no backgroun
 
 | The usual download from the web | NanoClick |
 |---|---|
-| 150+ MB RAM, built on a web browser, closed-source `.exe` of unknown origin | **5.3 MB RAM in tray**, 9.7 MB standalone binary, open source |
+| 150+ MB RAM, built on a web browser, closed-source `.exe` of unknown origin | **5.3 MB RAM in tray**, 9.8 MB standalone binary, open source |
 | If the game crashes, your mouse stays stuck in a frantic click loop | **An independent watchdog outside the app** unlocks your buttons instantly |
 | Robotic, metronome-flat intervals, flat as a machine | **Human hand biomechanics** (natural jitter and fatigue curve) calculated in nanoseconds |
 

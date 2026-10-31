@@ -83,9 +83,10 @@ module which cannot execute at all.
 
 ## Changelog
 
-Notable user-facing changes land in [CHANGELOG.md](CHANGELOG.md) under
-`1.5.0 (unreleased)` and are dated only when the release tag is cut. Numbers
-in the changelog are measured and carry the command that re-derives them.
+Notable user-facing changes land in [CHANGELOG.md](CHANGELOG.md) under the
+topmost `X.Y.Z (unreleased)` heading and are dated only when the release tag is
+cut. Numbers in the changelog are measured and carry the command that re-derives
+them.
 
 ## Signing & releases
 

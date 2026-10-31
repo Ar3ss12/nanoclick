@@ -4,12 +4,15 @@ All notable changes to NanoClick. Sizes, timings and RAM figures are measured
 and carry the command that re-derives them. Releases before 1.1.1 predate this
 file.
 
-## 1.6.0 (unreleased)
+## 1.5.0 (2026-10-31)
 
-Adoption of the `snubber` 0.7.6 surface: the handle table gets its own derivative
-watch, the cold frame learns WHAT happened, a refused retry is spread instead
-of fixed, a slope shorter than a full window is named instead of hidden, and
-the compiler is pinned at the repository root.
+A hardware-ownership release: one token now gates every `SendInput` path, RSS
+is judged by its derivative instead of a ceiling, a secure desktop stops the
+run instead of swallowing clicks, and a frozen hook pump re-registers itself.
+On top of that, adoption of the `snubber` 0.7.6 surface: the handle table gets
+its own derivative watch, the cold frame learns WHAT happened, a refused retry
+is spread instead of fixed, a slope shorter than a full window is named instead
+of hidden, and the compiler is pinned at the repository root.
 
 Suite green: **525 tests** (415 lib + 105 asset tripwires + 3 daemon handshake
 + 2 guardian e2e), clippy `-D warnings` over `--all-targets` (every target, not
@@ -17,6 +20,40 @@ only the lib), abort-shaped build (`ci-abort`), JS gate 10/10 scripts.
 
 ### Added
 
+- **Hardware arbiter** (`stability::HardwareArbiter`, `HardwareToken`): the
+  click run and macro playback can no longer inject at the same time. The
+  cross-class gate is a single atomic word (`INPUT_CLAIM`: click leases
+  counted in the low bits, the macro lease in the top bit) won by one
+  `compare_exchange`, so "both owners at once" is unrepresentable rather than
+  a race the losing side might notice; the token also holds a one-slot
+  `hardware_arbiter` admission for the ledger. A Start during playback is
+  refused at entry with `hardware_busy` / `HARDWARE_BUSY` instead of
+  interleaving two owners of one cursor. The release is the admission's own
+  armed rollback, not a second guard beside it: dropping a token (panic, `?`,
+  generator unwind) runs `emergency_release_all_hardware` inside the node,
+  then frees the slot, then gives the claim back, in that order. Because the
+  body belongs to the node, the 1 Hz release latch times the same `SendInput`
+  calls it reads.
+- **Memory-leak detector by derivative**: RSS is sampled every 30 s into a
+  10-sample ring (5 minutes). Ten strictly rising samples that add up to
+  ≥ 120 MB latch `MEMORY_LEAK`, refuse Start and emit
+  `AnomalyKind::MemoryGrowth`; a window that stops climbing (or dips) clears
+  the verdict. The 1/2 GiB marks stay as a backstop for a process about to
+  die, not as monitoring.
+- **Secure-desktop watcher**: while a run can inject, the maintenance tick
+  calls `OpenInputDesktop` on every tick. `ACCESS_DENIED` means the input is on
+  the UAC / lock-screen desktop, where `SendInput` is swallowed and held
+  buttons stay held: the tick releases every button, stops the click run and
+  the macro playback (both own `SendInput`, and a playback left running kept
+  `MACRO_CLAIM_BIT` so Start refused `hardware_busy` after unlock), forces the
+  type-state to Idle and logs the transition once per loss.
+- **Hook pump pulse + re-install**: the hook pump kicks `hook_pulse` every
+  iteration; a 500 ms freeze is a deaf-hook threat (Windows drops a low-level
+  hook whose owner stops pumping for `LowLevelHooksTimeout`, 200–1000 ms).
+  The tick reports `FaultKind::Timeout`, counts the event and asks the hook
+  thread to re-install; the hooks come back on the same thread (the OS only
+  calls a low-level hook back on its installing thread). The lifetime count is
+  in `hotkey_diag_dump` as `hook_reinstalls_total=`.
 - **Handle-leak detector** (`stability::HANDLE_RING_LEN` /
   `snubber::HandleWatch<10>`): `GetProcessHandleCount` is sampled every 30 s,
   the same cadence as RSS, and only a full, strictly rising window that gained
@@ -72,6 +109,28 @@ only the lib), abort-shaped build (`ci-abort`), JS gate 10/10 scripts.
 
 ### Changed
 
+- **A watched rollback is timed by the node that owns it.** The 1 Hz watcher
+  calls `snubber::watchdog::poll_rollback(&node)` and the release latch reads
+  `phase.budget_ms`, so no observer holds a copy of `ROLLBACK_BUDGET_MS` that
+  a builder change could leave behind. The drift class — a threshold that
+  describes a budget no node armed — is gone, not documented.
+- **The leak window is the crate's, not ours.** The local `RssGradient`
+  (a ring plus the strict-rise rule, previously written twice) is replaced by
+  `snubber::LeakWatch<10>`, and the trip mark by `snubber::growth_crosses`.
+  Behaviour is unchanged — ten 30 s samples, strictly rising, ≥ 120 MB — and
+  the app keeps only the two policy numbers (`RSS_RING_LEN`,
+  `MEMORY_GROWTH_TRIP_KB`). The migration added a flat-window case to the
+  crate's tests: an equal neighbour provably clears the window, which the
+  local copy asserted nowhere.
+- **`snubber` 0.7.0 → 0.7.1: the memory verdict is one crate value.** The
+  tick now feeds `snubber::MemoryTrend<10>` (level + ring + trip mark +
+  sampling interval) instead of `LeakWatch` plus a local `growth_crosses`
+  call, and reads the trend from `classification()` rather than the
+  `sample()` verdict, so a `Soft` level cannot mask a rising window. The
+  leak log now names the shape and the rate (`~Nkb/s`) from the crate's
+  `LeakClassification::Rising`. Same latch, same clearing rule: a window
+  that stops rising still clears `MEMORY_LEAK`. CI's snubber pin moves to
+  the 0.7.1 release commit (9a73db7) in the same change.
 - **The lint lane covers every target** (I49). CI ran `cargo clippy --lib`, and
   `--lib` never compiles `cfg(test)` code: findings inside the `#[cfg(test)]`
   modules and inside every `tests/*.rs` suite were invisible to the gate while
@@ -132,6 +191,31 @@ only the lib), abort-shaped build (`ci-abort`), JS gate 10/10 scripts.
 
 ### Fixed
 
+- `RELEASE_PENDING` read only the click node, so a wedged **macro** release —
+  the same `SendInput` body, the same budget — was logged but never refused a
+  new run. The 1 Hz tick now votes every `ROLLBACK_WATCHED` entry that holds
+  hardware (`holds_hardware` column) and latches on the worst elapsed time.
+- The `hardware_arbiter` row of `ROLLBACK_WATCHED` timed an empty closure
+  (`enter_erased_holding_auto(|| {})`) while the real release lived in a
+  `Protected` guard that published no phase, so the row could never fire and
+  the latch read "fine" during a wedged `SendInput`. The admission now arms
+  `emergency_release_all_hardware` itself; the second guard is gone.
+  Tripwire: `test_arbiter_watch_times_the_release_body`.
+- A secure desktop stopped the click run only: a macro playback kept looping
+  and holding `MACRO_CLAIM_BIT`, so after unlock Start refused
+  `hardware_busy` with nothing injecting on the visible desktop.
+  `stop_for_desktop_loss` now stops the executor and the scheduler.
+  Tripwire: `test_desktop_loss_stops_every_input_owner`.
+- A stalled tick could latch `ENGINE_STUCK` from the process-wide CPU delta on
+  its first sample of a thread. The latch now requires a real thread-scoped
+  sample; the process delta is a log fallback only.
+- Hook-stall classification samples the hook thread's own CPU
+  (`ThreadCpuSampler::observe_tid`), so a busy UI can no longer be read as a
+  busy hook.
+- Dead surface removed: `dump_all_stats()` and `board_all_nodes()` had no
+  callers (the board is read through `SNAPSHOT_NODES`). The inert
+  `ProcessToken` arm is gone as well — it wrote only under `SNUBBER_SUPERVISED`
+  and read as a guarantee; `input_guardian` is the real rescue.
 - **Stop self-deadlock**: `set_active(false, Some(app))` held `self.state`
   while `finish_stop` emitted IDLE through `emit_status_now`, which read
   `is_active()` and re-locked the same non-reentrant `std::sync::Mutex`. The
@@ -160,104 +244,6 @@ only the lib), abort-shaped build (`ci-abort`), JS gate 10/10 scripts.
 - `ErasedGuard` type annotations at `core/executor.rs` and `scheduler.rs`
   (`ErasedGuard<ProbeSlot>`), the only two call sites the 0.8 typed slots
   broke.
-
-## 1.5.0 (unreleased)
-
-A hardware-ownership release: one token now gates every `SendInput` path, RSS
-is judged by its derivative instead of a ceiling, a secure desktop stops the
-run instead of swallowing clicks, and a frozen hook pump re-registers itself.
-Suite green: **512 tests** (404 lib + 103 asset tripwires + 3 daemon handshake
-+ 2 guardian e2e), clippy `-D warnings`, JS gate 10/10 scripts.
-
-### Added
-
-- **Hardware arbiter** (`stability::HardwareArbiter`, `HardwareToken`): the
-  click run and macro playback can no longer inject at the same time. The
-  cross-class gate is a single atomic word (`INPUT_CLAIM`: click leases
-  counted in the low bits, the macro lease in the top bit) won by one
-  `compare_exchange`, so "both owners at once" is unrepresentable rather than
-  a race the losing side might notice; the token also holds a one-slot
-  `hardware_arbiter` admission for the ledger. A Start during playback is
-  refused at entry with `hardware_busy` / `HARDWARE_BUSY` instead of
-  interleaving two owners of one cursor. The release is the admission's own
-  armed rollback, not a second guard beside it: dropping a token (panic, `?`,
-  generator unwind) runs `emergency_release_all_hardware` inside the node,
-  then frees the slot, then gives the claim back, in that order. Because the
-  body belongs to the node, the 1 Hz release latch times the same `SendInput`
-  calls it reads.
-- **Memory-leak detector by derivative**: RSS is sampled every 30 s into a
-  10-sample ring (5 minutes). Ten strictly rising samples that add up to
-  ≥ 120 MB latch `MEMORY_LEAK`, refuse Start and emit
-  `AnomalyKind::MemoryGrowth`; a window that stops climbing (or dips) clears
-  the verdict. The 1/2 GiB marks stay as a backstop for a process about to
-  die, not as monitoring.
-- **Secure-desktop watcher**: while a run can inject, the maintenance tick
-  calls `OpenInputDesktop` once a second. `ACCESS_DENIED` means the input is on
-  the UAC / lock-screen desktop, where `SendInput` is swallowed and held
-  buttons stay held: the tick releases every button, stops the click run and
-  the macro playback (both own `SendInput`, and a playback left running kept
-  `MACRO_CLAIM_BIT` so Start refused `hardware_busy` after unlock), forces the
-  type-state to Idle and logs the transition once per loss.
-- **Hook pump pulse + re-install**: the hook pump kicks `hook_pulse` every
-  iteration; a 500 ms freeze is a deaf-hook threat (Windows drops a low-level
-  hook whose owner stops pumping for `LowLevelHooksTimeout`, 200–1000 ms).
-  The tick reports `FaultKind::Timeout`, counts the event and asks the hook
-  thread to re-install; the hooks come back on the same thread (the OS only
-  calls a low-level hook back on its installing thread). The lifetime count is
-  in `hotkey_diag_dump` as `hook_reinstalls_total=`.
-
-### Fixed
-
-- `RELEASE_PENDING` read only the click node, so a wedged **macro** release —
-  the same `SendInput` body, the same budget — was logged but never refused a
-  new run. The 1 Hz tick now votes every `ROLLBACK_WATCHED` entry that holds
-  hardware (`holds_hardware` column) and latches on the worst elapsed time.
-- The `hardware_arbiter` row of `ROLLBACK_WATCHED` timed an empty closure
-  (`enter_erased_holding_auto(|| {})`) while the real release lived in a
-  `Protected` guard that published no phase, so the row could never fire and
-  the latch read "fine" during a wedged `SendInput`. The admission now arms
-  `emergency_release_all_hardware` itself; the second guard is gone.
-  Tripwire: `test_arbiter_watch_times_the_release_body`.
-- A secure desktop stopped the click run only: a macro playback kept looping
-  and holding `MACRO_CLAIM_BIT`, so after unlock Start refused
-  `hardware_busy` with nothing injecting on the visible desktop.
-  `stop_for_desktop_loss` now stops the executor and the scheduler.
-  Tripwire: `test_desktop_loss_stops_every_input_owner`.
-- A stalled tick could latch `ENGINE_STUCK` from the process-wide CPU delta on
-  its first sample of a thread. The latch now requires a real thread-scoped
-  sample; the process delta is a log fallback only.
-- Hook-stall classification samples the hook thread's own CPU
-  (`ThreadCpuSampler::observe_tid`), so a busy UI can no longer be read as a
-  busy hook.
-- Dead surface removed: `dump_all_stats()` and `board_all_nodes()` had no
-  callers (the board is read through `SNAPSHOT_NODES`). The inert
-  `ProcessToken` arm is gone as well — it wrote only under `SNUBBER_SUPERVISED`
-  and read as a guarantee; `input_guardian` is the real rescue.
-
-### Changed
-
-- **A watched rollback is timed by the node that owns it.** The 1 Hz watcher
-  calls `snubber::watchdog::poll_rollback(&node)` and the release latch reads
-  `phase.budget_ms`, so no observer holds a copy of `ROLLBACK_BUDGET_MS` that
-  a builder change could leave behind. The drift class — a threshold that
-  describes a budget no node armed — is gone, not documented.
-- **The leak window is the crate's, not ours.** The local `RssGradient`
-  (a ring plus the strict-rise rule, previously written twice) is replaced by
-  `snubber::LeakWatch<10>`, and the trip mark by `snubber::growth_crosses`.
-  Behaviour is unchanged — ten 30 s samples, strictly rising, ≥ 120 MB — and
-  the app keeps only the two policy numbers (`RSS_RING_LEN`,
-  `MEMORY_GROWTH_TRIP_KB`). The migration added a flat-window case to the
-  crate's tests: an equal neighbour provably clears the window, which the
-  local copy asserted nowhere.
-- **`snubber` 0.7.0 → 0.7.1: the memory verdict is one crate value.** The
-  tick now feeds `snubber::MemoryTrend<10>` (level + ring + trip mark +
-  sampling interval) instead of `LeakWatch` plus a local `growth_crosses`
-  call, and reads the trend from `classification()` rather than the
-  `sample()` verdict, so a `Soft` level cannot mask a rising window. The
-  leak log now names the shape and the rate (`~Nkb/s`) from the crate's
-  `LeakClassification::Rising`. Same latch, same clearing rule: a window
-  that stops rising still clears `MEMORY_LEAK`. CI's snubber pin moves to
-  the 0.7.1 release commit (9a73db7) in the same change.
 
 ## 1.4.0 (2026-10-29)
 
