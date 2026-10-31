@@ -3804,6 +3804,7 @@ function renderPresetsGrid() {
     const tags = [jitterStr, techniqueStr, clickTypeStr, btnStr, posStr];
     if (p.outlier_prob > 0) tags.push(`🍀 ${hesitationProbToPercent(p.outlier_prob)}%`);
     if (p.jitter_radius_px > 0) tags.push(`📍 ±${p.jitter_radius_px}px`);
+    if (p.jitter_relative_3d) tags.push("🖱 3D");
     if (p.click_limit > 0) tags.push(limitStr);
     if (p.repeat_mode === "repeat" && p.repeat_count > 0) tags.push(`🔁 ×${p.repeat_count}`);
     if (p.start_delay_ms > 0) tags.push(`⏳ ${formatDurationMs(p.start_delay_ms)}`);
@@ -4436,6 +4437,7 @@ function readPresetModalEngine() {
     target_cps: clampPresetNumber(presetEl("presetCpsRange")?.value, PRESET_LIMITS.cpsMin, PRESET_LIMITS.cpsMax, 10),
     jitter_percent: clampPresetNumber(presetEl("presetJitterRange")?.value, PRESET_LIMITS.jitterMin, PRESET_LIMITS.jitterMax, 5),
     jitter_radius_px: Math.round(clampPresetNumber(presetEl("presetJitterRadius")?.value, PRESET_LIMITS.jitterRadiusMin, PRESET_LIMITS.jitterRadiusMax, 0)),
+    jitter_relative_3d: !!presetEl("presetJitter3d")?.checked,
     outlier_prob: hesitationPercentToProb(presetEl("presetHesitation")?.value),
     technique: normalizeTechnique(presetEl("presetTechniqueSelect")?.value),
     gui_lock_ms: Math.max(0, Number(presetEl("presetGuiLock")?.value) || 1500),
@@ -4547,6 +4549,7 @@ function populatePresetModalEngine(v) {
   if (jitterVal) jitterVal.textContent = v.jitter_percent;
   setVal("presetHesitation", hesitationProbToPercent(v.outlier_prob));
   setVal("presetJitterRadius", v.jitter_radius_px);
+  setPresetModalChecked("presetJitter3d", v.jitter_relative_3d === true);
   setVal("presetTechniqueSelect", normalizeTechnique(v.technique));
   setVal("presetGuiLock", v.gui_lock_ms);
   setVal("presetClickLimit", v.click_limit);

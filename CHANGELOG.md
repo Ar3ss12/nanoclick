@@ -11,7 +11,7 @@ watch, the cold frame learns WHAT happened, a refused retry is spread instead
 of fixed, a slope shorter than a full window is named instead of hidden, and
 the compiler is pinned at the repository root.
 
-Suite green: **524 tests** (414 lib + 105 asset tripwires + 3 daemon handshake
+Suite green: **525 tests** (415 lib + 105 asset tripwires + 3 daemon handshake
 + 2 guardian e2e), clippy `-D warnings` over `--all-targets` (every target, not
 only the lib), abort-shaped build (`ci-abort`), JS gate 10/10 scripts.
 
@@ -58,6 +58,17 @@ only the lib), abort-shaped build (`ci-abort`), JS gate 10/10 scripts.
   by design, and `start_refusal()` stays `None`. Tripwires:
   `test_an_advisory_slope_is_named_and_never_refuses_a_start`,
   `test_the_advisory_edge_logs_once_until_the_window_changes_shape`.
+- **3D relative motion is a preset field** (`PresetItem::jitter_relative_3d`).
+  The engine setting already existed, and the page already captured it into a
+  preset snapshot, but the preset store had no field for it: the value was
+  dropped on save, the editor had no control for it, and `apply_preset_engine`
+  never wrote it, so a preset could neither carry nor clear the 3D mode. The
+  store keeps it now, the preset editor renders and reads it, applying a 2D
+  preset clears it instead of inheriting the previous run's value, records
+  written before the field existed read as 2D (`#[serde(default)]`), and the
+  card shows a `3D` tag. Tripwires:
+  `a_preset_carries_the_3d_relative_motion_flag`, plus the frontend
+  `the preset editor carries the 3D relative-motion flag`.
 
 ### Changed
 

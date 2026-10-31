@@ -1,5 +1,42 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+const here = dirname(fileURLToPath(import.meta.url));
+
+function region(src, start, end) {
+  const from = src.indexOf(start);
+  assert.notEqual(from, -1, `\`${start}\` must exist`);
+  const to = src.indexOf(end, from);
+  assert.notEqual(to, -1, `\`${end}\` must follow \`${start}\``);
+  return src.slice(from, to);
+}
+
+test("the preset editor carries the 3D relative-motion flag", () => {
+  // The backend applies `jitter_relative_3d` from the preset, so the editor
+  // must both render the control and read it back: a missing read drops the
+  // user's choice on every save, a missing fill silently resets a stored one.
+  const html = readFileSync(join(here, "../../src/index.html"), "utf8");
+  const js = readFileSync(join(here, "../../src/main.js"), "utf8");
+
+  assert.match(
+    html,
+    /<input type="checkbox" id="presetJitter3d">/,
+    "the preset editor needs the 3D toggle"
+  );
+  const read = region(js, "function readPresetModalEngine()", "// ── GROUP SNAPSHOT READERS");
+  assert.ok(
+    read.includes('presetEl("presetJitter3d")'),
+    "the editor must read the 3D toggle into the saved record"
+  );
+  const fill = region(js, "function populatePresetModalEngine(", "function openPresetEditModal");
+  assert.ok(
+    fill.includes('setPresetModalChecked("presetJitter3d"'),
+    "opening the editor must show the preset's 3D value"
+  );
+});
 
 test("Level 1: 3D Jitter UI dependency logic & state preservation", () => {
   // Mock DOM elements and config

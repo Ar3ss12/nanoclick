@@ -1438,6 +1438,11 @@ impl ClickScheduler {
             .store(preset.repeat_interval_ms, Ordering::Relaxed);
         self.jitter_radius_px
             .store(preset.jitter_radius_px, Ordering::Relaxed);
+        // 3D relative motion is an engine field, so a preset that captures the
+        // engine owns it: applying a 2D preset must clear it, not inherit the
+        // previous run's value.
+        self.jitter_relative_3d
+            .store(preset.jitter_relative_3d, Ordering::Relaxed);
         // Run-scoped timers: a preset apply ALWAYS arms them (this is the run's
         // own start, not a background save re-applying the page — the
         // mid-run-disarm guard lives in `set_config`, not here).
@@ -3999,6 +4004,61 @@ mod hotkey_stop_path_tests {
         assert!(
             scheduler.is_active(),
             "a double-fired preset hotkey must not stop the run it just started"
+        );
+    }
+
+    #[test]
+    fn a_preset_carries_the_3d_relative_motion_flag() {
+        // The dashboard owns a "3D games: relative motion" toggle, so a preset
+        // that captures the engine must carry it: the store keeps the value, an
+        // apply arms it, and a 2D preset clears it instead of inheriting the
+        // previous run's flag.
+        let scheduler = ClickScheduler::new();
+        let mut preset = crate::config_manager::PresetItem {
+            id: "preset_3d".to_string(),
+            target_cps: 10.0,
+            position_mode: "cursor".to_string(),
+            jitter_radius_px: 6,
+            jitter_relative_3d: true,
+            ..Default::default()
+        };
+        assert!(
+            preset.scope.engine,
+            "the fixture must capture the engine group this test applies"
+        );
+        scheduler.apply_preset_fields_to_scheduler(&preset);
+        assert!(
+            scheduler.get_config().jitter_relative_3d,
+            "applying a 3D preset must arm relative motion"
+        );
+
+        preset.jitter_relative_3d = false;
+        scheduler.apply_preset_fields_to_scheduler(&preset);
+        assert!(
+            !scheduler.get_config().jitter_relative_3d,
+            "a 2D preset must clear the flag instead of inheriting it"
+        );
+
+        // A record written before the field existed is a 2D preset; a true
+        // value survives the store's JSON round-trip.
+        preset.jitter_relative_3d = true;
+        let mut record = serde_json::to_value(&preset).expect("a preset serializes");
+        record
+            .as_object_mut()
+            .expect("a preset is a JSON object")
+            .remove("jitter_relative_3d");
+        let legacy: crate::config_manager::PresetItem =
+            serde_json::from_value(record).expect("legacy records decode");
+        assert!(
+            !legacy.jitter_relative_3d,
+            "a preset from a build without the field reads as 2D"
+        );
+        let json = serde_json::to_string(&preset).expect("a preset serializes");
+        let back: crate::config_manager::PresetItem =
+            serde_json::from_str(&json).expect("our own record decodes");
+        assert!(
+            back.jitter_relative_3d,
+            "the flag must ride the preset store"
         );
     }
 

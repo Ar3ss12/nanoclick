@@ -572,6 +572,11 @@ pub struct PresetItem {
     pub hold_interval_ms: u64,
     #[serde(default = "default_3")]
     pub jitter_radius_px: u32,
+    /// 3D jitter: relative `MOUSEEVENTF_MOVE` in Cursor mode instead of an
+    /// absolute `SetCursorPos` (see `EngineSettings::jitter_relative_3d`).
+    /// Records written before the field existed read as 2D.
+    #[serde(default)]
+    pub jitter_relative_3d: bool,
     #[serde(default = "default_outlier_prob")]
     pub outlier_prob: f64,
     #[serde(default = "default_technique")]
@@ -663,6 +668,7 @@ impl Default for PresetItem {
             hold_duration_ms: default_500(),
             hold_interval_ms: default_1000(),
             jitter_radius_px: default_3(),
+            jitter_relative_3d: false,
             outlier_prob: default_outlier_prob(),
             technique: default_technique(),
             repeat_mode: default_repeat_mode(),
@@ -713,6 +719,7 @@ pub(crate) fn default_presets() -> Vec<PresetItem> {
             hold_duration_ms: 500,
             hold_interval_ms: 1000,
             jitter_radius_px: 0,
+            jitter_relative_3d: false,
             outlier_prob: default_outlier_prob(),
             technique: default_technique(),
             repeat_mode: "unlimited".into(),
@@ -750,6 +757,7 @@ pub(crate) fn default_presets() -> Vec<PresetItem> {
             hold_duration_ms: 500,
             hold_interval_ms: 1000,
             jitter_radius_px: 0,
+            jitter_relative_3d: false,
             outlier_prob: default_outlier_prob(),
             technique: default_technique(),
             repeat_mode: "unlimited".into(),
@@ -787,6 +795,7 @@ pub(crate) fn default_presets() -> Vec<PresetItem> {
             hold_duration_ms: 500,
             hold_interval_ms: 1000,
             jitter_radius_px: 0,
+            jitter_relative_3d: false,
             outlier_prob: default_outlier_prob(),
             technique: default_technique(),
             repeat_mode: "unlimited".into(),
@@ -824,6 +833,7 @@ pub(crate) fn default_presets() -> Vec<PresetItem> {
             hold_duration_ms: 500,
             hold_interval_ms: 1000,
             jitter_radius_px: 0,
+            jitter_relative_3d: false,
             outlier_prob: default_outlier_prob(),
             technique: default_technique(),
             repeat_mode: "unlimited".into(),
