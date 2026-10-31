@@ -233,16 +233,6 @@ input, textarea, [contenteditable="true"] {
   font-weight: 500;
 }
 
-.badge-beta {
-  background: var(--purple);
-  color: #fff;
-  font-size: 10px;
-  font-weight: 700;
-  padding: 2px 7px;
-  border-radius: 4px;
-  letter-spacing: 0.5px;
-}
-
 .header-sub {
   font-size: 11px;
   color: var(--text-dim);

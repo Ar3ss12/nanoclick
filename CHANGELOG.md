@@ -109,6 +109,10 @@ only the lib), abort-shaped build (`ci-abort`), JS gate 10/10 scripts.
 
 ### Changed
 
+- **The `BETA` badge is gone.** The header and the About panel show the
+  version string only: the label described a pre-release line, and this build
+  ships as a published release. The `.badge-beta` rule went with it, since
+  nothing else used it.
 - **A watched rollback is timed by the node that owns it.** The 1 Hz watcher
   calls `snubber::watchdog::poll_rollback(&node)` and the release latch reads
   `phase.budget_ms`, so no observer holds a copy of `ROLLBACK_BUDGET_MS` that
