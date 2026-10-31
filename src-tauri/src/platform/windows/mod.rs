@@ -1092,6 +1092,18 @@ pub fn hotkey_diag_dump() -> Vec<String> {
         "hook_reinstalls_total={}",
         HOOK_REINSTALLS.load(Ordering::Relaxed)
     ));
+    out.push(format!(
+        "hook_reinstall_requests_total={}",
+        HOOK_REINSTALL_REQUESTS.load(Ordering::Relaxed)
+    ));
+    out.push(format!(
+        "hook_reinstall_unserviced_total={}",
+        HOOK_REINSTALL_UNSERVICED.load(Ordering::Relaxed)
+    ));
+    out.push(format!(
+        "hook_reinstall_pending={}",
+        HOOK_REINSTALL.load(Ordering::Relaxed)
+    ));
     out
 }
 
@@ -1104,6 +1116,14 @@ static GLOBAL_HOTKEY_THREAD_ID: AtomicU32 = AtomicU32::new(0);
 static HOOK_REINSTALL: AtomicBool = AtomicBool::new(false);
 /// Lifetime count of re-installs, surfaced in `hotkey_diag_dump`.
 static HOOK_REINSTALLS: AtomicU64 = AtomicU64::new(0);
+/// Lifetime count of re-install REQUESTS that reached the hook thread. A
+/// request is not a re-install: it only sets [`HOOK_REINSTALL`] and posts a
+/// wake-up, which a thread wedged inside an event handler never reads.
+static HOOK_REINSTALL_REQUESTS: AtomicU64 = AtomicU64::new(0);
+/// Lifetime count of threat marks that found the previous request still
+/// pending — requested, never serviced. Field evidence 2026-10-31: 17
+/// requests, `hook_reinstalls_total` unchanged, hotkeys deaf for 34.5 s.
+static HOOK_REINSTALL_UNSERVICED: AtomicU64 = AtomicU64::new(0);
 
 /// TID of the LL-hook thread (0 when the listener is not running). The
 /// maintenance tick opens this thread to classify a frozen pump by ITS CPU.
@@ -1122,6 +1142,7 @@ pub(crate) fn request_hook_reinstall() -> bool {
         return false;
     }
     HOOK_REINSTALL.store(true, Ordering::Release);
+    HOOK_REINSTALL_REQUESTS.fetch_add(1, Ordering::Relaxed);
     let tid = GLOBAL_HOTKEY_THREAD_ID.load(Ordering::Acquire);
     if tid != 0 {
         unsafe {
@@ -1129,6 +1150,27 @@ pub(crate) fn request_hook_reinstall() -> bool {
         }
     }
     true
+}
+
+/// Is a re-install request still waiting for the hook thread?
+pub(crate) fn hook_reinstall_pending() -> bool {
+    HOOK_REINSTALL.load(Ordering::Acquire)
+}
+
+/// Lifetime re-install requests posted to the hook thread.
+pub(crate) fn hook_reinstall_requests() -> u64 {
+    HOOK_REINSTALL_REQUESTS.load(Ordering::Relaxed)
+}
+
+/// Lifetime re-installs actually run on the hook thread.
+pub(crate) fn hook_reinstalls_serviced() -> u64 {
+    HOOK_REINSTALLS.load(Ordering::Relaxed)
+}
+
+/// Record that a request seen at a threat mark had still not been serviced.
+/// Returns the new running total.
+pub(crate) fn note_unserviced_reinstall() -> u64 {
+    HOOK_REINSTALL_UNSERVICED.fetch_add(1, Ordering::Relaxed) + 1
 }
 
 /// Classification of a key-down for the hook loop.

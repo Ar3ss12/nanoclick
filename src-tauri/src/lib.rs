@@ -472,7 +472,7 @@ fn toggle_autoclicker(app_handle: AppHandle, state: State<'_, AppState>) -> bool
             _ if active => "RUNNING",
             _ => "IDLE",
         };
-        state.scheduler.emit_status_now(&app_handle, text);
+        state.scheduler.emit_status_now(&app_handle, active, text);
     }
     active
 }
@@ -902,13 +902,11 @@ pub(crate) fn restore_main_window(app: &AppHandle) {
         persist_window_visibility(app, true);
         show_secondary_windows(app);
         if let Some(state) = app.try_state::<AppState>() {
+            let active = state.scheduler.is_active();
             state.scheduler.emit_status_now(
                 app,
-                if state.scheduler.is_active() {
-                    "RUNNING"
-                } else {
-                    "IDLE"
-                },
+                active,
+                if active { "RUNNING" } else { "IDLE" },
             );
         }
         debug_log_internal("info", "[Tray] main window restored");
@@ -1007,7 +1005,7 @@ pub(crate) fn toggle_clicking_from_tray(app: &AppHandle) {
     // even exist (deep sleep), so the state has to leave the backend here.
     state
         .scheduler
-        .emit_status_now(app, if active { "RUNNING" } else { "IDLE" });
+        .emit_status_now(app, active, if active { "RUNNING" } else { "IDLE" });
     if !matches!(
         outcome,
         scheduler::ToggleOutcome::Start | scheduler::ToggleOutcome::Stop

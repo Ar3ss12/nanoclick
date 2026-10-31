@@ -893,12 +893,35 @@ fn maintenance_loop() {
             if idle_ms > HOOK_PUMP_THREAT_MS && now.saturating_sub(last_reinstall_ms) >= HOOK_PUMP_THREAT_MS {
                 last_reinstall_ms = now;
                 hotkey_node().report(snubber::FaultKind::Timeout, 1, 0);
+                // A request is SERVICED only when the hook thread leaves its
+                // pump and re-installs on that same thread.
+                // `request_hook_reinstall` can do no more than set the flag and
+                // post a wake-up, and a thread wedged inside an event handler
+                // never reaches the loop condition. A request still pending at
+                // the NEXT threat mark was therefore made and never serviced
+                // (field log 2026-10-31: 17 requests, `hook_reinstalls_total`
+                // unchanged, hotkeys deaf for 34.5 s).
+                if hook_reinstall_pending() {
+                    let unserviced = note_unserviced_reinstall();
+                    record_tape_event("hotkey_hook", TAPE_HOOK_REINSTALL_UNSERVICED);
+                    crate::debug_log_internal(
+                        "error",
+                        &format!(
+                            "[Stability] hotkey_hook reinstall not serviced {idle_ms}ms after the request \
+                             (unserviced={unserviced}, requests={}, serviced={})",
+                            hook_reinstall_requests(),
+                            hook_reinstalls_serviced()
+                        ),
+                    );
+                }
                 if request_hook_reinstall() {
                     record_tape_event("hotkey_hook", TAPE_HOOK_REINSTALL);
                     crate::debug_log_internal(
                         "error",
                         &format!(
-                            "[Stability] hotkey_hook pump frozen {idle_ms}ms — re-registering LL hooks"
+                            "[Stability] hotkey_hook pump frozen {idle_ms}ms — re-registering LL hooks \
+                             (requests={})",
+                            hook_reinstall_requests()
                         ),
                     );
                 }
@@ -1829,6 +1852,47 @@ fn request_hook_reinstall() -> bool {
     false
 }
 
+/// Is a re-install request still waiting for the hook thread?
+#[cfg(target_os = "windows")]
+fn hook_reinstall_pending() -> bool {
+    crate::platform::windows::hook_reinstall_pending()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn hook_reinstall_pending() -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn hook_reinstall_requests() -> u64 {
+    crate::platform::windows::hook_reinstall_requests()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn hook_reinstall_requests() -> u64 {
+    0
+}
+
+#[cfg(target_os = "windows")]
+fn hook_reinstalls_serviced() -> u64 {
+    crate::platform::windows::hook_reinstalls_serviced()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn hook_reinstalls_serviced() -> u64 {
+    0
+}
+
+#[cfg(target_os = "windows")]
+fn note_unserviced_reinstall() -> u64 {
+    crate::platform::windows::note_unserviced_reinstall()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn note_unserviced_reinstall() -> u64 {
+    0
+}
+
 // ── 3. Task steering (TaskConduit / TaskHandle) ─────────────────────────────
 
 /// Live telemetry published by the click worker through the steering conduit.
@@ -2111,6 +2175,8 @@ pub const TAPE_HARDWARE_RELEASE: u32 = 1;
 pub const TAPE_DESKTOP_LOST: u32 = 2;
 /// The hook pump froze and the LL hooks were re-registered.
 pub const TAPE_HOOK_REINSTALL: u32 = 3;
+/// A re-install was requested and the hook thread never serviced it.
+pub const TAPE_HOOK_REINSTALL_UNSERVICED: u32 = 4;
 
 type NodeTape = snubber::FlightTape<{ snubber::SNAPSHOT_TAPE_CAP }>;
 
@@ -2759,6 +2825,79 @@ mod tests {
         assert!(
             body[..end].contains("snapshot_pairs()"),
             "the exit triage must use the tape-carrying snapshots"
+        );
+    }
+
+    #[test]
+    fn test_a_pending_reinstall_is_named_apart_from_a_serviced_one() {
+        // Requesting is not servicing: the tick can only set a flag and post a
+        // wake-up, while a hook thread wedged inside an event handler never
+        // reads it. The field log 2026-10-31 showed 17 requests and an
+        // unchanged `hook_reinstalls_total` — a silent distinction. Pin both
+        // halves: the tick names the unserviced case, and the diag dump
+        // carries all three counters plus the pending flag.
+        let src = include_str!("stability.rs");
+        let start = src.find("// ── Pump threat").expect("pump threat block");
+        let end = src[start..]
+            .find("// ── Input desktop")
+            .expect("end of pump threat block");
+        let block = &src[start..start + end];
+        let pending_check = block
+            .find("if hook_reinstall_pending()")
+            .expect("the tick must test whether the previous request was serviced");
+        let request = block
+            .find("if request_hook_reinstall()")
+            .expect("the tick must still request the re-install");
+        assert!(
+            pending_check < request,
+            "the pending test must run BEFORE a new request is posted, or every \
+             request looks serviced"
+        );
+        assert!(
+            block.contains("not serviced"),
+            "an unserviced re-install must say so in the log"
+        );
+        assert!(
+            block.contains("note_unserviced_reinstall()"),
+            "an unserviced re-install must be counted"
+        );
+        assert!(
+            block.contains("TAPE_HOOK_REINSTALL_UNSERVICED"),
+            "the cold frame must distinguish the unserviced event"
+        );
+        assert_eq!(TAPE_HOOK_REINSTALL_UNSERVICED, 4);
+        assert_ne!(TAPE_HOOK_REINSTALL, TAPE_HOOK_REINSTALL_UNSERVICED);
+
+        let platform = include_str!("platform/windows/mod.rs");
+        for line in [
+            "hook_reinstall_requests_total=",
+            "hook_reinstall_unserviced_total=",
+            "hook_reinstall_pending=",
+            "hook_reinstalls_total=",
+        ] {
+            assert!(
+                platform.contains(line),
+                "hotkey_diag_dump must expose `{line}`"
+            );
+        }
+        let req_start = platform
+            .find("pub(crate) fn request_hook_reinstall")
+            .expect("request_hook_reinstall exists");
+        let req_end = platform[req_start..]
+            .find("pub(crate) fn hook_reinstall_pending")
+            .expect("end of request_hook_reinstall");
+        assert!(
+            platform[req_start..req_start + req_end]
+                .contains("HOOK_REINSTALL_REQUESTS.fetch_add"),
+            "every posted request must be counted, or requests and serviced \
+             counts cannot be compared"
+        );
+        let note_start = platform
+            .find("pub(crate) fn note_unserviced_reinstall")
+            .expect("note_unserviced_reinstall exists");
+        assert!(
+            platform[note_start..].contains("HOOK_REINSTALL_UNSERVICED.fetch_add"),
+            "the unserviced counter must advance on the reaction edge"
         );
     }
 

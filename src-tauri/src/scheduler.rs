@@ -935,22 +935,28 @@ impl ClickScheduler {
         !self.typing_guard.hotkeys_locked()
     }
 
-    /// Single choke point for the whole stop side-effect bundle.
+    /// Single choke point for the stop mechanics: the steering Cancel, the
+    /// stop-event signal, the hardware hand-back, the handle rotation and the
+    /// log line. Telemetry observes `active` itself (the 66 ms loop polls the
+    /// shared flag, no separate worker flag exists); the click overlay is lazy
+    /// and needs no toggle here.
     ///
-    /// Every path that ends a run — the UI button, the hotkey, the typing
-    /// interlock, the auto-stop timers, the preset engine — funnels through
-    /// here: the stop-event signal, the steering Cancel, the log line and the
-    /// IDLE emit. Telemetry observes `active` itself (the 66 ms loop polls
-    /// the shared flag, no separate worker flag exists); the click overlay
-    /// is lazy and needs no toggle here. There is no silent twin that drops
-    /// the flag but sleeps on the event handle or the log line.
+    /// The IDLE status emit is deliberately NOT part of this bundle. Every
+    /// caller runs it while holding `self.state`, and `emit_status_now` used
+    /// to read `is_active()` — which locks that same mutex. A non-reentrant
+    /// `std::sync::Mutex` is not re-lockable by its own thread, so the stop
+    /// froze the caller forever (field log 2026-10-31: hook pulse stalled
+    /// `SleepBlocked` → `DeadlockStall`, cpu_delta 0 ms for 34.5 s, then the
+    /// process was killed with the clean marker unset). Callers emit their
+    /// status AFTER dropping the guard; `emit_status_now` takes the active
+    /// flag as an argument and touches no scheduler lock.
     ///
     /// Idempotent: call it twice and the second call only re-signals the
     /// (already rotated) handle. Never call it from inside the worker's own
     /// self-exit: the worker already owns its `MouseHoldGuard` on the stack
     /// and must NOT rotate the handle its successor polls — see the
     /// `worker_self_stop` note below instead.
-    fn finish_stop(&self, reason: &str, app_handle: Option<&AppHandle>) {
+    fn finish_stop(&self, reason: &str) {
         // A stop is also the acknowledgement of a wedged run: the next Start
         // needs a fresh worker, so the latch must not survive it.
         crate::stability::clear_engine_stuck();
@@ -970,9 +976,6 @@ impl ClickScheduler {
         // stale signal can never kill the next run.
         *self.stop_event.safe_lock() = platform::create_stop_event();
         report_stop(reason);
-        if let Some(app) = app_handle {
-            self.emit_status_now(app, "IDLE");
-        }
     }
 
     // Worker self-exit note: the run ended on its own (timer/click cap /
@@ -1067,7 +1070,7 @@ impl ClickScheduler {
             };
         }
 
-        if active {
+        let outcome = if active {
             // Invariant gate (USER_GUIDE Level 2): validate CPS/coords BEFORE
             // arming hardware or spawning the worker. A violation is reported
             // as PoisonedPayload (diagnostic ring buffer, metric, no guard
@@ -1120,7 +1123,7 @@ impl ClickScheduler {
             let moved = crate::stability::click_to_idle(from, || {}, || {
                 self.active.store(false, Ordering::Release);
                 *self.current_running_preset.safe_lock() = None;
-                self.finish_stop("ui_or_hotkey", app_handle);
+                self.finish_stop("ui_or_hotkey");
                 Ok::<(), &'static str>(())
             });
             match moved {
@@ -1134,12 +1137,22 @@ impl ClickScheduler {
                     *state_guard = ClickerState::Idle;
                     self.active.store(false, Ordering::Release);
                     *self.current_running_preset.safe_lock() = None;
-                    self.finish_stop("ui_or_hotkey", app_handle);
+                    self.finish_stop("ui_or_hotkey");
                     toggle_diag_push(format!("[Transition] Stop forced past ledger: {e:?}"));
                 }
             }
             ToggleOutcome::Stop
+        };
+        // The guard leaves before the emit: `emit_status_now` must never run
+        // under `self.state` (see `finish_stop`). A start reports itself from
+        // the caller; only the stop transition reports IDLE here.
+        drop(state_guard);
+        if outcome == ToggleOutcome::Stop {
+            if let Some(app) = app_handle {
+                self.emit_status_now(app, false, "IDLE");
+            }
         }
+        outcome
     }
 
     /// Stop the run because the input desktop is gone (UAC prompt, Win+L).
@@ -1221,7 +1234,7 @@ impl ClickScheduler {
             let res = crate::stability::click_to_idle(from, || {}, || {
                 self.active.store(false, Ordering::Release);
                 *self.current_running_preset.safe_lock() = None;
-                self.finish_stop("emergency_stop", app_handle);
+                self.finish_stop("emergency_stop");
                 Ok::<(), &'static str>(())
             });
             if res.is_ok() {
@@ -1231,12 +1244,14 @@ impl ClickScheduler {
                 *state_guard = ClickerState::Idle;
                 self.active.store(false, Ordering::Release);
                 *self.current_running_preset.safe_lock() = None;
-                self.finish_stop("emergency_stop", app_handle);
+                self.finish_stop("emergency_stop");
             }
         }
+        // Status leaves only after the guard is gone (`finish_stop` doc).
+        drop(state_guard);
 
         if let Some(app) = app_handle {
-            self.emit_status_now(app, "IDLE");
+            self.emit_status_now(app, false, "IDLE");
             let _ = app.emit("emergency-stopped", ());
         }
     }
@@ -1296,12 +1311,17 @@ impl ClickScheduler {
                 let from = *state_guard;
                 let moved = crate::stability::click_to_paused(from, || {}, || {
                     self.active.store(false, Ordering::Release);
-                    self.finish_stop(reason, app_handle);
+                    self.finish_stop(reason);
                     Ok::<(), &'static str>(())
                 });
                 match moved {
                     Ok(()) => {
                         *state_guard = ClickerState::Paused;
+                        // Emit after the guard is released (`finish_stop` doc).
+                        drop(state_guard);
+                        if let Some(app) = app_handle {
+                            self.emit_status_now(app, false, "IDLE");
+                        }
                         crate::debug_log_internal("info", "[Gateway] Paused");
                     }
                     // `Idle -> Paused` is not an edge: pausing an idle clicker
@@ -1492,7 +1512,7 @@ impl ClickScheduler {
                 self.set_active(false, app_handle);
                 *self.current_running_preset.safe_lock() = None;
                 if let Some(app) = app_handle {
-                    self.emit_status_now(app, "IDLE");
+                    self.emit_status_now(app, false, "IDLE");
                 }
                 return ToggleOutcome::Stop;
             }
@@ -1533,7 +1553,7 @@ impl ClickScheduler {
                 self.spawn_worker(app_handle.cloned());
 
                 if let Some(app) = app_handle {
-                    self.emit_status_now(app, "RUNNING");
+                    self.emit_status_now(app, true, "RUNNING");
                     let _ = app.emit("preset-activated", preset_id);
                 }
                 return ToggleOutcome::Start;
@@ -1571,7 +1591,7 @@ impl ClickScheduler {
                 let res = self.set_active(true, app_handle);
                 if res == ToggleOutcome::Start {
                     if let Some(app) = app_handle {
-                        self.emit_status_now(app, "RUNNING");
+                        self.emit_status_now(app, true, "RUNNING");
                         let _ = app.emit("preset-activated", preset_id);
                     }
                 }
@@ -1696,7 +1716,11 @@ impl ClickScheduler {
     /// either. Same targets and same fire-and-forget contract as the worker
     /// (`let _ =`, never a broadcast): the Zero-Jitter rule still holds, because
     /// this is called from the UI/tray path, never from the click loop.
-    pub(crate) fn emit_status_now(&self, app: &AppHandle, status_text: &str) {
+    ///
+    /// `active` is passed in on purpose: reading it here would take
+    /// `self.state`, and the stop path used to call this while already
+    /// holding that same non-reentrant mutex.
+    pub(crate) fn emit_status_now(&self, app: &AppHandle, active: bool, status_text: &str) {
         let mode = if self.is_autoclicker_mode() {
             "autoclicker"
         } else {
@@ -1708,16 +1732,19 @@ impl ClickScheduler {
             mode,
             f64::from_bits(self.cps_raw.load(Ordering::Relaxed)),
             status_text,
-            self.is_active(),
+            active,
         );
     }
     /// Sink twin of `emit_status_now` (Stage B/C): the daemon path.
     /// Same snapshot, same order (hud first, then status) — parity is pinned
-    /// by `status_sink_twin_matches_tauri_payload` below.
+    /// by `status_sink_twin_matches_tauri_payload` below. Takes `active` for
+    /// the same reason: the caller owns the state read, the emitter owns no
+    /// scheduler lock.
     #[allow(dead_code)]
     pub(crate) fn emit_status_sink(
         &self,
         sink: &dyn crate::status_sink::StatusSink,
+        active: bool,
         status_text: &str,
     ) {
         let mode = if self.is_autoclicker_mode() {
@@ -1731,7 +1758,7 @@ impl ClickScheduler {
             mode,
             f64::from_bits(self.cps_raw.load(Ordering::Relaxed)),
             status_text,
-            self.is_active(),
+            active,
         );
     }
 
@@ -4036,6 +4063,112 @@ mod hotkey_stop_path_tests {
         );
     }
 
+    /// A stop runs its mechanics under `self.state` — a non-reentrant
+    /// `std::sync::Mutex`. The IDLE status emit used to read `is_active()`
+    /// from inside that guard and re-locked the very same mutex, freezing the
+    /// calling thread forever (field log 2026-10-31: hotkey pump pulse stalled
+    /// `SleepBlocked`, cpu_delta 0 ms for 34.5 s, 17 re-install requests and
+    /// none serviced, process killed with the clean marker unset).
+    ///
+    /// A behavioural test cannot pin this: the emitter needs a real
+    /// `AppHandle` (Wry, not generic) and the stop sites take `Option<&AppHandle>`,
+    /// so every existing stop test passes `None` and the emit — the only step
+    /// that deadlocked — never runs. The guarantee is therefore structural and
+    /// the tripwire reads the source.
+    #[test]
+    fn test_stop_status_emit_never_runs_under_the_state_lock() {
+        let src = include_str!("scheduler.rs");
+
+        // Anti-vacuity: a rename must break the scan loudly instead of
+        // silently passing on empty slices.
+        assert!(
+            src.matches("self.state.safe_lock()").count() >= 3,
+            "state lock sites are gone — this tripwire would be vacuous"
+        );
+        assert!(
+            src.contains("self.emit_status_now("),
+            "no emit call sites found — this tripwire would be vacuous"
+        );
+
+        fn region<'a>(src: &'a str, sig: &str, end: &str) -> &'a str {
+            let start = src
+                .find(sig)
+                .unwrap_or_else(|| panic!("`{sig}` not found"));
+            let end_rel = src[start..]
+                .find(end)
+                .unwrap_or_else(|| panic!("end landmark `{end}` not found after `{sig}`"));
+            &src[start..start + end_rel]
+        }
+
+        // 1. The stop choke point carries no emit at all.
+        let finish = region(src, "fn finish_stop", "// Worker self-exit note");
+        assert!(
+            finish.contains("report_stop(reason)"),
+            "finish_stop body not found"
+        );
+        assert!(
+            !finish.contains("emit_status_now"),
+            "finish_stop must not emit: every caller holds `self.state`, and the \
+             emit used to re-lock it from the same thread"
+        );
+
+        // 2. The emitter takes the flag by value and reads no scheduler lock.
+        let emitter = region(
+            src,
+            "pub(crate) fn emit_status_now",
+            "/// Sink twin of `emit_status_now`",
+        );
+        assert!(
+            emitter.contains("status_and_hud_emit("),
+            "emit_status_now body not found"
+        );
+        assert!(
+            !emitter.contains("is_active("),
+            "emit_status_now must take `active` as an argument, not lock `self.state`"
+        );
+        let sink = region(
+            src,
+            "pub(crate) fn emit_status_sink",
+            "fn spawn_worker",
+        );
+        assert!(
+            sink.contains("status_and_hud_sink("),
+            "emit_status_sink body not found"
+        );
+        assert!(
+            !sink.contains("is_active("),
+            "emit_status_sink must take `active` as an argument too"
+        );
+
+        // 3. Every stop site releases the guard before it reports IDLE.
+        for (sig, end) in [
+            ("pub fn set_active(", "/// Stop the run because the input desktop is gone"),
+            ("pub fn emergency_stop(", "/// Dispatch one command arriving"),
+            ("pub fn dispatch_gateway_cmd(", "/// Start the background gateway host"),
+        ] {
+            let body = region(src, sig, end);
+            let guard = body.find("let mut state_guard = self.state.safe_lock();")
+                .unwrap_or_else(|| panic!("{sig}: state guard not found"));
+            let release = body
+                .find("drop(state_guard);")
+                .unwrap_or_else(|| panic!("{sig}: the state guard is never released explicitly"));
+            assert!(
+                release > guard,
+                "{sig}: the guard must be released after it is taken"
+            );
+            for (pos, _) in body.match_indices("self.emit_status_now(") {
+                assert!(
+                    pos > release,
+                    "{sig}: emit_status_now runs while `self.state` is still held"
+                );
+            }
+            assert!(
+                body.contains("emit_status_now(app, false, \"IDLE\")"),
+                "{sig}: a stop must report the state it left behind (IDLE/false)"
+            );
+        }
+    }
+
     /// Stability interlock, both entry points in ONE test: a latched
     /// `engine_stuck` refuses Start (hotkey AND preset), Stop is never
     /// refused and ACKNOWLEDGES the wedged run by clearing the latch, so the
@@ -4516,7 +4649,7 @@ mod hotkey_stop_path_tests {
         // path would — hud first, then status, same clicks/mode/cps/text.
         let scheduler = ClickScheduler::new();
         let sink = crate::status_sink::VecSink::default();
-        scheduler.emit_status_sink(&sink, "IDLE");
+        scheduler.emit_status_sink(&sink, false, "IDLE");
         assert_eq!(sink.count(crate::ipc::EVENT_HUD_CLICKS), 1);
         assert_eq!(sink.count(crate::ipc::EVENT_STATUS_UPDATE), 1);
         let guard = sink.frames.lock().unwrap();
@@ -4529,6 +4662,8 @@ mod hotkey_stop_path_tests {
             serde_json::Value::from(scheduler.get_clicks_done())
         );
         assert_eq!(status["status_text"], serde_json::Value::from("IDLE"));
+        // The flag is an argument, not a state read: it must reach the payload.
+        assert_eq!(status["active"], serde_json::Value::from(false));
     }
 
     // ── 3D Game Jitter Tests ──────────────────────────────────────────

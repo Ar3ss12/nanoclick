@@ -11,7 +11,7 @@ watch, the cold frame learns WHAT happened, a refused retry is spread instead
 of fixed, a slope shorter than a full window is named instead of hidden, and
 the compiler is pinned at the repository root.
 
-Suite green: **522 tests** (412 lib + 105 asset tripwires + 3 daemon handshake
+Suite green: **524 tests** (414 lib + 105 asset tripwires + 3 daemon handshake
 + 2 guardian e2e), clippy `-D warnings` over `--all-targets` (every target, not
 only the lib), abort-shaped build (`ci-abort`), JS gate 10/10 scripts.
 
@@ -121,6 +121,29 @@ only the lib), abort-shaped build (`ci-abort`), JS gate 10/10 scripts.
 
 ### Fixed
 
+- **Stop self-deadlock**: `set_active(false, Some(app))` held `self.state`
+  while `finish_stop` emitted IDLE through `emit_status_now`, which read
+  `is_active()` and re-locked the same non-reentrant `std::sync::Mutex`. The
+  stop never returned: the hook thread froze mid-pump (`SleepBlocked`,
+  `DeadlockStall`, `cpu_delta` 0 ms for 34.5 s in the 2026-10-31 field log),
+  `get_status` wedged the WebView thread, and 17 re-install requests were
+  posted with `hook_reinstalls_total` unchanged — none serviced. A double bind
+  press under the user's `hotkey_debounce_ms = 5` reproduced it (start, then
+  toggle-stop). The IDLE emit now runs after `drop(state_guard)` and
+  `emit_status_now` takes `active` by value. Tripwire:
+  `test_stop_status_emit_never_runs_under_the_state_lock` (negative proof:
+  `self.is_active()` planted in the emitter and an emit planted before the
+  release — both failed the gate, then were reverted).
+- **Reinstall requested vs serviced**: the maintenance tick checks
+  `hook_reinstall_pending()` before requesting again and logs
+  `reinstall not serviced <idle>ms after the request` with `unserviced=`,
+  `requests=` and `serviced=`; `hotkey_diag_dump` carries
+  `hook_reinstall_requests_total=`, `hook_reinstall_unserviced_total=` and
+  `hook_reinstall_pending=`, and the cold tape gains
+  `TAPE_HOOK_REINSTALL_UNSERVICED` (code 4). A hook thread blocked inside an
+  event handler never leaves its pump, so a request could not be told apart
+  from a re-install. Tripwire:
+  `test_a_pending_reinstall_is_named_apart_from_a_serviced_one`.
 - `HANDLE_LEAK` could be cleared by a failed handle probe (`None` took the
   "not rising" branch), while the window still said `Rising`.
 - `ErasedGuard` type annotations at `core/executor.rs` and `scheduler.rs`
