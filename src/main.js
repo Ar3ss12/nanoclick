@@ -5260,7 +5260,6 @@ function showOnboardingMatrix() {
 
   const startBtn = document.getElementById("onboardingBtn");
   const startBtnText = document.getElementById("onboardingBtnText");
-  const consentCb = document.getElementById("onboardingConsentCheckbox");
   if (startBtn) {
     startBtn.disabled = true;
     onboardingCountdown = 2;
@@ -5277,9 +5276,7 @@ function showOnboardingMatrix() {
       } else {
         clearInterval(onboardingTimer);
         onboardingTimer = null;
-        if (consentCb ? consentCb.checked : true) {
-          startBtn.disabled = false;
-        }
+        startBtn.disabled = false;
         if (startBtnText) {
           startBtnText.textContent = getI18nText("onboarding_btn_start", {}, "🚀 ПОЧАТИ РОБОТУ");
         }
@@ -5339,31 +5336,7 @@ function wireOnboardingModal() {
     });
   }
 
-  const consentCb = document.getElementById("onboardingConsentCheckbox");
   const startBtn = document.getElementById("onboardingBtn");
-  if (consentCb && !consentCb._wired) {
-    consentCb._wired = true;
-    consentCb.addEventListener("change", () => {
-      if (startBtn) {
-        startBtn.disabled = !consentCb.checked || (onboardingCountdown > 0);
-      }
-    });
-  }
-
-  const licenseLink = document.getElementById("onboardingLicenseLink");
-  if (licenseLink && !licenseLink._wired) {
-    licenseLink._wired = true;
-    licenseLink.addEventListener("click", async () => {
-      try {
-        if (window.__TAURI__?.core?.invoke) {
-          await window.__TAURI__.core.invoke("open_external_url", { url: "https://github.com/Ar3ss12/nanoclick/blob/main/LICENSE.md" });
-          return;
-        }
-      } catch (_) {}
-      try { window.open("https://github.com/Ar3ss12/nanoclick/blob/main/LICENSE.md", "_blank", "noopener"); } catch (_) {}
-    });
-  }
-
   if (startBtn && !startBtn._wired) {
     startBtn._wired = true;
     startBtn.addEventListener("click", async () => {

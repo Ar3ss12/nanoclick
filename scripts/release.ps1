@@ -132,7 +132,7 @@ Welcome to NanoClick $Tag.
 - **Built-in Auto-Updater**: Cryptographically verified updates via Minisign.
 
 ### 📄 License
-Released under the **PolyForm Noncommercial License 1.0.0** with NanoClick Additional Terms. Free for personal gaming, streaming, and research. See [LICENSE.md](https://github.com/Ar3ss12/nanoclick/blob/main/LICENSE.md) for complete details.
+Released under the **MIT License**. Free to use, modify, and redistribute. See [LICENSE.md](https://github.com/Ar3ss12/nanoclick/blob/main/LICENSE.md) for complete details.
 
 ### 📦 Install
 Download `NanoClick_${ver}_x64-setup.exe` below (no admin rights required), or `NanoClick-portable.exe` (+ `.sig`) for a zero-install run that now updates itself in place. Existing installs update themselves through the built-in signed updater.

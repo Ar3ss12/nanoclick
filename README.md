@@ -7,7 +7,7 @@ Fast, unkillable, and built with pure Rust. No Electron, no adware, no backgroun
   <img src="https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011-0078D6?style=flat-square" alt="Platform">
   <img src="https://img.shields.io/badge/RAM_in_tray-5.3_MB-2ea44f?style=flat-square" alt="RAM">
   <img src="https://img.shields.io/badge/Installer-3.5_MB-orange?style=flat-square" alt="Size">
-  <img src="https://img.shields.io/badge/License-Noncommercial-blue?style=flat-square" alt="License">
+  <img src="https://img.shields.io/badge/License-MIT-2ea44f?style=flat-square" alt="License">
   <a href="https://github.com/Ar3ss12/nanoclick/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Ar3ss12/nanoclick/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
 </p>
 
@@ -113,8 +113,7 @@ What's new: [CHANGELOG.md](CHANGELOG.md)
 
 ## License
 
-Free for personal and non-commercial use under the **PolyForm Noncommercial License 1.0.0** ([LICENSE.md](LICENSE.md)).
-*Commercial operations and redistributing binaries for profit require a commercial license.*
+Released under the **MIT License** ([LICENSE.md](LICENSE.md)). Use it, modify it, ship it.
 
 <p align="center">
   <sub>© 2026 Ar3ss12 · Native Rust on Windows</sub>

@@ -2,6 +2,7 @@
 name = "nanoclick"
 version = "1.5.0"
 description = "NanoClick - Fast Windows Desktop Automation"
+license = "MIT"
 edition = "2021"
 
 [[bin]]

@@ -4,6 +4,19 @@ All notable changes to NanoClick. Sizes, timings and RAM figures are measured
 and carry the command that re-derives them. Releases before 1.1.1 predate this
 file.
 
+## Unreleased
+
+### Changed
+
+- **License is now MIT** (`LICENSE.md`): the PolyForm Noncommercial text and
+  its four additional sections are gone, replaced by the standard MIT grant
+  verbatim (copyright 2026 Ar3ss12). No rebranding clause, no commercial-license
+  gate for binaries.
+- **Onboarding no longer asks for license consent**: the "Legal Safe-Harbor"
+  step, its checkbox and the license link are removed from the welcome modal,
+  and the countdown now enables START ENGINE by itself. The About tab still
+  links to `LICENSE.md`, relabelled MIT.
+
 ## 1.5.0 (2026-10-31)
 
 A hardware-ownership release: one token now gates every `SendInput` path, RSS
